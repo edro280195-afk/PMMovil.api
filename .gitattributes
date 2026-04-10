@@ -1,0 +1,21 @@
+# Handle line endings automatically for files detected as text
+# and leave binary files untouched
+* text=auto
+
+# Standard patterns for text files
+*.cs text
+*.cshtml text
+*.json text
+*.xml text
+*.csproj text
+*.sln text
+*.md text
+*.http text
+
+# Images and other binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
