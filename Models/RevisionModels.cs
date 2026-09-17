@@ -2,9 +2,6 @@ using System;
 
 namespace PMMovil.Api.Models
 {
-    /// <summary>
-    /// Representa una entrada de bodega pendiente de revision
-    /// </summary>
     public class EntradaPendiente
     {
         public string CrefAgrupada { get; set; } = string.Empty;
@@ -13,18 +10,18 @@ namespace PMMovil.Api.Models
         public string dFecha { get; set; } = string.Empty;
         public int TotalFacturas { get; set; }
         public int FacturasCompletas { get; set; }
+        public int TotalPartidas { get; set; }
+        public int PartidasRevisadas { get; set; }
         public bool TodasRelacionCompleta { get; set; }
         public string? InicioRevision { get; set; }
         public string? FinRevision { get; set; }
-        /// <summary>Alguien abrió la revisión y tiene el timer corriendo (finiciorevision activo).</summary>
         public string? UsuarioRevisando { get; set; }
-        /// <summary>Alguien tomó el documento pero aún no inició el timer de revisión.</summary>
         public string? UsuarioTomoDocumento { get; set; }
+        public int? AsignPrioridad { get; set; }
+        public bool? EsAsignada { get; set; }
+        public int? IdAsignacion { get; set; }
     }
 
-    /// <summary>
-    /// Representa una factura individual dentro de una entrada
-    /// </summary>
     public class FacturaRevision
     {
         public string Cnofact { get; set; } = string.Empty;
@@ -54,26 +51,42 @@ namespace PMMovil.Api.Models
         public string UsuEdit { get; set; } = string.Empty;
     }
 
-    /// <summary>
-    /// Representa una partida o producto individual de una factura
-    /// </summary>
     public class PartidaRevision
     {
         public int IdRevdet { get; set; }
         public string Cnofact { get; set; } = string.Empty;
         public string CnoParte { get; set; } = string.Empty;
-        public string cDescripcion { get; set; } = string.Empty;
+        public string CDescripcion { get; set; } = string.Empty;
         public string Marca { get; set; } = string.Empty;
         public string Modelo { get; set; } = string.Empty;
         public string NumSer { get; set; } = string.Empty;
-        public double nCantFactura { get; set; }
-        public string cPaisOrigen { get; set; } = string.Empty;
+        public string NumLote { get; set; } = string.Empty;
+        public double NCantFactura { get; set; }
+        public double NCantOut { get; set; }
+        public string CPaisOrigen { get; set; } = string.Empty;
+        public string CptCveTmateria { get; set; } = string.Empty;
+        public string CptDescTmateria { get; set; } = string.Empty;
+        public string TipoMaterial { get; set; } = string.Empty;
         public bool Revisada { get; set; }
+        public string Obsrevpartida { get; set; } = string.Empty;
+        public string Mnotapartida { get; set; } = string.Empty;
+        public double NPeso { get; set; }
+        // Datos de clasificación que el formulario VFP muestra junto con la
+        // captura física. Se envían para que Android conserve el mismo contexto.
+        public double CantidadComercial { get; set; }
+        public string UnidadComercial { get; set; } = string.Empty;
+        public string UnidadFactura { get; set; } = string.Empty;
+        public double CantidadTarifa { get; set; }
+        public string UnidadTarifa { get; set; } = string.Empty;
+        public double PesoUnitario { get; set; }
+        public double ValorUnitario { get; set; }
+        public double ValorAgregado { get; set; }
+        public double ValorPartidaMe { get; set; }
+        public double FactorEquivalencia { get; set; }
+        /// <summary>Solo para decidir en el front si se muestra el campo especial de peso en libras (clientes GGD 14-08-17). No es editable desde Revisión.</summary>
+        public string Cclienteid { get; set; } = string.Empty;
     }
 
-    /// <summary>
-    /// Representa los datos de una foto capturada en bodega
-    /// </summary>
     public class FotoRevision
     {
         public int IdFotos { get; set; }
@@ -81,14 +94,36 @@ namespace PMMovil.Api.Models
         public string cExtension { get; set; } = string.Empty;
         public string UsuCrea { get; set; } = string.Empty;
         public string fCrea { get; set; } = string.Empty;
+        /// <summary>107 = evidencia normal de revisión, 103 = evidencia de discrepancia (mismo tipo que daño de Entrada Bodega).</summary>
+        public int NTipoDocto { get; set; } = 107;
     }
 
-    /// <summary>
-    /// Item simple para catálogos, puede ser reutilizada.
-    /// </summary>
     public class CatalogoItem
     {
         public string Codigo { get; set; } = string.Empty;
         public string Descrip { get; set; } = string.Empty;
+    }
+
+    public class PaisFrecuente
+    {
+        public string Codigo { get; set; } = string.Empty;
+        public string Descrip { get; set; } = string.Empty;
+        public int Usos { get; set; }
+    }
+
+    /// <summary>
+    /// Fila de "fotos" resuelta para servir/borrar una imagen (FotoController.VerFoto /
+    /// EliminarFoto). Antes se leía con QueryFirstOrDefaultAsync&lt;object&gt; (dynamic),
+    /// que en este proyecto ya causó fallos silenciosos por mayúsculas/guion bajo
+    /// (ver bugs de Caseta y Finalizar) -- Dapper mapea a una clase tipada sin
+    /// distinguir mayúsculas/minúsculas, así que este modelo evita esa trampa.
+    /// </summary>
+    public class FotoVerInfo
+    {
+        public string Creferencia { get; set; } = string.Empty;
+        public string CExtension { get; set; } = string.Empty;
+        public int NLineNo { get; set; }
+        public int NTipoDocto { get; set; }
+        public string Cidcte { get; set; } = string.Empty;
     }
 }

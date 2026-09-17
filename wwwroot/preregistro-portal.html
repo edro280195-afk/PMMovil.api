@@ -1,0 +1,1026 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Portal de Transportistas | Grupo PMM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root {
+    --blue: #003d8c;
+    --blue2: #00297a;
+    --yellow: #becc00;
+    --green: #16a34a;
+    --green-bg: #ecfdf5;
+    --red: #dc2626;
+    --red-bg: #fef2f2;
+    --amber: #d97706;
+    --amber-bg: #fffbeb;
+    --bg: #e8edf5;
+    --surf: #ffffff;
+    --bdr: #ccd5e8;
+    --txt: #0f1f3d;
+    --muted: #526080;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--txt);
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  button, input, select { font: inherit; }
+
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  [hidden] { display: none !important; }
+
+  a { color: inherit; }
+
+  /* ── Barra superior ─────────────────────────────────────────────────── */
+  .topbar {
+    background: linear-gradient(135deg, var(--blue) 0%, var(--blue2) 100%);
+    color: #fff;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 4px solid var(--yellow);
+    position: sticky;
+    top: 0;
+    z-index: 30;
+  }
+  .topbar .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .topbar .brand-mark {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: rgba(255,255,255,0.14);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 17px;
+    flex: none;
+  }
+  .topbar .brand-text b {
+    display: block;
+    font-size: 14.5px;
+    font-weight: 800;
+    letter-spacing: 0.2px;
+  }
+  .topbar .brand-text span {
+    display: block;
+    font-size: 10.5px;
+    color: #a9c2ea;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 700;
+  }
+  .topbar .session {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12.5px;
+    color: #cfe0fb;
+    min-width: 0;
+  }
+  .topbar .session b {
+    color: #fff;
+    font-weight: 800;
+    max-width: 38vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .btn-ghost-light {
+    background: rgba(255,255,255,0.14);
+    border: 1px solid rgba(255,255,255,0.28);
+    color: #fff;
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background .15s var(--ease);
+    flex: none;
+  }
+  .btn-ghost-light:hover { background: rgba(255,255,255,0.24); }
+
+  /* ── Layout general ─────────────────────────────────────────────────── */
+  .page {
+    max-width: 520px;
+    margin: 0 auto;
+    padding: 18px 16px 60px;
+  }
+
+  .banner-https {
+    background: var(--amber-bg);
+    border: 1px solid #fde68a;
+    color: #92400e;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    margin-bottom: 14px;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    line-height: 1.4;
+  }
+
+  .card {
+    background: var(--surf);
+    border: 1px solid var(--bdr);
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 1px 2px rgba(15, 31, 61, 0.04);
+  }
+
+  .card + .card { margin-top: 14px; }
+
+  h1.title {
+    font-size: 19px;
+    font-weight: 800;
+    margin: 0 0 4px;
+    color: var(--blue);
+  }
+  p.subtitle {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 0 0 18px;
+    line-height: 1.5;
+  }
+
+  label {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin: 14px 0 6px;
+  }
+  label:first-of-type { margin-top: 0; }
+
+  input[type="text"], input[type="password"], select {
+    width: 100%;
+    border: 1.5px solid var(--bdr);
+    border-radius: 10px;
+    padding: 12px 13px;
+    font-size: 15px;
+    color: var(--txt);
+    background: #fbfcfe;
+    transition: border-color .15s var(--ease), background .15s var(--ease);
+  }
+  input:focus, select:focus {
+    outline: none;
+    border-color: var(--blue);
+    background: #fff;
+  }
+  input.upper { text-transform: uppercase; }
+  input.upper::placeholder { text-transform: none; }
+
+  .field-hint {
+    font-size: 11px;
+    color: #93a1c0;
+    margin-top: 4px;
+  }
+
+  .btn-primary {
+    width: 100%;
+    background: var(--blue);
+    color: #fff;
+    border: none;
+    border-radius: 11px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: 800;
+    cursor: pointer;
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: background .15s var(--ease), transform .05s var(--ease);
+  }
+  .btn-primary:hover { background: var(--blue2); }
+  .btn-primary:active { transform: scale(0.99); }
+  .btn-primary:disabled { background: #9fb3d6; cursor: not-allowed; }
+
+  .btn-secondary {
+    background: #fff;
+    color: var(--blue);
+    border: 1.5px solid var(--bdr);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: border-color .15s var(--ease), background .15s var(--ease);
+  }
+  .btn-secondary:hover { border-color: var(--blue); background: #f3f7ff; }
+  .btn-secondary:disabled { opacity: .45; cursor: not-allowed; }
+
+  .btn-danger-outline {
+    background: #fff;
+    color: var(--red);
+    border: 1.5px solid #f3c6c6;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .btn-danger-outline:hover { background: var(--red-bg); }
+
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--blue);
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .spinner {
+    width: 15px; height: 15px;
+    border: 2.5px solid rgba(255,255,255,0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  .spinner.dark {
+    border-color: rgba(0,61,140,0.25);
+    border-top-color: var(--blue);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .msg {
+    border-radius: 10px;
+    padding: 11px 13px;
+    font-size: 12.5px;
+    margin-top: 14px;
+    line-height: 1.45;
+    display: flex;
+    gap: 8px;
+  }
+  .msg.error { background: var(--red-bg); color: #991b1b; border: 1px solid #f3c6c6; }
+  .msg.ok { background: var(--green-bg); color: #166534; border: 1px solid #b7ecc4; }
+  .msg.info { background: #eef4ff; color: var(--blue); border: 1px solid #cfe0fb; }
+
+  /* ── Header de sesión / lista ───────────────────────────────────────── */
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 22px 0 10px;
+  }
+  .section-head:first-child { margin-top: 0; }
+  .section-head h2 {
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 34px 18px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .empty-state .glyph { font-size: 30px; margin-bottom: 8px; }
+
+  /* ── Tarjeta de pre-registro ────────────────────────────────────────── */
+  .preregistro {
+    border: 1.5px solid var(--bdr);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 12px;
+    background: #fff;
+  }
+  .preregistro.usado { background: #f8fafc; }
+  .pr-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .pr-folio {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--blue);
+    letter-spacing: 0.2px;
+  }
+  .pr-unidad { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+  .badge {
+    font-size: 10.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge.vigente { background: var(--green-bg); color: var(--green); }
+  .badge.usado { background: #e0f2fe; color: #0369a1; }
+  .badge.expirado { background: var(--amber-bg); color: var(--amber); }
+  .badge.cancelado { background: #f1f5f9; color: #64748b; }
+
+  .pr-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 14px;
+    margin-top: 12px;
+    font-size: 12px;
+  }
+  .pr-meta .k { color: #93a1c0; font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0.3px; }
+  .pr-meta .v { color: var(--txt); font-weight: 600; margin-top: 1px; }
+
+  .eta-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 800;
+    font-size: 13px;
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 9px;
+  }
+  .eta-pill.near { background: var(--red-bg); color: var(--red); }
+  .eta-pill.mid { background: var(--amber-bg); color: var(--amber); }
+  .eta-pill.far { background: #eef4ff; color: var(--blue); }
+  .eta-pill.none { background: #f1f5f9; color: #64748b; }
+
+  .pr-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .loc-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--bdr);
+  }
+  .loc-toggle-row .label-txt { font-size: 12.5px; font-weight: 700; color: var(--txt); }
+  .loc-toggle-row .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .switch {
+    position: relative;
+    width: 42px;
+    height: 24px;
+    flex: none;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0;
+    background: #d3dcef;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background .15s var(--ease);
+  }
+  .switch .track::before {
+    content: "";
+    position: absolute;
+    width: 18px; height: 18px;
+    left: 3px; top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .15s var(--ease);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  }
+  .switch input:checked + .track { background: var(--green); }
+  .switch input:checked + .track::before { transform: translateX(18px); }
+
+  .qr-wrap {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--bdr);
+  }
+  .qr-wrap.open { display: flex; }
+  .qr-wrap img, .qr-wrap canvas { border-radius: 10px; }
+  .qr-wrap .qr-caption { font-size: 11px; color: var(--muted); text-align: center; }
+
+  .usado-banner {
+    margin-top: 12px;
+    background: var(--green-bg);
+    border: 1px solid #b7ecc4;
+    color: #166534;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .help-toggle {
+    text-align: center;
+    margin-top: 16px;
+  }
+
+  .help-box {
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .help-box ol { padding-left: 18px; margin: 8px 0; }
+
+  .footer-note {
+    text-align: center;
+    font-size: 11px;
+    color: #93a1c0;
+    margin-top: 26px;
+  }
+
+  @media (min-width: 560px) {
+    .pr-actions .btn-secondary, .pr-actions .btn-danger-outline { flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-mark">🚚</div>
+      <div class="brand-text">
+        <b>Portal de Transportistas</b>
+        <span>Grupo PMM</span>
+      </div>
+    </div>
+    <div class="session" id="sessionInfo" hidden>
+      <span>Línea: <b id="sessionLinea"></b></span>
+      <button class="btn-ghost-light" id="btnLogout" type="button">Salir</button>
+    </div>
+  </div>
+
+  <div class="page">
+    <div id="bannerHttps" class="banner-https" hidden>
+      ⚠️ <span>Esta página no está en una conexión segura (HTTPS). Compartir tu ubicación puede no funcionar hasta que se acceda por HTTPS.</span>
+    </div>
+
+    <!-- ───────────── Login ───────────── -->
+    <section id="viewLogin" class="card">
+      <h1 class="title">Inicia sesión</h1>
+      <p class="subtitle">Usa el usuario y contraseña que te dio tráfico de Grupo PMM para pre-registrar tus unidades sin caja.</p>
+
+      <form id="formLogin" autocomplete="on">
+        <label for="loginUsuario">Usuario</label>
+        <input id="loginUsuario" name="usuario" type="text" autocomplete="username" required maxlength="30" placeholder="Tu usuario" />
+
+        <label for="loginPassword">Contraseña</label>
+        <input id="loginPassword" name="password" type="password" autocomplete="current-password" required placeholder="••••••••" />
+
+        <button class="btn-primary" id="btnLogin" type="submit">
+          <span class="btn-label">Entrar</span>
+        </button>
+      </form>
+      <div id="loginMsg"></div>
+
+      <p class="footer-note" style="margin-top:20px;">¿Olvidaste tu contraseña o no tienes cuenta? Contacta a tráfico de Grupo PMM.</p>
+    </section>
+
+    <!-- ───────────── App (post-login) ───────────── -->
+    <section id="viewApp" hidden>
+
+      <div class="card" id="cardCrear">
+        <h1 class="title">Pre-registrar unidad</h1>
+        <p class="subtitle">Solo para un tractocamión <b>sin caja</b> (a recoger una que otro camión ya dejó). El guardia escaneará el QR al llegar a la caseta.</p>
+
+        <form id="formCrear">
+          <label for="crearNunidad">No. de unidad / tractor</label>
+          <input id="crearNunidad" class="upper" type="text" required maxlength="30" placeholder="Ej. T-4521" />
+
+          <label for="crearPlacas">Placas</label>
+          <input id="crearPlacas" class="upper" type="text" required maxlength="25" placeholder="Ej. 912-KL-7" />
+
+          <label for="crearOperador">Nombre del operador</label>
+          <input id="crearOperador" type="text" required maxlength="100" placeholder="Nombre completo" />
+
+          <label for="crearBodega">Bodega destino</label>
+          <select id="crearBodega" required></select>
+
+          <label style="display:flex;align-items:center;gap:8px;margin-top:16px;text-transform:none;font-size:12.5px;">
+            <input id="crearUbicacion" type="checkbox" style="width:auto;" checked />
+            Usar mi ubicación actual para calcular el ETA
+          </label>
+
+          <button class="btn-primary" id="btnCrear" type="submit">
+            <span class="btn-label">📋 Generar pre-registro</span>
+          </button>
+        </form>
+        <div id="crearMsg"></div>
+      </div>
+
+      <div class="section-head">
+        <h2>Mis pre-registros</h2>
+        <button class="btn-link" id="btnRefrescar" type="button">Actualizar</button>
+      </div>
+      <div id="listaRegistros"></div>
+
+      <div class="help-toggle">
+        <button class="btn-link" id="btnAyuda" type="button">¿Cómo funciona el pre-registro?</button>
+      </div>
+      <div class="help-box" id="cajaAyuda" hidden>
+        <ol>
+          <li>Genera tu pre-registro con los datos de la unidad que va a recoger la caja.</li>
+          <li>Muestra el código QR al guardia de la caseta al llegar (captura de pantalla o directo desde este portal).</li>
+          <li>Comparte tu ubicación para que caseta vea tu ETA en tiempo real mientras te acercas.</li>
+          <li>El código vence 24 horas después de creado; si no llegaste, créalo de nuevo.</li>
+          <li>Solo puede haber un QR vivo por unidad/placas — crear uno nuevo cancela el anterior automáticamente.</li>
+        </ol>
+      </div>
+
+      <p class="footer-note">Portal de Transportistas · Grupo PMM · Pedro Martínez Méndez y Cía S.C.</p>
+    </section>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const TOKEN_KEY = "pmm_portal_token";
+  const LINEA_KEY = "pmm_portal_linea";
+  const EXPIRA_KEY = "pmm_portal_expira";
+  const LOC_THROTTLE_MS = 60_000; // no llamar a /ubicacion mas seguido que esto por folio
+
+  const $ = (id) => document.getElementById(id);
+
+  // ── Utilidades ─────────────────────────────────────────────────────────
+  function esc(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function setBusy(btn, busy, labelBusy, labelIdle) {
+    btn.disabled = busy;
+    const label = btn.querySelector(".btn-label");
+    if (busy) {
+      label.innerHTML = '<span class="spinner"></span> ' + esc(labelBusy);
+    } else {
+      label.textContent = labelIdle;
+    }
+  }
+
+  function showMsg(container, text, type) {
+    container.innerHTML = "";
+    if (!text) return;
+    const div = document.createElement("div");
+    div.className = "msg " + type;
+    div.textContent = text;
+    container.appendChild(div);
+  }
+
+  function fmtEta(min) {
+    if (min == null) return null;
+    return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${min % 60} min`;
+  }
+
+  function etaClase(min) {
+    if (min == null) return "none";
+    if (min <= 30) return "near";
+    if (min <= 120) return "mid";
+    return "far";
+  }
+
+  function fmtFecha(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString("es-MX", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function vigeteRestante(fechaExpiraIso) {
+    const ms = new Date(fechaExpiraIso).getTime() - Date.now();
+    if (ms <= 0) return "vencido";
+    const totalMin = Math.floor(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return h > 0 ? `vence en ${h} h ${m} min` : `vence en ${m} min`;
+  }
+
+  // ── Sesión ─────────────────────────────────────────────────────────────
+  // sessionStorage puede no estar disponible (navegación privada estricta,
+  // política corporativa, o esta misma vista previa sirviendo el archivo
+  // como "data:") -- se degrada a un almacen en memoria en vez de tronar.
+  const memoriaSesion = {};
+  function storageGet(key) {
+    try { return sessionStorage.getItem(key); } catch { return memoriaSesion[key] ?? null; }
+  }
+  function storageSet(key, value) {
+    try { sessionStorage.setItem(key, value); } catch { memoriaSesion[key] = value; }
+  }
+  function storageRemove(key) {
+    try { sessionStorage.removeItem(key); } catch { delete memoriaSesion[key]; }
+  }
+
+  function getToken() { return storageGet(TOKEN_KEY); }
+
+  function setSession(token, nombreLinea, expiraUtc) {
+    storageSet(TOKEN_KEY, token);
+    storageSet(LINEA_KEY, nombreLinea || "");
+    storageSet(EXPIRA_KEY, expiraUtc || "");
+  }
+
+  function clearSession() {
+    storageRemove(TOKEN_KEY);
+    storageRemove(LINEA_KEY);
+    storageRemove(EXPIRA_KEY);
+    detenerTodasLasUbicaciones();
+  }
+
+  // ── Llamadas a la API (mismo origen) ────────────────────────────────────
+  async function api(path, { method = "GET", body, auth = true } = {}) {
+    const headers = { "Content-Type": "application/json" };
+    if (auth) {
+      const token = getToken();
+      if (token) headers.Authorization = "Bearer " + token;
+    }
+    let res;
+    try {
+      res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    } catch {
+      throw new Error("No se pudo conectar con el servidor. Revisa tu conexión.");
+    }
+
+    if (res.status === 401 && auth) {
+      cerrarSesion("Tu sesión expiró. Inicia sesión de nuevo.");
+      throw new Error("Sesión expirada.");
+    }
+    if (res.status === 429) {
+      const retry = res.headers.get("Retry-After");
+      throw new Error(retry ? `Demasiados intentos. Intenta de nuevo en ${retry} segundos.` : "Demasiados intentos. Espera un momento.");
+    }
+
+    let data = null;
+    try { data = await res.json(); } catch { /* respuesta sin cuerpo */ }
+
+    if (!res.ok) throw new Error((data && data.message) || "Ocurrió un error inesperado. Intenta de nuevo.");
+    return data;
+  }
+
+  // ── Geolocalización ──────────────────────────────────────────────────────
+  function obtenerUbicacionActual() {
+    return new Promise((resolve) => {
+      if (!("geolocation" in navigator)) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+      );
+    });
+  }
+
+  // folio -> { watchId, ultimoEnvio }
+  const ubicacionesActivas = new Map();
+
+  function detenerUbicacion(folio) {
+    const info = ubicacionesActivas.get(folio);
+    if (info && info.watchId != null) navigator.geolocation.clearWatch(info.watchId);
+    ubicacionesActivas.delete(folio);
+  }
+
+  function detenerTodasLasUbicaciones() {
+    for (const folio of Array.from(ubicacionesActivas.keys())) detenerUbicacion(folio);
+  }
+
+  function iniciarUbicacion(folio) {
+    if (!("geolocation" in navigator)) {
+      alert("Este navegador no soporta compartir ubicación.");
+      return false;
+    }
+    const watchId = navigator.geolocation.watchPosition(
+      async (pos) => {
+        const info = ubicacionesActivas.get(folio);
+        if (!info) return;
+        const ahora = Date.now();
+        if (ahora - info.ultimoEnvio < LOC_THROTTLE_MS) return;
+        info.ultimoEnvio = ahora;
+        try {
+          const resp = await api(`/api/Preregistro/${encodeURIComponent(folio)}/ubicacion`, {
+            method: "POST",
+            body: { lat: pos.coords.latitude, lon: pos.coords.longitude }
+          });
+          actualizarEtaEnTarjeta(folio, resp.etaMinutos, resp.etaKm);
+        } catch {
+          // Falla silenciosa: la proxima lectura de watchPosition reintenta sola.
+        }
+      },
+      () => {
+        detenerUbicacion(folio);
+        const toggle = document.querySelector(`.loc-switch[data-folio="${folio}"]`);
+        if (toggle) toggle.checked = false;
+        alert("No se pudo obtener tu ubicación. Revisa los permisos del navegador.");
+      },
+      { enableHighAccuracy: true, maximumAge: 20000, timeout: 15000 }
+    );
+    ubicacionesActivas.set(folio, { watchId, ultimoEnvio: 0 });
+    return true;
+  }
+
+  function actualizarEtaEnTarjeta(folio, etaMinutos, etaKm) {
+    const el = document.querySelector(`.eta-pill[data-folio="${folio}"]`);
+    if (!el) return;
+    el.className = "eta-pill " + etaClase(etaMinutos);
+    const etaTxt = fmtEta(etaMinutos);
+    el.textContent = etaTxt ? `⏱ ${etaTxt}` + (etaKm != null ? ` · ${etaKm.toFixed(1)} km` : "") : "⏱ Sin ubicación";
+  }
+
+  // ── Render de "Mis pre-registros" ────────────────────────────────────────
+  let registrosCache = [];
+  let pollTimer = null;
+
+  function estatusInfo(estatus) {
+    switch (estatus) {
+      case "VIGENTE": return { clase: "vigente", texto: "Vigente" };
+      case "USADO": return { clase: "usado", texto: "Usado" };
+      case "EXPIRADO": return { clase: "expirado", texto: "Expirado" };
+      case "CANCELADO": return { clase: "cancelado", texto: "Cancelado" };
+      default: return { clase: "cancelado", texto: estatus || "—" };
+    }
+  }
+
+  function renderLista(registros) {
+    registrosCache = registros;
+    const cont = $("listaRegistros");
+    cont.innerHTML = "";
+
+    if (!registros.length) {
+      cont.innerHTML = `
+        <div class="empty-state">
+          <div class="glyph">🚛</div>
+          No tienes pre-registros todavía.<br />Genera uno arriba cuando salgas por una caja.
+        </div>`;
+      return;
+    }
+
+    for (const r of registros) {
+      const est = estatusInfo(r.estatus);
+      const vigente = r.estatus === "VIGENTE";
+      const usado = r.estatus === "USADO";
+      const etaTxt = fmtEta(r.etaMinutos);
+      const activa = ubicacionesActivas.has(r.folio);
+
+      const div = document.createElement("div");
+      div.className = "preregistro" + (usado ? " usado" : "");
+      div.innerHTML = `
+        <div class="pr-top">
+          <div>
+            <div class="pr-folio mono">${esc(r.folio)}</div>
+            <div class="pr-unidad">${esc(r.nunidad)} · ${esc(r.placas)}</div>
+          </div>
+          <span class="badge ${est.clase}">${esc(est.texto)}</span>
+        </div>
+
+        <div class="pr-meta">
+          <div><div class="k">Operador</div><div class="v">${esc(r.operador || "—")}</div></div>
+          <div><div class="k">${vigente ? "Vigencia" : "Creado"}</div><div class="v">${vigente ? esc(vigeteRestante(r.fechaExpira)) : esc(fmtFecha(r.fechaCrea))}</div></div>
+        </div>
+
+        <div class="eta-pill ${etaClase(r.etaMinutos)}" data-folio="${esc(r.folio)}">
+          ${etaTxt ? "⏱ " + esc(etaTxt) + (r.etaKm != null ? " · " + r.etaKm.toFixed(1) + " km" : "") : "⏱ Sin ubicación"}
+        </div>
+
+        ${usado ? `<div class="usado-banner">✅ Registrado en caseta el ${esc(fmtFecha(r.fechaUso))}${r.casetaId ? " · Folio caseta " + esc(r.casetaId) : ""}</div>` : ""}
+
+        ${vigente ? `
+          <div class="pr-actions">
+            <button class="btn-secondary btn-ver-qr" data-folio="${esc(r.folio)}" type="button">🔳 Ver QR</button>
+            <button class="btn-danger-outline btn-cancelar" data-folio="${esc(r.folio)}" type="button">Cancelar</button>
+          </div>
+
+          <div class="loc-toggle-row">
+            <div>
+              <div class="label-txt">📍 Compartir ubicación en vivo</div>
+              <div class="sub">Actualiza tu ETA mientras te acercas</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" class="loc-switch" data-folio="${esc(r.folio)}" ${activa ? "checked" : ""} />
+              <span class="track"></span>
+            </label>
+          </div>
+
+          <div class="qr-wrap" data-qrwrap="${esc(r.folio)}">
+            <div class="qr-canvas" data-qrcanvas="${esc(r.folio)}"></div>
+            <div class="qr-caption">Muéstralo al guardia al llegar a la caseta</div>
+          </div>
+        ` : ""}
+      `;
+      cont.appendChild(div);
+    }
+
+    // Listeners (delegados por tarjeta recién creada)
+    cont.querySelectorAll(".btn-ver-qr").forEach((btn) => btn.addEventListener("click", () => toggleQr(btn.dataset.folio)));
+    cont.querySelectorAll(".btn-cancelar").forEach((btn) => btn.addEventListener("click", () => cancelarRegistro(btn.dataset.folio)));
+    cont.querySelectorAll(".loc-switch").forEach((sw) => sw.addEventListener("change", () => {
+      if (sw.checked) {
+        if (!iniciarUbicacion(sw.dataset.folio)) sw.checked = false;
+      } else {
+        detenerUbicacion(sw.dataset.folio);
+      }
+    }));
+  }
+
+  function toggleQr(folio) {
+    const wrap = document.querySelector(`.qr-wrap[data-qrwrap="${folio}"]`);
+    if (!wrap) return;
+    const abrir = !wrap.classList.contains("open");
+    wrap.classList.toggle("open", abrir);
+    const btn = document.querySelector(`.btn-ver-qr[data-folio="${folio}"]`);
+    if (btn) btn.textContent = abrir ? "🔳 Ocultar QR" : "🔳 Ver QR";
+
+    if (abrir) {
+      const holder = wrap.querySelector(`[data-qrcanvas="${folio}"]`);
+      if (holder && !holder.dataset.rendered) {
+        const registro = registrosCache.find((r) => r.folio === folio);
+        const payload = registro && registro.qrPayload;
+        if (payload && window.QRCode) {
+          holder.innerHTML = "";
+          new QRCode(holder, { text: payload, width: 200, height: 200, colorDark: "#0f1f3d", colorLight: "#ffffff" });
+          holder.dataset.rendered = "1";
+        } else {
+          holder.textContent = "No se pudo generar el QR.";
+        }
+      }
+    }
+  }
+
+  async function cancelarRegistro(folio) {
+    if (!confirm(`¿Cancelar el pre-registro ${folio}? El QR dejará de ser válido.`)) return;
+    detenerUbicacion(folio);
+    try {
+      await api(`/api/Preregistro/${encodeURIComponent(folio)}/cancelar`, { method: "POST" });
+      await cargarRegistros();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  async function cargarRegistros() {
+    try {
+      const registros = await api("/api/Preregistro/mis-registros");
+      renderLista(registros);
+    } catch (err) {
+      if (err.message !== "Sesión expirada.") {
+        $("listaRegistros").innerHTML = `<div class="msg error">${esc(err.message)}</div>`;
+      }
+    }
+  }
+
+  function iniciarPolling() {
+    detenerPolling();
+    pollTimer = setInterval(() => {
+      if (document.visibilityState === "visible" && getToken()) cargarRegistros();
+    }, 20000);
+  }
+  function detenerPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  // ── Bodegas (catálogo público) ──────────────────────────────────────────
+  async function cargarBodegas() {
+    const select = $("crearBodega");
+    try {
+      const bodegas = await api("/api/Preregistro/bodegas", { auth: false });
+      select.innerHTML = bodegas.map((b) => `<option value="${esc(b.id)}">${esc(b.nombre)}</option>`).join("");
+    } catch {
+      select.innerHTML = `<option value="">No se pudo cargar</option>`;
+    }
+  }
+
+  // ── Login / Logout ──────────────────────────────────────────────────────
+  function mostrarApp() {
+    $("viewLogin").hidden = true;
+    $("viewApp").hidden = false;
+    $("sessionInfo").hidden = false;
+    $("sessionLinea").textContent = storageGet(LINEA_KEY) || "";
+    cargarBodegas();
+    cargarRegistros();
+    iniciarPolling();
+  }
+
+  function mostrarLogin() {
+    $("viewApp").hidden = true;
+    $("sessionInfo").hidden = true;
+    $("viewLogin").hidden = false;
+    detenerPolling();
+  }
+
+  function cerrarSesion(mensaje) {
+    clearSession();
+    mostrarLogin();
+    if (mensaje) showMsg($("loginMsg"), mensaje, "info");
+  }
+
+  $("formLogin").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("btnLogin");
+    showMsg($("loginMsg"), "", "");
+    setBusy(btn, true, "Entrando…", "Entrar");
+    try {
+      const data = await api("/api/Preregistro/login", {
+        method: "POST",
+        auth: false,
+        body: { usuario: $("loginUsuario").value.trim(), password: $("loginPassword").value }
+      });
+      setSession(data.token, data.nombreLinea, data.expiraUtc);
+      $("loginPassword").value = "";
+      mostrarApp();
+    } catch (err) {
+      showMsg($("loginMsg"), err.message, "error");
+    } finally {
+      setBusy(btn, false, "", "Entrar");
+    }
+  });
+
+  $("btnLogout").addEventListener("click", () => cerrarSesion());
+  $("btnRefrescar").addEventListener("click", cargarRegistros);
+
+  $("btnAyuda").addEventListener("click", () => {
+    const caja = $("cajaAyuda");
+    caja.hidden = !caja.hidden;
+  });
+
+  // ── Crear pre-registro ───────────────────────────────────────────────────
+  $("formCrear").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("btnCrear");
+    showMsg($("crearMsg"), "", "");
+    setBusy(btn, true, "Generando…", "📋 Generar pre-registro");
+    try {
+      let ubicacion = null;
+      if ($("crearUbicacion").checked) ubicacion = await obtenerUbicacionActual();
+
+      const data = await api("/api/Preregistro", {
+        method: "POST",
+        body: {
+          nunidad: $("crearNunidad").value.trim(),
+          placas: $("crearPlacas").value.trim(),
+          operador: $("crearOperador").value.trim(),
+          idBodega: $("crearBodega").value,
+          lat: ubicacion ? ubicacion.lat : null,
+          lon: ubicacion ? ubicacion.lon : null
+        }
+      });
+
+      $("formCrear").reset();
+      showMsg($("crearMsg"), `Pre-registro ${data.folio} creado. Ya aparece abajo con su QR.`, "ok");
+      await cargarRegistros();
+      toggleQr(data.folio);
+      document.querySelector(`.preregistro`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (err) {
+      showMsg($("crearMsg"), err.message, "error");
+    } finally {
+      setBusy(btn, false, "", "📋 Generar pre-registro");
+    }
+  });
+
+  // ── Arranque ─────────────────────────────────────────────────────────────
+  if (location.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(location.hostname)) {
+    $("bannerHttps").hidden = false;
+  }
+
+  if (getToken()) {
+    mostrarApp();
+  } else {
+    mostrarLogin();
+    cargarBodegas();
+  }
+
+  window.addEventListener("beforeunload", detenerTodasLasUbicaciones);
+})();
+</script>
+</body>
+</html>

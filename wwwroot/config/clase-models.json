@@ -1,0 +1,147 @@
+{
+  "Version": 2,
+  "UpdatedBy": "eduardo.rdz",
+  "UpdatedAt": "2026-07-02T12:56:17",
+  "Items": [
+    {
+      "ClaseId": "CAJA(S)",
+      "Primitive": "box",
+      "Color": "#b08968",
+      "UnitFootprint": 0.62,
+      "UnitHeight": 0.52,
+      "Stackable": true,
+      "Icon": "box",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "HUACAL(ES)",
+      "Primitive": "crate",
+      "Color": "#a97142",
+      "UnitFootprint": 0.72,
+      "UnitHeight": 0.58,
+      "Stackable": false,
+      "Icon": "crate",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "CONTENEDOR(ES)",
+      "Primitive": "container",
+      "Color": "#3b6ea5",
+      "UnitFootprint": 2.6,
+      "UnitHeight": 2.25,
+      "Stackable": false,
+      "Icon": "container",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "TAMBOR(ES)",
+      "Primitive": "drum",
+      "Color": "#2b6cb0",
+      "UnitFootprint": 0.58,
+      "UnitHeight": 0.88,
+      "Stackable": false,
+      "Icon": "drum",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "TINETA(S)",
+      "Primitive": "tub",
+      "Color": "#2c9c8f",
+      "UnitFootprint": 0.56,
+      "UnitHeight": 0.46,
+      "Stackable": true,
+      "Icon": "tub",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "SACO(S)",
+      "Primitive": "sack",
+      "Color": "#d6a960",
+      "UnitFootprint": 0.72,
+      "UnitHeight": 0.42,
+      "Stackable": true,
+      "Icon": "sack",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "BULTO(S)",
+      "Primitive": "soft",
+      "Color": "#9aa2ad",
+      "UnitFootprint": 0.78,
+      "UnitHeight": 0.52,
+      "Stackable": true,
+      "Icon": "package",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "ATADO(S)",
+      "Primitive": "bundle",
+      "Color": "#7a8450",
+      "UnitFootprint": 1.35,
+      "UnitHeight": 0.34,
+      "Stackable": true,
+      "Icon": "bundle",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "ROLLO(S)",
+      "Primitive": "rollH",
+      "Color": "#6b5bd0",
+      "UnitFootprint": 0.82,
+      "UnitHeight": 0.68,
+      "Stackable": true,
+      "Icon": "roll",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "CARRETE(S)",
+      "Primitive": "reel",
+      "Color": "#5b6b7a",
+      "UnitFootprint": 0.78,
+      "UnitHeight": 0.76,
+      "Stackable": true,
+      "Icon": "reel",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "TUBO(S)",
+      "Primitive": "pipe",
+      "Color": "#7b8a99",
+      "UnitFootprint": 1.6,
+      "UnitHeight": 0.32,
+      "Stackable": true,
+      "Icon": "pipe",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "PIEZA(S)",
+      "Primitive": "piece",
+      "Color": "#c2703d",
+      "UnitFootprint": 0.7,
+      "UnitHeight": 0.45,
+      "Stackable": false,
+      "Icon": "gear",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "LOTE(S)",
+      "Primitive": "mixed",
+      "Color": "#8a5cc0",
+      "UnitFootprint": 0.9,
+      "UnitHeight": 0.62,
+      "Stackable": true,
+      "Icon": "layers",
+      "ModelUrl": null
+    },
+    {
+      "ClaseId": "SOBRE(S)",
+      "Primitive": "flat",
+      "Color": "#d9a441",
+      "UnitFootprint": 0.55,
+      "UnitHeight": 0.08,
+      "Stackable": true,
+      "Icon": "envelope",
+      "ModelUrl": null
+    }
+  ]
+}

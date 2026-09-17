@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Control de Bodega | Grupo PMM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+  <style>
+    :root {
+      --blue: #003d8c;
+      --blue2: #00297a;
+      --yellow: #becc00;
+      --green: #16a34a;
+      --red: #dc2626;
+      --amber: #d97706;
+      --bg: #e8edf5;
+      --surf: #ffffff;
+      --bdr: #ccd5e8;
+      --txt: #0f1f3d;
+      --muted: #526080;
+      --ease: cubic-bezier(.22, 1, .36, 1);
+    }
+
+    @property --pp {
+      syntax: '<percentage>';
+      initial-value: 0%;
+      inherits: false;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      height: 100%;
+      font-family: 'Inter', system-ui, sans-serif;
+      color: var(--txt);
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    body {
+      background: var(--bg);
+      transition: background 3s ease;
+    }
+
+    body.a-ok {
+      background: linear-gradient(150deg, #e8edf5 55%, #d1fae5 100%);
+    }
+
+    body.a-warn {
+      background: linear-gradient(150deg, #e8edf5 50%, #fef3c7 100%);
+    }
+
+    body.a-alert {
+      background: linear-gradient(150deg, #e8edf5 40%, #fee2e2 100%);
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    
+    .hdr {
+      background: var(--blue);
+      color: #fff;
+      padding: 0 24px;
+      height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 20px rgba(0, 0, 0, .3);
+      flex-shrink: 0;
+      z-index: 10;
+    }
+
+    .hl {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .badge {
+      background: var(--yellow);
+      color: var(--blue2);
+      font-weight: 900;
+      font-size: 13px;
+      padding: 5px 10px;
+      border-radius: 3px;
+      transform: skewX(-8deg);
+      letter-spacing: .06em;
+    }
+
+    .ht {
+      font-size: 16px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .hs {
+      font-size: 10px;
+      opacity: .5;
+      font-weight: 500;
+      margin-top: 1px;
+    }
+
+    .hr {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .hstat {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .hstat-v {
+      font-size: 28px;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .hstat-l {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      opacity: .55;
+      margin-top: 2px;
+    }
+
+    .hdiv {
+      width: 1px;
+      height: 32px;
+      background: rgba(255, 255, 255, .15);
+    }
+
+    .hclock .t {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 2px;
+    }
+
+    .hclock .d {
+      font-size: 10px;
+      opacity: .45;
+      font-weight: 600;
+      text-transform: capitalize;
+      text-align: right;
+    }
+
+    .hub-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, .1);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      transition: background .3s;
+    }
+
+    .hub-pill.ok {
+      background: rgba(22, 163, 74, .3);
+    }
+
+    .hub-pill.err {
+      background: rgba(220, 38, 38, .3);
+    }
+
+    .hub-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, .35);
+      transition: background .3s;
+    }
+
+    .hub-pill.ok .hub-dot {
+      background: var(--yellow);
+      animation: lp 2s infinite;
+    }
+
+    .hub-pill.err .hub-dot {
+      background: var(--red);
+    }
+
+    
+    .ticker {
+      height: 4px;
+      background: var(--yellow);
+      overflow: hidden;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .ticker::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -60%;
+      width: 60%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .8), transparent);
+      animation: sweep 2.2s infinite linear;
+    }
+
+    
+    .main {
+      flex: 1;
+      display: flex;
+      gap: 14px;
+      padding: 14px;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    
+    .hero-panel {
+      flex: 0 0 340px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .panel-label {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .15em;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .panel-label::before {
+      content: '';
+      width: 14px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--lc, var(--blue));
+    }
+
+    .hero-card {
+      flex: 1;
+      background: var(--surf);
+      border-radius: 18px;
+      border: 1.5px solid var(--bdr);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, .1);
+    }
+
+    .hero-card::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 7px;
+      height: 100%;
+      background: var(--ha, var(--green));
+      border-radius: 18px 0 0 18px;
+    }
+
+    .hero-card.ok {
+      --ha: var(--green);
+    }
+
+    .hero-card.warn {
+      --ha: var(--amber);
+    }
+
+    .hero-card.alert {
+      --ha: var(--red);
+    }
+
+    .hero-card.overdue {
+      --ha: var(--red);
+      animation: rpulse 1.4s ease-in-out infinite;
+    }
+
+    .hero-card.alert::after,
+    .hero-card.overdue::after {
+      animation: sbar 1.4s infinite;
+    }
+
+    .hero-top {
+      background: var(--blue);
+      padding: 22px 20px 22px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .hero-top.ov {
+      background: linear-gradient(135deg, #7f1d1d, #991b1b);
+    }
+
+    .hero-tag {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .15em;
+      color: var(--yellow);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .hpulse {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--yellow);
+      animation: lp 1.8s infinite;
+    }
+
+    .hpulse.r {
+      background: var(--red);
+    }
+
+    .hero-nm {
+      font-size: 28px;
+      font-weight: 900;
+      color: #fff;
+      line-height: 1;
+      letter-spacing: -1px;
+    }
+
+    .hero-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: rgba(255, 255, 255, .4);
+      margin-top: 6px;
+      text-transform: uppercase;
+    }
+
+    
+    .arc-w {
+      position: relative;
+      width: 110px;
+      height: 110px;
+      flex-shrink: 0;
+    }
+
+    .arc-svg {
+      transform: rotate(-90deg);
+      width: 100%;
+      height: 100%;
+    }
+
+    .arc-track {
+      fill: none;
+      stroke: rgba(255, 255, 255, .1);
+      stroke-width: 8;
+    }
+
+    .arc-fill {
+      fill: none;
+      stroke-width: 8;
+      stroke-linecap: round;
+      stroke-dasharray: 320;
+      stroke-dashoffset: 320;
+      transition: stroke-dashoffset 1s linear, stroke .5s;
+    }
+
+    .arc-in {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+    }
+
+    .arc-t {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: 1px;
+    }
+
+    .arc-sub {
+      font-size: 7px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: rgba(255, 255, 255, .35);
+    }
+
+    
+    .hero-body {
+      flex: 1;
+      padding: 20px 20px 20px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow: hidden;
+    }
+
+    .big-timer {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 52px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -2px;
+    }
+
+    .big-timer.ok {
+      color: var(--green);
+    }
+
+    .big-timer.warn {
+      color: var(--amber);
+    }
+
+    .big-timer.alert {
+      color: var(--red);
+      animation: blink 1.5s infinite;
+    }
+
+    .big-timer.overdue {
+      color: var(--red);
+      animation: rglow 1.4s infinite;
+    }
+
+    .timer-lbl {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      color: var(--muted);
+      margin-top: -8px;
+    }
+
+    
+    .tf-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .tf-b {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .tf-l {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .tf-v {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--blue);
+    }
+
+    .tf-v.fin {
+      color: var(--green);
+    }
+
+    .tf-v.open {
+      color: var(--amber);
+      font-size: 17px;
+      font-style: italic;
+    }
+
+    .tf-arr {
+      font-size: 22px;
+      color: var(--bdr);
+      padding-bottom: 6px;
+    }
+
+    
+    .dg {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .dc .dl {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+      margin-bottom: 3px;
+    }
+
+    .dc .dv {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--txt);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .est-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      background: rgba(0, 61, 140, .08);
+      border: 1.5px solid rgba(0, 61, 140, .18);
+      color: var(--blue);
+    }
+
+    .edot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    
+    .bwrap {
+      margin-top: auto;
+    }
+
+    .bhdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .blbl {
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+    }
+
+    .bcnt {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--blue);
+    }
+
+    .prog-track {
+      height: 10px;
+      background: rgba(0, 61, 140, .08);
+      border-radius: 20px;
+      overflow: hidden;
+    }
+
+    .prog-fill {
+      height: 100%;
+      border-radius: 20px;
+      background: linear-gradient(90deg, var(--blue), var(--yellow));
+      width: var(--pp, 0%);
+      transition: width 1.2s var(--ease);
+    }
+
+    
+    .empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--surf);
+      border-radius: 18px;
+      border: 1.5px dashed var(--bdr);
+      gap: 10px;
+    }
+
+    .empty h3 {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    .empty p {
+      font-size: 14px;
+      color: var(--muted);
+      opacity: .7;
+    }
+
+    
+    .lb-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .lb-table {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-radius: 16px;
+      border: 1.5px solid var(--bdr);
+      background: var(--surf);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, .07);
+    }
+
+    
+    .lb-thead {
+      background: var(--blue);
+      padding: 0 20px 0 16px;
+      display: grid;
+      align-items: center;
+      flex-shrink: 0;
+      height: 44px;
+      grid-template-columns: 6px 1fr 160px 155px 130px 110px;
+      gap: 0 16px;
+    }
+
+    .lb-th {
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      color: rgba(255, 255, 255, .55);
+    }
+
+    
+    .lb-tbody {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: var(--bdr) transparent;
+    }
+
+    
+    .lb-row {
+      display: grid;
+      padding: 0 20px 0 0;
+      grid-template-columns: 6px 1fr 160px 155px 130px 110px;
+      gap: 0 16px;
+      align-items: center;
+      min-height: 78px;
+      border-bottom: 1px solid var(--bdr);
+      position: relative;
+      transition: background .25s;
+    }
+
+    .lb-row:last-child {
+      border-bottom: none;
+    }
+
+    .lb-row:hover {
+      background: rgba(0, 61, 140, .03);
+    }
+
+    .lb-row.hero-row {
+      background: linear-gradient(90deg, rgba(0, 61, 140, .06) 0%, rgba(0, 61, 140, .02) 100%);
+      min-height: 90px;
+    }
+
+    .lb-row.hero-row:hover {
+      background: linear-gradient(90deg, rgba(0, 61, 140, .09) 0%, rgba(0, 61, 140, .04) 100%);
+    }
+
+    
+    .lb-bar {
+      width: 6px;
+      align-self: stretch;
+      border-radius: 0;
+    }
+
+    .lb-row.ok .lb-bar {
+      background: var(--green);
+    }
+
+    .lb-row.warn .lb-bar {
+      background: var(--amber);
+    }
+
+    .lb-row.alert .lb-bar {
+      background: var(--red);
+    }
+
+    .lb-row.overdue .lb-bar {
+      background: var(--red);
+      animation: sbar 1.4s infinite;
+    }
+
+    
+    .lb-name {}
+
+    .lb-nombre {
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--txt);
+      line-height: 1.1;
+    }
+
+    .lb-row.hero-row .lb-nombre {
+      font-size: 23px;
+      color: var(--blue);
+    }
+
+    .lb-nombre-sub {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .lb-rel {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    
+    .lb-st {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-top: 4px;
+    }
+
+    .lb-st.cargada {
+      background: rgba(22, 163, 74, .1);
+      color: var(--green);
+      border: 1px solid rgba(22, 163, 74, .2);
+    }
+
+    .lb-st.autorizada {
+      background: rgba(217, 119, 6, .1);
+      color: var(--amber);
+      border: 1px solid rgba(217, 119, 6, .2);
+    }
+
+    .lb-st.salida {
+      background: rgba(0, 61, 140, .08);
+      color: var(--blue);
+      border: 1px solid rgba(0, 61, 140, .15);
+    }
+
+    .lb-st.other {
+      background: rgba(100, 116, 139, .1);
+      color: var(--muted);
+      border: 1px solid var(--bdr);
+    }
+
+    
+    .lb-times {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .lb-time-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .lb-time-lbl {
+      font-size: 8px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .lb-time-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--blue);
+      line-height: 1;
+    }
+
+    .lb-time-val.fin {
+      color: var(--green);
+    }
+
+    .lb-time-val.open {
+      color: var(--amber);
+      font-size: 15px;
+      font-style: italic;
+    }
+
+    .lb-time-val.dash {
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .lb-time-arr {
+      font-size: 18px;
+      color: var(--bdr);
+      flex-shrink: 0;
+    }
+
+    
+    .lb-timer {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .lb-row.hero-row .lb-timer {
+      font-size: 30px;
+    }
+
+    .lb-timer.ok {
+      color: var(--green);
+    }
+
+    .lb-timer.warn {
+      color: var(--amber);
+    }
+
+    .lb-timer.alert {
+      color: var(--red);
+      animation: blink 1.5s infinite;
+    }
+
+    .lb-timer.overdue {
+      color: var(--red);
+      animation: rglow 1.4s infinite;
+    }
+
+    
+    .lb-caja {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .lb-caja-lbl {
+      font-size: 8px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+    }
+
+    .lb-caja-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--blue);
+    }
+
+    .lb-caja-val.none {
+      color: var(--muted);
+      font-style: italic;
+      font-size: 13px;
+    }
+
+    
+    .lb-cli {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .lb-cli-lbl {
+      font-size: 8px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+    }
+
+    .lb-cli-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--txt);
+    }
+
+    .lb-cli-val.none {
+      color: var(--muted);
+      font-style: italic;
+      font-size: 13px;
+    }
+
+    
+    .lb-bul {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .lb-bul-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--txt);
+    }
+
+    .lb-bul-bar {
+      height: 6px;
+      background: rgba(0, 61, 140, .08);
+      border-radius: 20px;
+      overflow: hidden;
+    }
+
+    .lb-bul-fill {
+      height: 100%;
+      border-radius: 20px;
+      background: linear-gradient(90deg, var(--blue), var(--yellow));
+      width: var(--pp, 0%);
+      transition: width 1.2s var(--ease);
+    }
+
+    .lb-bul-pct {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+
+    
+    .hero-star {
+      font-size: 16px;
+      margin-left: 6px;
+    }
+
+    
+    .err-bar {
+      background: rgba(220, 38, 38, .08);
+      border: 1.5px solid rgba(220, 38, 38, .2);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--red);
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .err-bar.show {
+      display: flex;
+    }
+
+    
+    .footer {
+      padding: 7px 20px;
+      border-top: 1px solid var(--bdr);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--surf);
+      flex-shrink: 0;
+    }
+
+    .fbrand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .fl-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      display: inline-block;
+      animation: lp 2s infinite;
+    }
+
+    
+    @keyframes lp {
+      0% {
+        box-shadow: 0 0 0 0 rgba(190, 204, 0, .7)
+      }
+
+      70% {
+        box-shadow: 0 0 0 8px transparent
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 transparent
+      }
+    }
+
+    @keyframes sweep {
+      to {
+        left: 120%
+      }
+    }
+
+    @keyframes sbar {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .2
+      }
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .35
+      }
+    }
+
+    @keyframes rglow {
+
+      0%,
+      100% {
+        opacity: 1;
+        text-shadow: none
+      }
+
+      50% {
+        opacity: .5;
+        text-shadow: 0 0 20px rgba(220, 38, 38, .8)
+      }
+    }
+
+    @keyframes rpulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 transparent
+      }
+
+      50% {
+        box-shadow: 0 0 0 8px rgba(220, 38, 38, .25)
+      }
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: -200% 0
+      }
+
+      100% {
+        background-position: 200% 0
+      }
+    }
+
+    @keyframes fl-in {
+      from {
+        opacity: 0;
+        transform: translateX(-6px)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+
+    
+    <header class="hdr">
+      <div class="hl">
+        <div class="badge">PMM</div>
+        <div>
+          <div class="ht">Monitor Cargas - Bodega <span id="hdr-bod" style="display: none;">IMEX</span></div>
+        </div>
+      </div>
+      <div class="hr">
+        <div class="hub-pill" id="hub-pill">
+          <div class="hub-dot"></div><span id="hub-lbl">Conectando…</span>
+        </div>
+        <div class="hdiv"></div>
+        <div class="hstat">
+          <div class="hstat-v" id="hdr-act">–</div>
+          <div class="hstat-l">Activos</div>
+        </div>
+        <div class="hdiv"></div>
+        <div class="hclock">
+          <div class="t" id="hdr-time">–</div>
+          <div class="d" id="hdr-date">–</div>
+        </div>
+      </div>
+    </header>
+    <div class="ticker"></div>
+
+    <main class="main">
+      
+      <div class="hero-panel">
+        <div class="panel-label" style="--lc:var(--red)">⚡ Mayor tiempo</div>
+        <div class="err-bar" id="err-bar"><span>⚠</span><span id="err-msg">Error</span></div>
+        <div id="hero-slot" style="flex:1;display:flex;flex-direction:column;min-height:0;"></div>
+      </div>
+
+      <div class="lb-panel">
+        <div class="panel-label">
+          Todos los bodegueros
+          <span id="sec-count" style="color:var(--blue);font-weight:900;font-size:inherit">0</span> activos
+        </div>
+        <div class="lb-table">
+          <div class="lb-thead">
+            <div></div>
+            <div class="lb-th">Bodeguero</div>
+            <div class="lb-th">Inicio → Fin</div>
+            <div class="lb-th">Duración</div>
+            <div class="lb-th">Caja</div>
+            <div class="lb-th">Cliente</div>
+          </div>
+          <div class="lb-tbody" id="lb-body"></div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="fbrand" style="display: none;"><span class="fl-dot"></span> PMMovil · Control de Bodega <span
+          id="ft-bod">01</span></div>
+      <div id="ft-time">–</div>
+    </footer>
+  </div>
+
+  <script>
+    
+    const P = new URLSearchParams(location.search);
+    const BOD = P.get('bodega') || '01';
+    const KEY = P.get('key') || 'PMM-BODEGA-2026-DASHBOARD';
+    const BASE = location.origin;
+    const ARC_HERO = 320, ARC_MINI = 145, MAX_MIN = 90, OVERDUE = 30 * 60 * 1000;
+
+    document.getElementById('hdr-bod').textContent = BOD;
+    document.getElementById('ft-bod').textContent = BOD;
+
+    
+
+    const T = {};
+
+    const pad = v => String(v).padStart(2, '0');
+    const DIAS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+    const MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+    function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function fmt(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`; }
+    function hhmm(iso) {
+      if (!iso) return null;
+      const d = new Date(iso);
+      if (isNaN(d) || d.getFullYear() < 2000) return null;
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    function calcMs(item) {
+      if (!item.inicioCarga) return 0;
+      const start = new Date(item.inicioCarga).getTime();
+      if (isNaN(start) || start < 1e12) return 0;
+      const ref = (item.finalizada && item.finCarga) ? new Date(item.finCarga).getTime() : Date.now();
+      return Math.max(0, ref - start);
+    }
+    function stCls(ms, ov) { return ov ? 'overdue' : ms < 30 * 60000 ? 'ok' : ms < 60 * 60000 ? 'warn' : 'alert'; }
+    function arcColor(ms, ov) { return ov ? 'var(--red)' : ms < 30 * 60000 ? 'var(--yellow)' : ms < 60 * 60000 ? 'var(--amber)' : 'var(--red)'; }
+    function stKey(est) { const e = (est || '').toLowerCase(); return e.includes('cargad') ? 'cargada' : e.includes('autoriz') ? 'autorizada' : e.includes('salid') ? 'salida' : 'other'; }
+
+    
+    function tickClock() {
+      const n = new Date();
+      document.getElementById('hdr-time').textContent = `${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+      document.getElementById('hdr-date').textContent = `${DIAS[n.getDay()]} ${n.getDate()} ${MESES[n.getMonth()]}`;
+    }
+
+    
+    function tickAll() {
+      const n = Date.now();
+      for (const [k, t] of Object.entries(T)) {
+        const ms = t.finMs != null ? (t.finMs - t.startMs) : (n - t.startMs);
+        const ov = t.finMs == null && ms >= OVERDUE;
+        const c = stCls(ms, ov);
+        const str = fmt(ms);
+
+        if (t.timerEl) { t.timerEl.textContent = str; t.timerEl.className = `${t.timerCls} ${c}`; }
+        if (t.arcEl) {
+          const max = t.isHero ? ARC_HERO : ARC_MINI;
+          t.arcEl.style.strokeDashoffset = max * (1 - Math.min(ms / 60000 / MAX_MIN, 1));
+          t.arcEl.style.stroke = arcColor(ms, ov);
+        }
+        if (t.arcTEl) t.arcTEl.textContent = str;
+        if (t.rowEl) {
+          t.rowEl.className = `lb-row${t.isHero ? ' hero-row' : ''} ${c}`;
+        }
+        if (t.cardEl) {
+          t.cardEl.className = 'hero-card ' + c;
+          if (t.topEl) { if (ov) t.topEl.classList.add('ov'); else t.topEl.classList.remove('ov'); }
+        }
+
+        if (k === 'hero') {
+          document.body.className = 'a-' + (ov || ms >= 60 * 60000 ? 'alert' : ms >= 30 * 60000 ? 'warn' : 'ok');
+        }
+      }
+    }
+
+    
+    function buildHero(item, ms) {
+      const ov = !item.finCarga && ms >= OVERDUE;
+      const c = stCls(ms, ov);
+      const str = fmt(ms);
+      const pct = item.totalBultos > 0 ? Math.round(item.bultosCargados / item.totalBultos * 100) : 0;
+      const ini = hhmm(item.inicioCarga);
+      const fin = hhmm(item.finCarga);
+      const ao = ARC_HERO * (1 - Math.min(ms / 60000 / MAX_MIN, 1));
+
+      return `
+  <div class="hero-card ${c}" id="hc">
+    <div class="${ov ? 'hero-top ov' : 'hero-top'}" id="ht">
+      <div>
+        <div class="hero-tag"><div class="${ov ? 'hpulse r' : 'hpulse'}"></div>${ov ? '⚠ Tiempo excedido' : 'Mayor tiempo activo'}</div>
+        <div class="hero-nm">${esc(item.nombreCompleto)}</div>
+        <div class="hero-id">${esc(item.bodeguero)} · ${esc(item.relno)}</div>
+      </div>
+      <div class="arc-w">
+        <svg class="arc-svg" viewBox="0 0 110 110">
+          <circle class="arc-track" cx="55" cy="55" r="51"/>
+          <circle class="arc-fill" id="arc-h" cx="55" cy="55" r="51" style="stroke-dashoffset:${ao};stroke:${arcColor(ms, ov)}"/>
+        </svg>
+        <div class="arc-in">
+          <div class="arc-t" id="arc-ht">${str}</div>
+          <div class="arc-sub">${item.finalizada ? 'finalizada' : 'en proceso'}</div>
+        </div>
+      </div>
+    </div>
+    <div class="hero-body">
+      <div class="big-timer ${c}" id="htimer">${str}</div>
+      <div class="timer-lbl">Tiempo total · inicio → ${item.finCarga ? 'fin' : 'ahora'}</div>
+      <div class="tf-row">
+        <div class="tf-b">
+          <div class="tf-l">🟢 Inicio</div>
+          <div class="tf-v">${ini || '—'}</div>
+        </div>
+        <div class="tf-arr">⟶</div>
+        <div class="tf-b">
+          <div class="tf-l">${item.finCarga ? '🏁 Fin' : '🔴 Abierta'}</div>
+          <div class="tf-v ${item.finCarga ? 'fin' : 'open'}">${fin || (ov ? '>30 min' : '—')}</div>
+        </div>
+      </div>
+      <div class="dg">
+        <div class="dc"><div class="dl">Estatus</div><div class="dv"><span class="est-pill"><span class="edot"></span>${esc(item.estatus || '—')}</span></div></div>
+        <div class="dc"><div class="dl">📦 Caja</div><div class="dv">${esc(item.caja) || '—'}</div></div>
+        <div class="dc"><div class="dl">👤 Cliente</div><div class="dv">${esc(item.clienteId) || '—'}</div></div>
+        ${item.placas ? `<div class="dc"><div class="dl">Placas</div><div class="dv">${esc(item.placas)}</div></div>` : ''}
+        ${item.creferencia ? `<div class="dc" style="grid-column:span 2"><div class="dl">Relacion</div><div class="dv" style="font-size:12px">${esc(item.creferencia)}</div></div>` : ''}
+      </div>
+      ${item.totalBultos > 0 ? `<div class="bwrap"><div class="bhdr"><span class="blbl">📦 Progreso de bultos</span><span class="bcnt">${item.bultosCargados} / ${item.totalBultos} (${pct}%)</span></div><div class="prog-track"><div class="prog-fill" style="--pp:${pct}%"></div></div></div>` : ''}
+    </div>
+  </div>`;
+    }
+
+    
+    function buildRow(item, ms, idx, isHero) {
+      const ov = !item.finCarga && ms >= OVERDUE;
+      const c = stCls(ms, ov);
+      const str = fmt(ms);
+      const pct = item.totalBultos > 0 ? Math.round(item.bultosCargados / item.totalBultos * 100) : 0;
+      const ini = hhmm(item.inicioCarga);
+      const fin = hhmm(item.finCarga);
+      const sk = stKey(item.estatus);
+
+      return `
+  <div class="lb-row${isHero ? ' hero-row' : ''} ${c}" id="row-${idx}">
+    <div class="lb-bar"></div>
+
+    <div class="lb-name">
+      <div class="lb-nombre">${esc(item.nombreCompleto)}${isHero ? '<span class="hero-star">⭐</span>' : ''}</div>
+      <div class="lb-nombre-sub">${esc(item.bodeguero)} · ${esc(item.relno)}</div>
+      <div><span class="lb-st ${sk}">${esc(item.estatus || '—')}</span></div>
+    </div>
+
+    <div class="lb-times">
+      <div class="lb-time-block">
+        <div class="lb-time-lbl">INI</div>
+        <div class="lb-time-val ${ini ? '' : ' dash'}">${ini || '—'}</div>
+      </div>
+      <div class="lb-time-arr">›</div>
+      <div class="lb-time-block">
+        <div class="lb-time-lbl">FIN</div>
+        <div class="lb-time-val ${item.finCarga ? 'fin' : ov ? 'open' : ' dash'}">${fin || (ov ? '!open' : '—')}</div>
+      </div>
+    </div>
+
+    <div class="lb-timer ${c}" id="lbt-${idx}">${str}</div>
+
+    <div class="lb-caja">
+      <div class="lb-caja-lbl">📦 Caja</div>
+      <div class="lb-caja-val ${item.caja ? '' : 'none'}">${esc(item.caja) || 'Sin caja'}</div>
+    </div>
+
+    <div class="lb-cli">
+      <div class="lb-cli-lbl">👤 Cliente</div>
+      <div class="lb-cli-val ${item.clienteId ? '' : 'none'}">${esc(item.clienteId) || '—'}</div>
+    </div>
+  </div>`;
+    }
+
+    
+    function render(items) {
+      Object.keys(T).forEach(k => delete T[k]);
+      const heroSlot = document.getElementById('hero-slot');
+      const lbBody = document.getElementById('lb-body');
+      document.getElementById('hdr-act').textContent = items.length || '0';
+      document.getElementById('sec-count').textContent = items.length || '0';
+
+      if (!items || !items.length) {
+        heroSlot.innerHTML = `<div class="empty"><div style="font-size:3rem;opacity:.3">📭</div><h3>Sin actividad</h3><p>No hay bodegueros activos en Bodega ${esc(BOD)}</p></div>`;
+        lbBody.innerHTML = '';
+        document.body.className = 'a-ok';
+        return;
+      }
+
+      const now = Date.now();
+
+      const sorted = items.map(item => ({ item, ms: calcMs(item) })).sort((a, b) => b.ms - a.ms);
+
+      const { item: hi, ms: hms } = sorted[0];
+
+      heroSlot.innerHTML = buildHero(hi, hms);
+
+      lbBody.innerHTML = sorted.map(({ item, ms }, i) => buildRow(item, ms, i, i === 0)).join('');
+
+      const regTimer = (key, item, ms, isHero) => {
+        const fMs = (item.finalizada && item.finCarga) ? new Date(item.finCarga).getTime() : null;
+        const sMs = item.inicioCarga ? new Date(item.inicioCarga).getTime() : now - ms;
+        T[key] = { startMs: sMs, finMs: fMs, isHero };
+      };
+
+      regTimer('hero', hi, hms, true);
+      T['hero'].timerCls = 'big-timer';
+      T['hero'].timerEl = document.getElementById('htimer');
+      T['hero'].arcEl = document.getElementById('arc-h');
+      T['hero'].arcTEl = document.getElementById('arc-ht');
+      T['hero'].cardEl = document.getElementById('hc');
+      T['hero'].topEl = document.getElementById('ht');
+
+      sorted.forEach(({ item, ms }, i) => {
+        const k = `row-${i}`;
+        regTimer(k, item, ms, i === 0);
+        T[k].timerCls = 'lb-timer';
+        T[k].timerEl = document.getElementById(`lbt-${i}`);
+        T[k].rowEl = document.getElementById(`row-${i}`);
+        if (i === 0) {
+          T[k].cardEl = T['hero'].cardEl;
+          T[k].topEl = T['hero'].topEl;
+        }
+      });
+    }
+
+    
+    async function fetchData(silent = false) {
+      if (!silent) document.getElementById('err-bar').classList.remove('show');
+      try {
+        const res = await fetch(`${BASE}/api/bodega/activos?bodega=${encodeURIComponent(BOD)}&key=${encodeURIComponent(KEY)}`, { headers: { Accept: 'application/json' } });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.message || `HTTP ${res.status}`); }
+        const data = await res.json();
+        if (!data.success) throw new Error(data.message || 'Respuesta inválida');
+
+        console.info('[Bodega]', data.items?.map(x => ({ n: x.nombreCompleto, ini: x.inicioCarga, fin: x.finCarga })));
+        render(data.items || []);
+        const n = new Date();
+        document.getElementById('ft-time').textContent = `Actualizado: ${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+      } catch (err) {
+        console.error('[Bodega]', err);
+        document.getElementById('err-msg').textContent = err.message || 'Error';
+        document.getElementById('err-bar').classList.add('show');
+      }
+    }
+
+    function connectHub() {
+      const hub = new signalR.HubConnectionBuilder()
+        .withUrl(`${BASE}/hubs/bodega`)
+        .withAutomaticReconnect([2000, 5000, 10000, 30000])
+        .configureLogging(signalR.LogLevel.Warning)
+        .build();
+      const pill = document.getElementById('hub-pill'), lbl = document.getElementById('hub-lbl');
+      hub.onreconnecting(() => { pill.className = 'hub-pill'; lbl.textContent = 'Reconectando…'; });
+      hub.onreconnected(() => { pill.className = 'hub-pill ok'; lbl.textContent = 'En vivo'; fetchData(true); });
+      hub.onclose(() => { pill.className = 'hub-pill err'; lbl.textContent = 'Sin conexión'; });
+      hub.on('onActividadBodega', () => fetchData(true));
+      hub.start()
+        .then(() => { pill.className = 'hub-pill ok'; lbl.textContent = 'En vivo'; })
+        .catch(e => { pill.className = 'hub-pill err'; lbl.textContent = 'Sin conexión'; console.warn(e); setInterval(() => fetchData(true), 30000); });
+    }
+
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      tickClock(); setInterval(tickClock, 1000);
+      setInterval(tickAll, 1000);
+      fetchData();
+      connectHub();
+      setInterval(() => fetchData(true), 60000);
+    });
+  </script>
+</body>
+
+</html>

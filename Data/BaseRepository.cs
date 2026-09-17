@@ -1,45 +1,59 @@
 using System.Data;
-using MySqlConnector;
+
 using Microsoft.Extensions.Configuration;
 
-namespace PMMovil.Api.Data
+using MySqlConnector;
+
+namespace PMMovil.Api.Data;
+
+public class BaseRepository
 {
-    /// <summary>
-    /// Clase base que proporciona la conexión a la base de datos MySQL para usar con Dapper.
-    /// Diseñada para ser inyectada en los controladores o servicios.
-    /// 
-    /// Porque se opto usar Dapper? Por su mayor rapidez en las consultas, su practica es sencilla
-    /// la teoria puede ser un poco complicada de entender pero, practicandola, es muy amigable
-    /// </summary>
-    public class BaseRepository
+    private readonly IConfiguration _configuration;
+
+    private readonly string _reportesConn;
+
+    private readonly string _pmmtrafConn;
+
+    private readonly string _pmmtoolsConn;
+
+    private readonly string _pmmutileriaConn;
+
+    public BaseRepository(IConfiguration configuration)
     {
-        private readonly IConfiguration _configuration;
-        private readonly string _reportesConn;
-        private readonly string _pmmtrafConn;
+        _configuration = configuration;
+        _reportesConn = _configuration.GetConnectionString("ReportesDb") ?? "";
+        _pmmtrafConn = _configuration.GetConnectionString("PmmtrafDb") ?? "";
+        _pmmtoolsConn = _configuration.GetConnectionString("PmmtoolsDb") ?? _pmmtrafConn;
+        _pmmutileriaConn = _configuration.GetConnectionString("PmmutileriaDb")
+            ?? GetDatabaseConnection(_pmmtrafConn, "pmmutileria");
+    }
 
-        public BaseRepository(IConfiguration configuration)
-        {
-            _configuration = configuration;
-            _reportesConn = _configuration.GetConnectionString("ReportesDb") ?? "";
-            _pmmtrafConn = _configuration.GetConnectionString("PmmtrafDb") ?? "";
-        }
+    public IDbConnection CreateReportesConnection()
+    {
+        return new MySqlConnection(_reportesConn);
+    }
 
-        /// <summary>
-        /// Crea una conexión a la base de datos de administración/usuarios.
-        /// </summary>
-        public IDbConnection CreateReportesConnection()
-        {
-            return new MySqlConnection(_reportesConn);
-        }
+    public IDbConnection CreateConnection()
+    {
+        return new MySqlConnection(_pmmtrafConn);
+    }
 
-        /// <summary>
-        /// Crea una conexión a la base de datos de tráfico/operación.
-        /// (Dapper se encarga de que sea rápida y eficiente).
-        /// </summary>
-        public IDbConnection CreateConnection()
+    public IDbConnection CreatePmmtoolsConnection()
+    {
+        return new MySqlConnection(_pmmtoolsConn);
+    }
+
+    public IDbConnection CreatePmmutileriaConnection()
+    {
+        return new MySqlConnection(_pmmutileriaConn);
+    }
+
+    private static string GetDatabaseConnection(string connectionString, string database)
+    {
+        MySqlConnectionStringBuilder builder = new(connectionString)
         {
-            return new MySqlConnection(_pmmtrafConn);
-        }
+            Database = database
+        };
+        return builder.ConnectionString;
     }
 }
-

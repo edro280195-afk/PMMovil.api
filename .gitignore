@@ -37,6 +37,29 @@ mono_crash.*
 
 # Environment files
 appsettings.Local.json
+appsettings.json
+appsettings.Production.json
+
+# Salida de "dotnet publish" -- puede traer appsettings.Local.json/
+# .Development.json antes de que existiera el CopyToPublishDirectory=Never
+# del .csproj. No debe versionarse; se regenera con cada publish.
+publish/
+publish-*/
+verify-build*/
+
+# Firebase service account (clave privada de envío FCM) -- nunca al repo.
+firebase-service-account.json
+
+# Codex / AI logs
+.codex-logs/
+
+# Archivos locales o publicados que no deben versionarse
+*.zip
+*.pfx
+*.p12
+*.pem
+*.key
+nul
 
 # Claude / AI
 .claude/
