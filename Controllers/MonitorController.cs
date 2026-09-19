@@ -37,13 +37,72 @@ public class MonitorController : ControllerBase
     private readonly IRealtimeNotificationService _notifications;
     private readonly RevisionActivityService _activityService;
 
-    public MonitorController(BaseRepository db, IHubContext<WarehouseHub> hub, ILogger<MonitorController> logger, IRealtimeNotificationService notifications, RevisionActivityService activityService)
+    private readonly IMonitorTvLinkService _monitorTvLinkService;
+
+    public MonitorController(
+        BaseRepository db,
+        IHubContext<WarehouseHub> hub,
+        ILogger<MonitorController> logger,
+        IRealtimeNotificationService notifications,
+        RevisionActivityService activityService,
+        IMonitorTvLinkService monitorTvLinkService)
     {
         _db = db;
         _hub = hub;
         _logger = logger;
         _notifications = notifications;
         _activityService = activityService;
+        _monitorTvLinkService = monitorTvLinkService;
+    }
+
+    [HttpGet("tv-links")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor)]
+    public async Task<IActionResult> GetTvLinks(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<MonitorTvLinkItem> items = await _monitorTvLinkService.ListarAsync(cancellationToken);
+        return Ok(new { success = true, items });
+    }
+
+    [HttpPost("tv-links")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor, "Modificar")]
+    public async Task<IActionResult> CreateTvLink(
+        [FromBody] CrearMonitorTvLinkRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.ExpiraEnDias is < 0 or > 3650)
+        {
+            return BadRequest(new
+            {
+                success = false,
+                message = "La vigencia debe estar entre 0 y 3650 días."
+            });
+        }
+
+        CrearMonitorTvLinkResult result = await _monitorTvLinkService.CrearAsync(
+            request,
+            User.Identity?.Name ?? "sistema",
+            cancellationToken);
+
+        return Ok(new { success = true, item = result });
+    }
+
+    [HttpDelete("tv-links/{id:long}")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor, "Modificar")]
+    public async Task<IActionResult> RevokeTvLink(long id, CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return BadRequest(new { success = false, message = "Identificador inválido." });
+        }
+
+        bool revoked = await _monitorTvLinkService.RevocarAsync(
+            id,
+            User.Identity?.Name ?? "sistema",
+            cancellationToken);
+
+        return revoked
+            ? Ok(new { success = true })
+            : NotFound(new { success = false, message = "El enlace no existe o ya fue revocado." });
     }
 
     [HttpGet("actividades")]
@@ -85,6 +144,14 @@ public class MonitorController : ControllerBase
         {
             using IDbConnection conn = _db.CreateConnection();
             string sql = "SELECT t.creferencia, MAX(CASE WHEN t.finiciorevision >= '2000-01-01' THEN t.finiciorevision ELSE NULL END) AS finiciorevision,    MAX(CASE WHEN t.ffinrevision >= '2000-01-01' THEN t.ffinrevision ELSE NULL END) AS ffinrevision,    MAX(CASE WHEN t.ftomadocumento >= '2000-01-01' THEN t.ftomadocumento ELSE NULL END)  AS ftomadocumento,   MAX(COALESCE(t.estatus_final, 0))   AS estatus_final,    COALESCE( (SELECT usuario FROM traftiemposrevision  WHERE creferencia = t.creferencia    AND (ffinrevision IS NULL OR YEAR(ffinrevision) < 2000)  ORDER BY finiciorevision DESC, ftomadocumento DESC  LIMIT 1), (SELECT usuario FROM traftiemposrevision  WHERE creferencia = t.creferencia    AND usuario IS NOT NULL AND usuario != ''  ORDER BY idtiemposrevision DESC  LIMIT 1)    )    AS usuario,    MAX(c.cnombre)     AS nombre_cliente,    MAX(td.ubicacion)  AS ubicacion,    COUNT(DISTINCT f.cnofact) AS total_facturas,    COUNT(DISTINCT CASE WHEN f.status_rev = 1 THEN f.cnofact END)  AS facturas_completas,    COUNT(DISTINCT CASE WHEN f.status_rev = 2 THEN f.cnofact END)  AS facturas_discrepancia,    (SELECT discrepancias FROM fact WHERE cref_agrupada = t.creferencia AND status_rev = 2 ORDER BY dfecha DESC LIMIT 1) AS ultima_discrepancia,    (SELECT MAX(CASE WHEN rd.lhazmat = 1 THEN 1 ELSE 0 END)     FROM revdet rd WHERE rd.cref = t.creferencia)   AS lhazmat,    (SELECT MAX(CASE WHEN r2.STATUS != 'COMPLETA' THEN 1 ELSE 0 END)     FROM traf2 t2     INNER JOIN relacion r2 ON t2.nrelacion = r2.relno     WHERE t2.CREF_ORIGEN = t.creferencia) AS has_incomplete_relations,   (SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)     FROM traftiemposrevision t2     WHERE t2.creferencia = t.creferencia AND t2.finiciorevision IS NOT NULL AND YEAR(t2.finiciorevision) >= 2000 AND t2.ffinrevision   IS NOT NULL AND YEAR(t2.ffinrevision)   >= 2000) AS segundos_acumulados,    (SELECT MAX(t3.finiciorevision)     FROM traftiemposrevision t3     WHERE t3.creferencia = t.creferencia AND t3.finiciorevision IS NOT NULL AND YEAR(t3.finiciorevision) >= 2000 AND (t3.ffinrevision IS NULL OR YEAR(t3.ffinrevision) < 2000) AND t3.finiciorevision >= DATE_SUB(NOW(), INTERVAL 18 HOUR)) AS inicio_sesion_actual FROM traftiemposrevision t LEFT JOIN fact f     ON t.creferencia = f.cref_agrupada LEFT JOIN clientes c ON c.cidcte = f.cclienteid AND c.inactivo = 0 LEFT JOIN trafdet td ON td.creferencia = t.creferencia WHERE ( (t.ffinrevision IS NULL OR YEAR(t.ffinrevision) < 2000) AND t.usuario IS NOT NULL AND t.usuario != '' AND (     (t.finiciorevision IS NOT NULL AND YEAR(t.finiciorevision) >= 2000 AND t.finiciorevision >= DATE_SUB(NOW(), INTERVAL 18 HOUR)) OR     (t.ftomadocumento IS NOT NULL AND YEAR(t.ftomadocumento) >= 2000 AND t.ftomadocumento >= DATE_SUB(NOW(), INTERVAL 1 HOUR)) ))  OR ( t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000 AND t.ffinrevision >= DATE_SUB(NOW(), INTERVAL 15 MINUTE) AND t.estatus_final = 1     )GROUP BY t.creferencia ORDER BY COALESCE(MAX(t.finiciorevision), MAX(t.ftomadocumento)) DESC";
+            // Esta consulta histórica se construyó originalmente en una sola
+            // línea. Sustituimos únicamente el predicado del acumulado para
+            // que el Monitor comparta la misma regla de sesiones sanas que el
+            // Timer y los reportes, sin alterar sus demás filtros.
+            sql = sql.Replace(
+                "t2.finiciorevision IS NOT NULL AND YEAR(t2.finiciorevision) >= 2000 AND t2.ffinrevision   IS NOT NULL AND YEAR(t2.ffinrevision)   >= 2000",
+                RevisionTimeRules.ClosedSessionPredicate("t2"),
+                StringComparison.Ordinal);
             List<dynamic> rows = (await conn.QueryAsync<dynamic>(sql)).ToList();
             List<string> referencias = rows
                 .Select((dynamic r) => (string)r.creferencia)

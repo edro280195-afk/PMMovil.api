@@ -104,6 +104,18 @@ namespace PMMovil.Api.Models
         public string Descrip { get; set; } = string.Empty;
     }
 
+    /// <summary>
+    /// Unidad comercial del catálogo legacy. Codigo es el valor visible
+    /// (cidunidad), mientras CodigoInterno es el valor que PMM guarda en UMC
+    /// (umcint); por ejemplo PIES -> LF.
+    /// </summary>
+    public class UnidadComercial
+    {
+        public string Codigo { get; set; } = string.Empty;
+        public string Nombre { get; set; } = string.Empty;
+        public string CodigoInterno { get; set; } = string.Empty;
+    }
+
     public class PaisFrecuente
     {
         public string Codigo { get; set; } = string.Empty;

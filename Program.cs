@@ -49,6 +49,11 @@ try
 {
     var builder = WebApplication.CreateBuilder(args);
 
+    // Registrar el conversor antes de construir servicios o atender workers.
+    // MySQL puede entregar fechas inválidas como MySqlDateTime; Dapper debe
+    // conocer este handler desde el inicio para mapear correctamente DateTime?.
+    SqlMapper.AddTypeHandler(new MySqlDateTimeHandler());
+
     builder.Host.UseSerilog((context, services, configuration) =>
     {
         configuration
@@ -111,6 +116,8 @@ try
     builder.Services.AddScoped<IEntradaShareService, EntradaShareService>();
     builder.Services.AddScoped<IRevisionShareService, RevisionShareService>();
     builder.Services.AddScoped<IReportShareService, ReportShareService>();
+    builder.Services.AddScoped<IMonitorTvLinkService, MonitorTvLinkService>();
+    builder.Services.AddScoped<MonitorTvPublicService>();
     builder.Services.AddScoped<SalidaService>();
     builder.Services.AddScoped<CasetaService>();
     builder.Services.AddScoped<SalidaCasetaService>();
@@ -217,13 +224,29 @@ try
                     Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0
                 }));
+        // Una pantalla publica consulta cada 15 segundos. El limite permite
+        // varias pantallas desde la misma oficina sin convertir el enlace en
+        // un endpoint de alto volumen para scraping.
+        options.AddPolicy("MonitorTvPublicPolicy", context =>
+            System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+                partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "sin-ip",
+                factory: _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 120,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     });
 
-    builder.Services.AddHostedService<AutoFinalizerService>();
-    builder.Services.AddHostedService<RevisionHygieneService>();
-    builder.Services.AddHostedService<CasetaPhotoSyncWorker>();
-    builder.Services.AddHostedService<PreregistroPurgeWorker>();
+    bool disableBackgroundWorkers = builder.Configuration.GetValue<bool>("DisableBackgroundWorkers");
+    if (!disableBackgroundWorkers)
+    {
+        builder.Services.AddHostedService<AutoFinalizerService>();
+        builder.Services.AddHostedService<RevisionHygieneService>();
+        builder.Services.AddHostedService<CasetaPhotoSyncWorker>();
+        builder.Services.AddHostedService<PreregistroPurgeWorker>();
+    }
 
     var jwtSettings = builder.Configuration.GetSection("Jwt");
     var key = Encoding.UTF8.GetBytes(jwtSettings["Secret"] ?? throw new InvalidOperationException("JWT Secret not found"));
@@ -322,8 +345,6 @@ try
     });
 
     var app = builder.Build();
-
-    SqlMapper.AddTypeHandler(new MySqlDateTimeHandler());
 
     // Modo admin de un solo comando: reenviar el correo de una entrada de caseta
     // ya guardada (caso "no me llegó el correo"), sin pasar por HTTP/JWT.

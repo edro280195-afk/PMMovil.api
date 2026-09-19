@@ -27,6 +27,18 @@ public class GuardarCampoPartidaDto
     public JsonElement valor { get; set; }
 }
 
+/// <summary>
+/// Guarda cantidad comercial y unidad en conjunto, como lo hace el formulario
+/// legacy: el cliente envía el código visible y el servidor resuelve el
+/// umcint/cunidadfactura canónicos desde pmmtraf.unidades.
+/// </summary>
+public class GuardarCantidadComercialDto
+{
+    public int id { get; set; }
+    public decimal cantidad { get; set; }
+    public string unidad { get; set; } = "";
+}
+
 public class SolicitarDesbloqueoDto
 {
     public string cnofact { get; set; } = "";

@@ -66,7 +66,10 @@ public class TimerController : ControllerBase
             {
                 cref = creferencia
             });
-            string sqlAcum = "SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0) FROM traftiemposrevision WHERE creferencia = @cref AND finiciorevision IS NOT NULL AND YEAR(finiciorevision) >= 2000 AND ffinrevision   IS NOT NULL AND YEAR(ffinrevision)   >= 2000";
+            string sqlAcum = $@"SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)
+                FROM traftiemposrevision
+                WHERE creferencia = @cref
+                  AND {RevisionTimeRules.ClosedSessionPredicate()}";
             long acumulados = await conn.ExecuteScalarAsync<long>(sqlAcum, new
             {
                 cref = creferencia
@@ -227,7 +230,10 @@ public class TimerController : ControllerBase
                 {
                     cref = creferencia
                 });
-                string sqlAcum = "   SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0) FROM traftiemposrevision WHERE creferencia = @cref AND finiciorevision IS NOT NULL AND YEAR(finiciorevision) >= 2000     AND ffinrevision   IS NOT NULL AND YEAR(ffinrevision)   >= 2000";
+                string sqlAcum = $@"SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)
+                    FROM traftiemposrevision
+                    WHERE creferencia = @cref
+                      AND {RevisionTimeRules.ClosedSessionPredicate()}";
                 long acumulados = await conn.ExecuteScalarAsync<long>(sqlAcum, new
                 {
                     cref = creferencia

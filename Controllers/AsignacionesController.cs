@@ -550,7 +550,7 @@ public class AsignacionesController : ControllerBase
                     message = "Entrada no encontrada"
                 });
             }
-            IEnumerable<object> historico = await conn.QueryAsync<object>(" SELECT  f.usurev AS revisor,  COUNT(*) AS cantidad,  AVG(TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision)) AS tiempoPromedioMin  FROM fact f  LEFT JOIN traftiemposrevision t ON t.creferencia = f.cref_agrupada  AND t.usuario = f.usurev  AND t.ffinrevision IS NOT NULL  WHERE f.cclienteid = @clienteId  AND f.usurev IS NOT NULL AND f.usurev != ''  GROUP BY f.usurev  ORDER BY cantidad DESC  LIMIT 8", new
+            IEnumerable<object> historico = await conn.QueryAsync<object>(" SELECT  f.usurev AS revisor,  COUNT(*) AS cantidad,  AVG(TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision)) AS tiempoPromedioMin  FROM fact f  LEFT JOIN traftiemposrevision t ON t.creferencia = f.cref_agrupada  AND t.usuario = f.usurev  AND " + RevisionTimeRules.ClosedSessionPredicate("t") + "  WHERE f.cclienteid = @clienteId  AND f.usurev IS NOT NULL AND f.usurev != ''  GROUP BY f.usurev  ORDER BY cantidad DESC  LIMIT 8", new
             {
                 clienteId = (object)entradaInfo.cclienteid
             });

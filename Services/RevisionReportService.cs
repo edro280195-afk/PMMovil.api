@@ -117,14 +117,18 @@ public class RevisionReportService : IRevisionReportService
  (SELECT NULLIF(TRIM(t.usurevisa), '')
     FROM traftiemposrevision t
    WHERE t.creferencia = f.cref_agrupada
-     AND t.ffinrevision IS NOT NULL
-     AND YEAR(t.ffinrevision) >= 2000
+     AND " + RevisionTimeRules.ClosedSessionPredicate("t") + @"
      AND NULLIF(TRIM(t.usurevisa), '') IS NOT NULL
    ORDER BY t.ffinrevision DESC, t.idtiemposrevision DESC
    LIMIT 1) AS usuarioRevisorClave,
- (SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0) 
-  FROM traftiemposrevision 
-  WHERE creferencia = f.cref_agrupada) AS segundosTotales
+ (SELECT NULLIF(TRIM(t3.observacion_revision), '')
+    FROM traf3 t3
+   WHERE t3.creferencia = f.cref_agrupada
+   LIMIT 1) AS observacionRevision,
+ (SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)
+  FROM traftiemposrevision
+  WHERE creferencia = f.cref_agrupada
+    AND " + RevisionTimeRules.ClosedSessionPredicate() + @") AS segundosTotales
   FROM fact f
   LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
   LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
@@ -145,7 +149,8 @@ public class RevisionReportService : IRevisionReportService
  MAX(f.status_rev) AS status_rev,
  MAX(f.totbultos) AS totbultos,
  MAX(f.totbultosdoc) AS totbultosdoc,
- MAX(f.discrepancias) AS discrepancias,
+ MAX(NULLIF(TRIM(f.discrepancias), '')) AS discrepancias,
+ MAX(NULLIF(TRIM(f.obsrev), '')) AS observacionNormal,
  COUNT(rd.idrevdet) AS totalPartidas,
  SUM(rd.revisada) AS partidasRevisadas
   FROM fact f
@@ -404,6 +409,7 @@ public class RevisionReportService : IRevisionReportService
         {
             usuario = Convert.ToString(data.usuarioRevisorClave)?.Trim() ?? string.Empty;
         }
+        string observacionGeneral = Convert.ToString(data.observacionRevision)?.Trim() ?? string.Empty;
         long segundos = (long)(data.segundosTotales ?? 0L);
         string tiempo = TimeSpan.FromSeconds(segundos).ToString(@"hh\:mm\:ss");
         int totalFisicos = (int)(data.bultosFisicos ?? 0);
@@ -503,6 +509,17 @@ public class RevisionReportService : IRevisionReportService
 
         sb.Append("</table>");
 
+        if (!string.IsNullOrWhiteSpace(observacionGeneral))
+        {
+            sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"background-color:#fffbeb; border-left: 5px solid #f59e0b; margin-bottom: 30px;\">");
+            sb.Append("<tr><td style=\"padding: 20px;\">");
+            sb.Append("<h4 style=\"margin:0 0 10px 0; color:#92400e; font-size: 12px; text-transform:uppercase;\">Observaciones del Revisador</h4>");
+            sb.Append("<p style=\"margin:0; font-size:14px; line-height:1.5; color:#451a03; white-space:pre-line;\">")
+                .Append(WebUtility.HtmlEncode(observacionGeneral))
+                .Append("</p>");
+            sb.Append("</td></tr></table>");
+        }
+
         sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"margin-bottom:28px;\">");
         sb.Append("<tr>");
 
@@ -533,11 +550,12 @@ public class RevisionReportService : IRevisionReportService
             string sCol = status == 1 ? "#3a7d00" : (status == 2 ? "#c0392b" : "#6b7a99");
             string rowBg = alt ? colorRowAlt : colorWhite;
             alt = !alt;
+            string factura = Convert.ToString(f.cnofact)?.Trim() ?? string.Empty;
 
             string tdStyle = "background-color:" + rowBg + "; padding-top:10px; padding-bottom:10px; padding-left:12px; padding-right:12px; font-family:Arial, Helvetica, sans-serif; font-size:13px; color:" + colorTextDark + "; border-bottom:1px solid " + colorBorder + "; text-align:center;";
 
             sb.Append("<tr bgcolor=\"").Append(rowBg).Append("\">");
-            sb.Append("<td align=\"center\" style=\"").Append(tdStyle).Append("\">").Append(f.cnofact).Append("</td>");
+            sb.Append("<td align=\"center\" style=\"").Append(tdStyle).Append("\">").Append(WebUtility.HtmlEncode(factura)).Append("</td>");
             sb.Append("<td align=\"center\" style=\"").Append(tdStyle).Append("\">").Append((int)f.totbultos).Append(" / ").Append((int)f.totbultosdoc).Append("</td>");
             sb.Append("<td align=\"center\" style=\"").Append(tdStyle).Append("\">").Append((int)f.partidasRevisadas).Append(" / ").Append((int)f.totalPartidas).Append("</td>");
             sb.Append("<td align=\"center\" style=\"").Append(tdStyle).Append(" font-weight:bold; color:").Append(sCol).Append(";\">").Append(sTxt).Append("</td>");
@@ -545,6 +563,8 @@ public class RevisionReportService : IRevisionReportService
         }
 
         sb.Append("</table>");
+
+        AppendSeccionObservacionesFacturas(sb, facturas, colorPrimary, colorAccent, colorBorder, colorTextMuted, colorTextDark, colorRowAlt);
 
         AppendSeccionEvidencia(sb, fotos, galeriaUrl, colorPrimary, colorAccent, colorWhite, colorTextMuted, colorTextDark, colorBorder, colorRowAlt);
 
@@ -560,6 +580,69 @@ public class RevisionReportService : IRevisionReportService
         sb.Append("</body></html>");
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Incluye las observaciones que pertenecen a cada factura. La observación
+    /// general se muestra por separado dentro del resumen de la revisión; aquí
+    /// se conservan las dos notas que pueden variar entre facturas: la normal
+    /// (fact.obsrev) y la discrepancia (fact.discrepancias).
+    /// </summary>
+    private static void AppendSeccionObservacionesFacturas(
+        StringBuilder sb,
+        IEnumerable<dynamic> facturas,
+        string colorPrimary,
+        string colorAccent,
+        string colorBorder,
+        string colorTextMuted,
+        string colorTextDark,
+        string colorRowAlt)
+    {
+        List<dynamic> facturasConObservaciones = facturas
+            .Where(f =>
+                !string.IsNullOrWhiteSpace(Convert.ToString(f.observacionNormal)) ||
+                !string.IsNullOrWhiteSpace(Convert.ToString(f.discrepancias)))
+            .ToList();
+
+        if (facturasConObservaciones.Count == 0)
+        {
+            return;
+        }
+
+        sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"border-collapse:collapse; margin-top:28px; margin-bottom:28px;\">");
+        sb.Append("<tr><td style=\"padding-bottom:10px; border-bottom:2px solid ").Append(colorAccent).Append(";\">");
+        sb.Append("<p style=\"margin:0; padding:0; font-family:Arial, Helvetica, sans-serif; font-size:14px; font-weight:bold; color:").Append(colorPrimary).Append(";\">Observaciones por factura</p>");
+        sb.Append("</td></tr>");
+
+        foreach (dynamic factura in facturasConObservaciones)
+        {
+            string numeroFactura = Convert.ToString(factura.cnofact)?.Trim() ?? string.Empty;
+            string observacionNormal = Convert.ToString(factura.observacionNormal)?.Trim() ?? string.Empty;
+            string discrepancia = Convert.ToString(factura.discrepancias)?.Trim() ?? string.Empty;
+
+            sb.Append("<tr><td bgcolor=\"").Append(colorRowAlt).Append("\" style=\"background-color:").Append(colorRowAlt).Append("; border-bottom:1px solid ").Append(colorBorder).Append("; padding-top:16px; padding-bottom:16px; padding-left:16px; padding-right:16px;\">");
+            sb.Append("<p style=\"margin:0 0 12px 0; font-family:Arial, Helvetica, sans-serif; font-size:13px; font-weight:bold; color:").Append(colorPrimary).Append(";\">Factura ").Append(WebUtility.HtmlEncode(numeroFactura)).Append("</p>");
+
+            if (!string.IsNullOrWhiteSpace(observacionNormal))
+            {
+                sb.Append("<p style=\"margin:0 0 6px 0; font-family:Arial, Helvetica, sans-serif; font-size:11px; font-weight:bold; color:").Append(colorTextMuted).Append("; text-transform:uppercase; letter-spacing:.4px;\">Observación normal</p>");
+                sb.Append("<p style=\"margin:0 0 14px 0; font-family:Arial, Helvetica, sans-serif; font-size:13px; line-height:1.5; color:").Append(colorTextDark).Append("; white-space:pre-line;\">")
+                    .Append(WebUtility.HtmlEncode(observacionNormal))
+                    .Append("</p>");
+            }
+
+            if (!string.IsNullOrWhiteSpace(discrepancia))
+            {
+                sb.Append("<p style=\"margin:0 0 6px 0; font-family:Arial, Helvetica, sans-serif; font-size:11px; font-weight:bold; color:#b42318; text-transform:uppercase; letter-spacing:.4px;\">Discrepancia</p>");
+                sb.Append("<p style=\"margin:0; font-family:Arial, Helvetica, sans-serif; font-size:13px; line-height:1.5; color:#7f1d1d; white-space:pre-line;\">")
+                    .Append(WebUtility.HtmlEncode(discrepancia))
+                    .Append("</p>");
+            }
+
+            sb.Append("</td></tr>");
+        }
+
+        sb.Append("</table>");
     }
 
     /// <summary>Sección "Evidencia fotográfica" del correo: solo cuenta y enlaza -- ya
@@ -738,7 +821,7 @@ public class RevisionReportService : IRevisionReportService
         sb.Append("<p style=\"margin:8px 0 0 0; font-size:14px; color: #cbd5e1;\">Entrada <strong>").Append(WebUtility.HtmlEncode(cref)).Append("</strong> · ").Append(WebUtility.HtmlEncode(cliente)).Append("</p></td>");
 
         sb.Append("<td align=\"right\" width=\"140\">");
-        sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td bgcolor=\"#becc00\" style=\"padding: 8px 16px; color: #003d8c; font-weight: bold; font-size: 12px; text-transform: uppercase;\">Completada ✓</td></tr></table>");
+        sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\"><tr><td bgcolor=\"#becc00\" style=\"padding: 8px 16px; color: #003d8c; font-weight: bold; font-size: 12px; text-transform: uppercase;\">FINALIZADA ✓</td></tr></table>");
         sb.Append("</td></tr></table></td></tr>");
 
         sb.Append("<tr><td style=\"padding: 30px;\">");

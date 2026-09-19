@@ -294,6 +294,29 @@ public class RevisionController : ControllerBase
         }
     }
 
+    [HttpGet("catalogos/unidades-comerciales")]
+    public async Task<IActionResult> GetUnidadesComerciales()
+    {
+        try
+        {
+            var items = await _revisionService.GetUnidadesComercialesAsync();
+            return Ok(new
+            {
+                success = true,
+                items
+            });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en GetUnidadesComerciales");
+            return StatusCode(500, new
+            {
+                success = false,
+                message = "Error al obtener unidades comerciales"
+            });
+        }
+    }
+
     [HttpGet("entrada-completa/{cref_agrupada}")]
     public async Task<IActionResult> GetEntradaCompleta(string cref_agrupada)
     {
@@ -302,7 +325,8 @@ public class RevisionController : ControllerBase
             var tFacturas = _revisionService.GetFacturasEntradaAsync(cref_agrupada);
             var tPartidas = _revisionService.GetPartidasEntradaAsync(cref_agrupada);
             var tObservacion = _revisionService.GetObservacionRevisionAsync(cref_agrupada);
-            await Task.WhenAll(tFacturas, tPartidas, tObservacion);
+            var tSegundosAcumulados = _revisionService.GetSegundosAcumuladosAsync(cref_agrupada);
+            await Task.WhenAll(tFacturas, tPartidas, tObservacion, tSegundosAcumulados);
 
             return Ok(new
             {
@@ -310,6 +334,7 @@ public class RevisionController : ControllerBase
                 facturas = tFacturas.Result,
                 partidas = tPartidas.Result,
                 observacionRevision = tObservacion.Result,
+                segundosAcumulados = tSegundosAcumulados.Result,
                 serverTime = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff")
             });
         }
@@ -385,6 +410,30 @@ public class RevisionController : ControllerBase
         {
             _logger.LogError(exception, "Error en GuardarCampoProducto");
             return StatusCode(500, new { success = false, message = "Error al guardar campo del producto" });
+        }
+    }
+
+    [HttpPatch("partida/cantidad-comercial")]
+    public async Task<IActionResult> GuardarCantidadComercial([FromBody] GuardarCantidadComercialDto payload)
+    {
+        try
+        {
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            bool success = await _revisionService.GuardarCantidadComercialAsync(
+                payload.id,
+                payload.cantidad,
+                payload.unidad,
+                usuario);
+            return Ok(new { success });
+        }
+        catch (ArgumentException argEx)
+        {
+            return BadRequest(new { success = false, message = argEx.Message });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en GuardarCantidadComercial para partida {id}", payload?.id);
+            return StatusCode(500, new { success = false, message = "Error al guardar cantidad comercial" });
         }
     }
 

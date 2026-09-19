@@ -84,14 +84,17 @@ public class RevisionReportPdfService
                 MAX(td.ubicacion) AS ubicacion,
                 (SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)
                  FROM traftiemposrevision WHERE creferencia = f.cref_agrupada
-                   AND finiciorevision IS NOT NULL AND ffinrevision IS NOT NULL) AS segundosTotales,
-                (SELECT MIN(finiciorevision) FROM traftiemposrevision
-                 WHERE creferencia = f.cref_agrupada AND YEAR(finiciorevision) >= 2000) AS inicio,
-                (SELECT MAX(ffinrevision) FROM traftiemposrevision
-                 WHERE creferencia = f.cref_agrupada AND YEAR(ffinrevision) >= 2000) AS fin,
-                (SELECT usurevisa FROM traftiemposrevision
-                 WHERE creferencia = f.cref_agrupada AND YEAR(ffinrevision) >= 2000
-                 ORDER BY ffinrevision DESC LIMIT 1) AS supervisorCierre
+                   AND " + RevisionTimeRules.ClosedSessionPredicate() + @") AS segundosTotales,
+                (SELECT MIN(ti.finiciorevision) FROM traftiemposrevision ti
+                 WHERE ti.creferencia = f.cref_agrupada
+                   AND " + RevisionTimeRules.ClosedSessionPredicate("ti") + @") AS inicio,
+                (SELECT MAX(tf.ffinrevision) FROM traftiemposrevision tf
+                 WHERE tf.creferencia = f.cref_agrupada
+                   AND " + RevisionTimeRules.ClosedSessionPredicate("tf") + @") AS fin,
+                (SELECT tc.usurevisa FROM traftiemposrevision tc
+                 WHERE tc.creferencia = f.cref_agrupada
+                   AND " + RevisionTimeRules.ClosedSessionPredicate("tc") + @"
+                 ORDER BY tc.ffinrevision DESC LIMIT 1) AS supervisorCierre
             FROM fact f
             LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
             LEFT JOIN revdet rd ON rd.cnofact = f.cnofact

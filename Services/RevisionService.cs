@@ -696,6 +696,157 @@ new { creferencia });
         return await conn.QueryAsync<PartidaRevision>(sql, new { cref = cref_agrupada });
     }
 
+    /// <summary>
+    /// Devuelve el tiempo acumulado de las sesiones cerradas y válidas de una
+    /// entrada. Se comparte la misma regla que usan el cronómetro, el monitor
+    /// y los reportes para que el detalle histórico no muestre cero ni vuelva
+    /// a sumar sesiones inválidas.
+    /// </summary>
+    public async Task<long> GetSegundosAcumuladosAsync(string crefAgrupada)
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        string sql = @"
+            SELECT COALESCE(SUM(TIMESTAMPDIFF(SECOND, finiciorevision, ffinrevision)), 0)
+            FROM traftiemposrevision
+            WHERE creferencia = @cref
+              AND " + RevisionTimeRules.ClosedSessionPredicate();
+
+        return await conn.ExecuteScalarAsync<long>(sql, new { cref = crefAgrupada });
+    }
+
+    /// <summary>
+    /// Catálogo de UMC equivalente a Combo18/unidades2 del formulario
+    /// frmclasdet.SCT (el combo que alimenta RevDet.cUnidadFactura, es decir
+    /// la "unidad comercial" visible): solo unidades activas para M3 o AMBOS.
+    /// OJO: no es el mismo filtro que Combo17/unidades (COVE o AMBOS), que
+    /// alimenta revdet.umcint -- son dos catálogos distintos derivados de la
+    /// misma tabla "unidades" con sistema diferente. Usar el filtro de COVE
+    /// aquí hacía que la lista mostrara unidades de aduana (BALE, KEG,
+    /// PALETA...) que Combo18 nunca ofrece, y ocultaba nada práctico porque
+    /// las unidades reales (KILO, LIBRAS, LITRO, GALON) son todas "AMBOS".
+    /// </summary>
+    public async Task<IEnumerable<UnidadComercial>> GetUnidadesComercialesAsync()
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        const string sql = @"
+            SELECT
+                TRIM(cidunidad) AS Codigo,
+                TRIM(COALESCE(cnombre, cidunidad)) AS Nombre,
+                TRIM(umcint) AS CodigoInterno
+            FROM unidades
+            WHERE inactivo = 0
+              AND sistema IN ('M3', 'AMBOS')
+              AND TRIM(COALESCE(cidunidad, '')) <> ''
+              AND TRIM(COALESCE(umcint, '')) <> ''
+            ORDER BY cnombre, cidunidad";
+
+        return await conn.QueryAsync<UnidadComercial>(sql);
+    }
+
+    /// <summary>
+    /// Replica el comportamiento de las dos listas del legacy en una sola
+    /// operación: cantidad comercial (cantumc), UMC interna (umcint) y la
+    /// unidad visible/origen (cunidadfactura) siempre quedan sincronizadas.
+    /// </summary>
+    public async Task<bool> GuardarCantidadComercialAsync(
+        int id,
+        decimal cantidad,
+        string unidad,
+        string usuario)
+    {
+        if (id <= 0)
+        {
+            throw new ArgumentException("La partida no es válida.", nameof(id));
+        }
+
+        if (cantidad < 0)
+        {
+            throw new ArgumentException("La cantidad comercial no puede ser negativa.", nameof(cantidad));
+        }
+
+        string codigoSolicitado = unidad.Trim();
+        if (string.IsNullOrWhiteSpace(codigoSolicitado))
+        {
+            throw new ArgumentException("Selecciona una unidad comercial.", nameof(unidad));
+        }
+
+        using IDbConnection conn = _db.CreateConnection();
+        UnidadComercial? unidadCatalogo = await conn.QueryFirstOrDefaultAsync<UnidadComercial>(@"
+            SELECT
+                TRIM(cidunidad) AS Codigo,
+                TRIM(COALESCE(cnombre, cidunidad)) AS Nombre,
+                TRIM(umcint) AS CodigoInterno
+            FROM unidades
+            WHERE inactivo = 0
+              AND sistema IN ('M3', 'AMBOS')
+              AND UPPER(TRIM(cidunidad)) = UPPER(TRIM(@unidad))
+              AND TRIM(COALESCE(umcint, '')) <> ''
+            LIMIT 1",
+            new { unidad = codigoSolicitado });
+
+        if (unidadCatalogo == null)
+        {
+            throw new ArgumentException(
+                $"La unidad '{codigoSolicitado}' no está activa en el catálogo legacy de UMC.",
+                nameof(unidad));
+        }
+
+        int rows = await conn.ExecuteAsync(@"
+            UPDATE revdet
+            SET cantumc = @cantidad,
+                umcint = @codigoInterno,
+                cunidadfactura = @codigo,
+                usumodi = @usuario,
+                fmodi = NOW()
+            WHERE idrevdet = @id",
+            new
+            {
+                id,
+                cantidad,
+                codigo = unidadCatalogo.Codigo,
+                codigoInterno = unidadCatalogo.CodigoInterno,
+                usuario
+            });
+
+        if (rows == 0)
+        {
+            // Con UseAffectedRows=true, MySQL devuelve cero cuando el dato ya
+            // tenía exactamente esos valores. Eso es éxito, no una partida
+            // inexistente; distinguimos ambos casos antes de responder error.
+            int existe = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(1) FROM revdet WHERE idrevdet = @id",
+                new { id });
+            if (existe == 0)
+            {
+                return false;
+            }
+        }
+
+        if (rows > 0)
+        {
+            (string? cref, string? factura) = await ObtenerPartidaActividadAsync(conn, id);
+            string detalle = $"Cantidad comercial actualizada: {cantidad:0.###} {unidadCatalogo.Codigo} (UMC {unidadCatalogo.CodigoInterno})";
+            await _activityService.RegistrarAsync(
+                cref ?? string.Empty,
+                usuario,
+                RevisionActivityTypes.CampoPartida,
+                factura,
+                id,
+                detalle);
+            if (!string.IsNullOrWhiteSpace(cref))
+            {
+                await _hub.Clients.All.SendAsync(
+                    "onActividadRecibida",
+                    cref,
+                    usuario,
+                    factura ?? string.Empty,
+                    detalle);
+            }
+        }
+
+        return true;
+    }
+
     public async Task<bool> GuardarCampoFacturaAsync(string cnofact, string campo, string valor, string usuario)
     {
         var columnMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
