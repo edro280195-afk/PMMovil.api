@@ -81,8 +81,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("reporte/{token}.pdf")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<IActionResult> VerReporte(string token)
     {
+        SetPublicShareHeaders();
         ReportShareTarget? target = await _reportShareService.ResolverAsync(token);
         if (target == null)
         {
@@ -116,8 +118,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("entrada/{token}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<ContentResult> VerEntrada(string token)
     {
+        SetPublicShareHeaders();
         EntradaShareResumen? resumen = await _shareService.ObtenerResumenAsync(token);
         string html = resumen == null
             ? EntradaShareHtmlRenderer.RenderExpirado()
@@ -132,8 +136,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("entrada/{token}/foto/{linea}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<IActionResult> VerFoto(string token, int linea)
     {
+        SetPublicShareHeaders();
         (string FilePath, string Extension)? foto = await _shareService.ObtenerFotoAsync(token, linea);
         if (foto == null)
         {
@@ -145,8 +151,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("revision/{token}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<ContentResult> VerRevision(string token)
     {
+        SetPublicShareHeaders();
         RevisionShareResumen? resumen = await _revisionShareService.ObtenerResumenAsync(token);
         string html = resumen == null
             ? RevisionShareHtmlRenderer.RenderExpirado()
@@ -161,8 +169,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("revision/{token}/foto/{idFotos}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<IActionResult> VerFotoRevision(string token, int idFotos)
     {
+        SetPublicShareHeaders();
         (string FilePath, string Extension)? foto = await _revisionShareService.ObtenerFotoAsync(token, idFotos);
         if (foto == null)
         {
@@ -174,8 +184,10 @@ public class PublicoController : ControllerBase
     }
 
     [HttpGet("revision/{token}/zip")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<IActionResult> DescargarZipRevision(string token)
     {
+        SetPublicShareHeaders();
         (string CrefAgrupada, List<(string FilePath, string FileName)> Archivos)? datos =
             await _revisionShareService.ObtenerArchivosParaZipAsync(token);
 
@@ -198,5 +210,19 @@ public class PublicoController : ControllerBase
 
         ms.Position = 0;
         return File(ms, "application/zip", $"evidencia-{datos.Value.CrefAgrupada}.zip");
+    }
+
+    /// <summary>
+    /// Mismos encabezados que ya se ponían solo en MonitorTv -- el resto de
+    /// los enlaces públicos también llevan un secreto en la URL (el token),
+    /// así que también les conviene no cachearse, no indexarse en buscadores
+    /// ni filtrar el origen por Referer hacia recursos de terceros.
+    /// </summary>
+    private void SetPublicShareHeaders()
+    {
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
+        Response.Headers["Referrer-Policy"] = "no-referrer";
     }
 }

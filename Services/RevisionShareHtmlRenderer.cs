@@ -1,6 +1,7 @@
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 using PMMovil.Api.Models;
 
@@ -22,6 +23,18 @@ public static class RevisionShareHtmlRenderer
     {
         string cliente = Enc(r.NombreCliente.Length > 0 ? r.NombreCliente : "Sin información");
         string cref = Enc(r.CrefAgrupada);
+
+        // fotoBaseUrl/zipUrl traen el token de la URL tal cual llegó -- a
+        // diferencia del resto de los valores de esta página, NO vienen de
+        // la base de datos, así que no basta con el mismo Enc() de siempre:
+        // se necesita codificación por contexto (atributo HTML vs. cadena
+        // JS). Hoy no es explotable (el token solo hace match si es
+        // EXACTAMENTE el GUID de 32 hex que generó el servidor, sin
+        // metacaracteres), pero se codifica de todas formas para no
+        // depender de eso.
+        string fotoBaseUrlHtml = Enc(fotoBaseUrl);
+        string fotoBaseUrlJs = JsonSerializer.Serialize(fotoBaseUrl);
+        string zipUrlHtml = Enc(zipUrl);
 
         bool algunaDiscrepancia = r.Facturas.Any(f => f.StatusRev == 2);
         (string Texto, string Clase) estadoGeneral = r.TotalFacturas == 0
@@ -80,7 +93,7 @@ public static class RevisionShareHtmlRenderer
                 html.Append($@"
               <div class=""photo-tile{(esDiscrepancia ? " photo-tile--discrepancia" : "")}"" onclick=""openViewer({globalIndex})"">
                 {(esDiscrepancia ? "<span class=\"photo-tile__badge\">Discrepancia</span>" : "")}
-                <img src=""{fotoBaseUrl}/{fotos[i].IdFotos}"" alt=""{(esDiscrepancia ? "Discrepancia" : "Evidencia")}"" loading=""lazy"">
+                <img src=""{fotoBaseUrlHtml}/{fotos[i].IdFotos}"" alt=""{(esDiscrepancia ? "Discrepancia" : "Evidencia")}"" loading=""lazy"">
                 {fechaRegistro}
               </div>");
             }
@@ -106,7 +119,7 @@ public static class RevisionShareHtmlRenderer
         string expiraTexto = r.Expira.ToString("d MMM, HH:mm");
 
         string ctaZipHtml = totalFotos > 0
-            ? $@"<div class=""summary__cta""><a href=""{zipUrl}"" class=""btn-primary"">⬇ Descargar todo (ZIP)</a></div>"
+            ? $@"<div class=""summary__cta""><a href=""{zipUrlHtml}"" class=""btn-primary"">⬇ Descargar todo (ZIP)</a></div>"
             : "";
 
         return $@"<!doctype html>
@@ -196,7 +209,7 @@ public static class RevisionShareHtmlRenderer
 </div>
 
 <script>
-  const photoBase = ""{fotoBaseUrl}"";
+  const photoBase = {fotoBaseUrlJs};
   const fotos = {fotosJs};
   let currentIndex = 0;
 

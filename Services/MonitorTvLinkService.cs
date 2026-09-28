@@ -223,11 +223,10 @@ public sealed class MonitorTvLinkService : IMonitorTvLinkService
         }
     }
 
-    private static string HashToken(string token)
-    {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+    // Factorizado a ShareTokenHasher para que EntradaShareService/
+    // RevisionShareService/ReportShareService usen el mismo algoritmo en vez
+    // de reimplementarlo cada uno.
+    private static string HashToken(string token) => ShareTokenHasher.Hash(token);
 
     private static string ToBase64Url(byte[] bytes)
     {

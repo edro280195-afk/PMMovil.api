@@ -63,13 +63,21 @@ public class EntradaShareService : IEntradaShareService
         }
 
         string token = Guid.NewGuid().ToString("N");
+        // El token real ya NO se guarda en texto plano -- solo su hash
+        // (para validar) y un "hint" de 8 caracteres en la columna legacy
+        // `token` (mismo criterio que monitor_tv_links/token_hint), por si
+        // algún día hace falta ubicar un enlace a simple vista en soporte.
+        // Si pmmutileria alguna vez se filtra, un enlace vigente ya no queda
+        // usable de inmediato solo con leer la tabla.
+        string tokenHash = ShareTokenHasher.Hash(token);
+        string tokenHint = token[..8];
         DateTime expira = DateTime.Now.Add(Vigencia);
 
         using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
         await utilConn.ExecuteAsync(
-            @"INSERT INTO entrada_links_compartidos (token, cref_agrupada, usucrea, fexpira)
-              VALUES (@token, @cref, @usuario, @expira)",
-            new { token, cref, usuario, expira });
+            @"INSERT INTO entrada_links_compartidos (token, token_hash, cref_agrupada, usucrea, fexpira)
+              VALUES (@tokenHint, @tokenHash, @cref, @usuario, @expira)",
+            new { tokenHint, tokenHash, cref, usuario, expira });
 
         _logger.LogInformation("Link de seguimiento generado para {Cref} por {Usuario}, expira {Expira}", cref, usuario, expira);
         return (token, expira);
@@ -200,6 +208,7 @@ public class EntradaShareService : IEntradaShareService
     private async Task<(string Cref, DateTime GeneradoEn, DateTime Expira)?> ResolverAsync(string token)
     {
         using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
+        string tokenHash = ShareTokenHasher.Hash(token);
 
         // Clase tipada (no dynamic) a propósito -- cref_agrupada tiene guion
         // bajo y sin alias explícito Dapper NO lo mapea a CrefAgrupada (ver
@@ -208,9 +217,9 @@ public class EntradaShareService : IEntradaShareService
         EntradaLinkRow? link = await utilConn.QueryFirstOrDefaultAsync<EntradaLinkRow>(
             @"SELECT cref_agrupada AS CrefAgrupada, fcrea AS Fcrea, fexpira AS Fexpira, revocado AS Revocado
               FROM entrada_links_compartidos
-              WHERE token = @token
+              WHERE token_hash = @tokenHash
               LIMIT 1",
-            new { token });
+            new { tokenHash });
 
         if (link == null)
         {

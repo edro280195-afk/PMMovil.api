@@ -236,6 +236,20 @@ try
                     Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0
                 }));
+        // Enlaces públicos de "Ver reporte" / "Seguimiento de entrada" /
+        // "Seguimiento de revisión" (PublicoController): igual que
+        // MonitorTvPublicPolicy, por IP. Una sola persona abriendo su enlace
+        // y viendo varias fotos no debería acercarse a este límite, pero sí
+        // frena un scraping o fuerza bruta automatizado desde la misma IP.
+        options.AddPolicy("PublicoLinksPolicy", context =>
+            System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+                partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "sin-ip",
+                factory: _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 60,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     });
 
@@ -404,15 +418,25 @@ try
         };
     });
 
+    app.UseMiddleware<SecurityHeadersMiddleware>();
     app.UseMiddleware<GlobalExceptionMiddleware>();
 
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    // Swagger/OpenAPI solo en Development -- en producción quedaba en
+    // /swagger/index.html sin autenticación, regalando el mapa completo de
+    // rutas y modelos internos a cualquiera en internet (verificado en vivo
+    // el 2026-09-28). Todo endpoint sigue detrás de [Authorize] de todas
+    // formas, pero no hace falta facilitarle el reconocimiento a nadie.
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI();
+    }
 
     app.UseCors("PMMovilCors");
     app.UseStaticFiles();
     if (!app.Environment.IsDevelopment())
     {
+        app.UseHsts();
         app.UseHttpsRedirection();
     }
     app.UseRateLimiter();

@@ -41,7 +41,10 @@ public interface IRevisionShareService
 /// </summary>
 public class RevisionShareService : IRevisionShareService
 {
-    private static readonly TimeSpan Vigencia = TimeSpan.FromHours(72);
+    // Vigencia fija en calendario (2 meses desde que se genera), no un
+    // conteo de días -- así el link no se acerca a vencer solo por quedarse
+    // varios días sin descargarse.
+    private const int VigenciaMeses = 2;
 
     private readonly BaseRepository _db;
     private readonly ILogger<RevisionShareService> _logger;
@@ -69,13 +72,19 @@ public class RevisionShareService : IRevisionShareService
         }
 
         string token = Guid.NewGuid().ToString("N");
-        DateTime expira = DateTime.Now.Add(Vigencia);
+        // El token real ya NO se guarda en texto plano -- solo su hash (para
+        // validar) y un "hint" de 8 caracteres en la columna legacy `token`
+        // (mismo criterio que monitor_tv_links/token_hint). Con 2 meses de
+        // vigencia, esto importa más aquí que en ningún otro enlace público.
+        string tokenHash = ShareTokenHasher.Hash(token);
+        string tokenHint = token[..8];
+        DateTime expira = DateTime.Now.AddMonths(VigenciaMeses);
 
         using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
         await utilConn.ExecuteAsync(
-            @"INSERT INTO revision_links_compartidos (token, cref_agrupada, usucrea, fexpira)
-              VALUES (@token, @cref, @usuario, @expira)",
-            new { token, cref = crefAgrupada, usuario, expira });
+            @"INSERT INTO revision_links_compartidos (token, token_hash, cref_agrupada, usucrea, fexpira)
+              VALUES (@tokenHint, @tokenHash, @cref, @usuario, @expira)",
+            new { tokenHint, tokenHash, cref = crefAgrupada, usuario, expira });
 
         _logger.LogInformation("Link de seguimiento de revisión generado para {Cref} por {Usuario}, expira {Expira}", crefAgrupada, usuario, expira);
         return (token, expira);
@@ -305,13 +314,14 @@ public class RevisionShareService : IRevisionShareService
     private async Task<(string Cref, DateTime GeneradoEn, DateTime Expira)?> ResolverAsync(string token)
     {
         using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
+        string tokenHash = ShareTokenHasher.Hash(token);
 
         dynamic? link = await utilConn.QueryFirstOrDefaultAsync<object>(
             @"SELECT cref_agrupada, fcrea, fexpira, revocado
               FROM revision_links_compartidos
-              WHERE token = @token
+              WHERE token_hash = @tokenHash
               LIMIT 1",
-            new { token });
+            new { tokenHash });
 
         if (link == null)
         {

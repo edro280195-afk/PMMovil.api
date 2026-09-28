@@ -52,12 +52,19 @@ public class ReportShareService : IReportShareService
     {
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
         string token = Guid.NewGuid().ToString("N");
+        // El token real ya NO se guarda en texto plano -- solo su hash (para
+        // validar) y un "hint" de 8 caracteres en la columna legacy `token`
+        // (mismo criterio que monitor_tv_links/token_hint). La vigencia de 20
+        // min ya limitaba mucho el riesgo, pero no hay razón para no aplicar
+        // el mismo estándar que el resto de los enlaces públicos.
+        string tokenHash = ShareTokenHasher.Hash(token);
+        string tokenHint = token[..8];
         DateTime expira = DateTime.Now.Add(Vigencia);
 
         await conn.ExecuteAsync(
-            @"INSERT INTO reporte_links_temporales (token, tipo, referencia, id_reporte, usucrea, fexpira)
-              VALUES (@token, @tipo, @referencia, @idReporte, @usuario, @expira)",
-            new { token, tipo, referencia, idReporte, usuario, expira });
+            @"INSERT INTO reporte_links_temporales (token, token_hash, tipo, referencia, id_reporte, usucrea, fexpira)
+              VALUES (@tokenHint, @tokenHash, @tipo, @referencia, @idReporte, @usuario, @expira)",
+            new { tokenHint, tokenHash, tipo, referencia, idReporte, usuario, expira });
 
         _logger.LogInformation("Link de reporte generado (tipo={Tipo}) por {Usuario}, expira {Expira}", tipo, usuario, expira);
         return (token, expira);
@@ -66,13 +73,14 @@ public class ReportShareService : IReportShareService
     public async Task<ReportShareTarget?> ResolverAsync(string token)
     {
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        string tokenHash = ShareTokenHasher.Hash(token);
 
         dynamic? row = await conn.QueryFirstOrDefaultAsync<object>(
             @"SELECT tipo, referencia, id_reporte, fexpira
               FROM reporte_links_temporales
-              WHERE token = @token
+              WHERE token_hash = @tokenHash
               LIMIT 1",
-            new { token });
+            new { tokenHash });
 
         if (row == null || DateTime.Now > (DateTime)row.fexpira)
         {

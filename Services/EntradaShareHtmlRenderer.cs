@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 using PMMovil.Api.Models;
 
@@ -23,11 +24,21 @@ public static class EntradaShareHtmlRenderer
         string fecha = Enc(r.FechaLlegada ?? "—");
         string cref = Enc(r.CrefAgrupada);
 
+        // fotoBaseUrl trae el token de la URL tal cual llegó -- a diferencia
+        // del resto de los valores de esta página, NO viene de la base de
+        // datos, así que no basta con el mismo Enc() de siempre: se necesita
+        // una codificación por contexto (atributo HTML vs. cadena JS). Hoy no
+        // es explotable (el token solo hace match si es EXACTAMENTE el GUID
+        // de 32 hex que generó el servidor, sin metacaracteres), pero se
+        // codifica de todas formas para no depender de eso.
+        string fotoBaseUrlHtml = Enc(fotoBaseUrl);
+        string fotoBaseUrlJs = JsonSerializer.Serialize(fotoBaseUrl);
+
         var photosHtml = new StringBuilder();
         foreach (EntradaShareFoto foto in r.Fotos)
         {
             string caption = Enc(foto.Caption ?? "Foto");
-            string src = $"{fotoBaseUrl}/{foto.NLineNo}";
+            string src = $"{fotoBaseUrlHtml}/{foto.NLineNo}";
             photosHtml.Append($@"
               <div class=""photo-tile"" onclick=""openLightbox({foto.NLineNo})"">
                 <img src=""{src}"" alt=""{caption}"" loading=""lazy"">
@@ -94,7 +105,7 @@ public static class EntradaShareHtmlRenderer
 </div>
 
 <script>
-  const photoBase = ""{fotoBaseUrl}"";
+  const photoBase = {fotoBaseUrlJs};
   function openLightbox(linea) {{
     document.getElementById('lightboxImg').src = photoBase + '/' + linea;
     document.getElementById('lightbox').classList.add('show');
