@@ -16,11 +16,16 @@ namespace PMMovil.Api.Services;
 /// comparten un visor tipo carrusel (flechas, contador, atajos de teclado).
 /// Todo texto que viene de la base de datos se escapa: la puede abrir
 /// cualquiera con el link.
+///
+/// El tema (<see cref="ShareTheme"/>) solo agrega ilustraciones, estilos y un
+/// script de parallax en puntos fijos del HTML; nunca toca ni agrega textos.
+/// Con <see cref="ShareTheme.None"/> la salida es idéntica a la de siempre.
 /// </summary>
 public static class RevisionShareHtmlRenderer
 {
-    public static string RenderResumen(RevisionShareResumen r, string fotoBaseUrl, string zipUrl)
+    public static string RenderResumen(RevisionShareResumen r, string fotoBaseUrl, string zipUrl, ShareTheme theme = ShareTheme.None)
     {
+        ShareThemeParts t = ShareThemeParts.For(theme, expired: false);
         string cliente = Enc(r.NombreCliente.Length > 0 ? r.NombreCliente : "Sin información");
         string cref = Enc(r.CrefAgrupada);
 
@@ -131,9 +136,9 @@ public static class RevisionShareHtmlRenderer
 <link rel=""preconnect"" href=""https://fonts.googleapis.com"">
 <link rel=""preconnect"" href=""https://fonts.gstatic.com"" crossorigin>
 <link href=""https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap"" rel=""stylesheet"">
-<style>{Css}</style>
+<style>{Css}</style>{t.Css}
 </head>
-<body>
+<body{t.BodyAttributes}>{t.Header}
 <div class=""topbar""><div class=""topbar__inner"">
   <div class=""brand-mark"">PMM</div>
   <div>
@@ -144,9 +149,9 @@ public static class RevisionShareHtmlRenderer
 
 <div class=""shell"">
 
-  <aside class=""summary"">
+  <aside class=""summary"">{t.CardDecor}
     <div class=""summary__head"">
-      <div class=""eyebrow"">Revisión</div>
+      <div class=""eyebrow"">{t.Eyebrow}Revisión</div>
       <div class=""ref-number"">{cref}</div>
       <span class=""status-pill {estadoGeneral.Clase}"">{estadoGeneral.Texto}</span>
       <div class=""freshness"">Generado hace {minutosDesde}</div>
@@ -191,7 +196,7 @@ public static class RevisionShareHtmlRenderer
   No responder — para dudas, contacta a tu contacto en PMM.
   <div class=""footer-brand"">GRUPO PMM · SISTEMA INTERNO</div>
 </div>
-
+{t.Footer}
 <div class=""viewer"" id=""viewer"">
   <div class=""viewer__top"">
     <span class=""viewer__tag"" id=""viewerTag"">Evidencia</span>
@@ -243,13 +248,14 @@ public static class RevisionShareHtmlRenderer
     if (e.key === 'ArrowRight') navViewer(1);
     if (e.key === 'Escape') closeViewer();
   }});
-</script>
+</script>{t.Script}
 </body>
 </html>";
     }
 
-    public static string RenderExpirado()
+    public static string RenderExpirado(ShareTheme theme = ShareTheme.None)
     {
+        ShareThemeParts t = ShareThemeParts.For(theme, expired: true);
         return $@"<!doctype html>
 <html lang=""es"">
 <head>
@@ -259,9 +265,9 @@ public static class RevisionShareHtmlRenderer
 <link rel=""preconnect"" href=""https://fonts.googleapis.com"">
 <link rel=""preconnect"" href=""https://fonts.gstatic.com"" crossorigin>
 <link href=""https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"" rel=""stylesheet"">
-<style>{Css}</style>
+<style>{Css}</style>{t.Css}
 </head>
-<body>
+<body{t.BodyAttributes}>{t.Header}
 <div class=""topbar""><div class=""topbar__inner"">
   <div class=""brand-mark"">PMM</div>
   <div>
@@ -271,10 +277,10 @@ public static class RevisionShareHtmlRenderer
 </div></div>
 <div class=""expired-shell"">
   <div class=""expired-card"">
-    <h2>Este enlace ya no está disponible</h2>
+    {t.Ghost}<h2>Este enlace ya no está disponible</h2>
     <p>Por seguridad, los enlaces de seguimiento dejan de funcionar después de cierto tiempo. Pide a tu contacto en PMM que te comparta uno nuevo.</p>
   </div>
-</div>
+</div>{t.Footer}{t.Script}
 </body>
 </html>";
     }

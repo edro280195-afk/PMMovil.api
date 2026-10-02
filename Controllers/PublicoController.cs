@@ -6,6 +6,7 @@ using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Configuration;
 
 using PMMovil.Api.Data;
 using PMMovil.Api.Models;
@@ -31,6 +32,7 @@ public class PublicoController : ControllerBase
     private readonly IMonitorTvLinkService _monitorTvLinkService;
     private readonly MonitorTvPublicService _monitorTvPublicService;
     private readonly BaseRepository _db;
+    private readonly IConfiguration _config;
     private readonly ILogger<PublicoController> _logger;
 
     public PublicoController(
@@ -41,6 +43,7 @@ public class PublicoController : ControllerBase
         IMonitorTvLinkService monitorTvLinkService,
         MonitorTvPublicService monitorTvPublicService,
         BaseRepository db,
+        IConfiguration config,
         ILogger<PublicoController> logger)
     {
         _shareService = shareService;
@@ -50,6 +53,7 @@ public class PublicoController : ControllerBase
         _monitorTvLinkService = monitorTvLinkService;
         _monitorTvPublicService = monitorTvPublicService;
         _db = db;
+        _config = config;
         _logger = logger;
     }
 
@@ -155,10 +159,12 @@ public class PublicoController : ControllerBase
     public async Task<ContentResult> VerRevision(string token)
     {
         SetPublicShareHeaders();
+        // La apariencia se decide al abrir el enlace (PublicLinks:Tema, por defecto "auto"): ver ShareThemeResolver.
+        ShareTheme theme = ShareThemeResolver.Resolve(_config[ShareThemeResolver.ConfigurationKey], DateTime.Now);
         RevisionShareResumen? resumen = await _revisionShareService.ObtenerResumenAsync(token);
         string html = resumen == null
-            ? RevisionShareHtmlRenderer.RenderExpirado()
-            : RevisionShareHtmlRenderer.RenderResumen(resumen, $"/api/publico/revision/{token}/foto", $"/api/publico/revision/{token}/zip");
+            ? RevisionShareHtmlRenderer.RenderExpirado(theme)
+            : RevisionShareHtmlRenderer.RenderResumen(resumen, $"/api/publico/revision/{token}/foto", $"/api/publico/revision/{token}/zip", theme);
 
         return new ContentResult
         {
