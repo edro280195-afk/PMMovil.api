@@ -373,6 +373,48 @@ public class RevisionController : ControllerBase
         }
     }
 
+    /// <summary>Guarda UN, clase y grupo de embalaje del rombo, cada uno en su columna.</summary>
+    [HttpPatch("entrada/hazmat")]
+    public async Task<IActionResult> GuardarHazmatRevision([FromBody] GuardarHazmatRevisionDto payload)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(payload?.crefAgrupada))
+            {
+                return BadRequest(new { success = false, message = "Falta la referencia" });
+            }
+
+            // Las columnas son cortas a propósito; mejor rechazar que truncar en
+            // silencio, que es justo como se ensució este campo históricamente.
+            if ((payload.un?.Trim().Length ?? 0) > 15)
+            {
+                return BadRequest(new { success = false, message = "El número UN no cabe en 15 caracteres" });
+            }
+            if ((payload.clase?.Trim().Length ?? 0) > 4)
+            {
+                return BadRequest(new { success = false, message = "La clase no cabe en 4 caracteres" });
+            }
+            if ((payload.grupo?.Trim().Length ?? 0) > 3)
+            {
+                return BadRequest(new { success = false, message = "El grupo de embalaje no cabe en 3 caracteres" });
+            }
+
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            bool success = await _revisionService.GuardarHazmatRevisionAsync(
+                payload.crefAgrupada, payload.un, payload.clase, payload.grupo, usuario);
+            return Ok(new { success });
+        }
+        catch (ArgumentException exception)
+        {
+            return BadRequest(new { success = false, message = exception.Message });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en GuardarHazmatRevision para {cref}", payload?.crefAgrupada);
+            return StatusCode(500, new { success = false, message = "Error al guardar los datos de HazMat" });
+        }
+    }
+
     [HttpPatch("entrada/observacion")]
     public async Task<IActionResult> GuardarObservacionEntrada([FromBody] GuardarObservacionEntradaDto payload)
     {

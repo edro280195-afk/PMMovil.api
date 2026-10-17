@@ -9,6 +9,7 @@ using Dapper;
 
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using MySqlConnector;
 
 using PMMovil.Api.Data;
 using PMMovil.Api.Hubs;
@@ -658,7 +659,8 @@ new { creferencia });
     public async Task<IEnumerable<PartidaRevision>> GetPartidasEntradaAsync(string cref_agrupada)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sql = @"
+        string optionalColumns = await GetOptionalLabelColumnsAsync(conn);
+        string sql = $@"
             SELECT
                 rd.idrevdet   AS IdRevdet,
                 TRIM(rd.cnofact) AS Cnofact,
@@ -688,7 +690,8 @@ new { creferencia });
                 COALESCE(rd.nvaloragregado, 0)  AS ValorAgregado,
                 COALESCE(rd.nvalorpartidame, 0) AS ValorPartidaMe,
                 COALESCE(f.nfactorequiv, 0)     AS FactorEquivalencia,
-                COALESCE(rd.cclienteid, '')    AS Cclienteid
+                COALESCE(rd.cclienteid, '')    AS Cclienteid,
+                {optionalColumns}
             FROM fact f
             INNER JOIN revdet rd ON rd.cnofact = f.cnofact
             WHERE f.cref_agrupada = @cref
@@ -980,6 +983,96 @@ new { creferencia });
             "SELECT COUNT(1) FROM traf3 WHERE creferencia = @cref",
             new { cref = crefAgrupada });
         return existe > 0;
+    }
+
+    /// <summary>
+    /// Guarda los tres datos del rombo de mercancía peligrosa SEPARADOS.
+    ///
+    /// Hasta ahora no había forma de escribirlos desde Revisión, y en los datos se
+    /// ve el resultado: hazmat_un (varchar(15)) acaba cargando UN + clase + grupo
+    /// revueltos -- '1866 3,III', 'UN1866', '(6.1) 2922,ii' -- y 75 filas ya topan
+    /// el límite de la columna, truncadas a media palabra ('1268 3 2491 8 P').
+    /// Por eso 1,781 de 3,015 comparaciones contra revdet.cpt_cve_hazmat no empatan:
+    /// no es que el número esté mal, es que no había dónde guardarlo aparte.
+    ///
+    /// Requiere la columna traf3.hazmat_grupo (ver sql/2026-10-14-hazmat-grupo.sql).
+    /// </summary>
+    public async Task<bool> GuardarHazmatRevisionAsync(
+        string crefAgrupada,
+        string? un,
+        string? clase,
+        string? grupo,
+        string usuario)
+    {
+        LabelCaptureRules.ValidateHazmat(un, clase, grupo);
+        if (un is null && clase is null && grupo is null) return true;
+        using MySqlConnection conn = (MySqlConnection)_db.CreateConnection();
+        await conn.OpenAsync();
+        if (clase is not null && await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM clase_hazmat WHERE clase_hazmat=@clase AND inactivo=0",
+            new { clase = clase.Trim() }) == 0)
+            throw new ArgumentException("La clase Hazmat no existe en el catálogo activo.");
+
+        var parametros = new
+        {
+            cref = crefAgrupada,
+            un = un is null ? null : LabelCaptureRules.NormalizeUn(un),
+            clase = NullIfEmpty(clase),
+            grupo = NullIfEmpty(grupo)?.ToUpperInvariant()
+        };
+
+        string lockName = $"hazmat_{crefAgrupada.Trim()}";
+        if (await conn.ExecuteScalarAsync<int>("SELECT GET_LOCK(@lockName,10)", new { lockName }) != 1)
+            throw new InvalidOperationException("Los datos Hazmat se están actualizando. Reintenta en unos segundos.");
+        try
+        {
+        // Se cuenta primero en vez de confiar en las filas afectadas del UPDATE:
+        // con UseAffectedRows=true, reescribir el mismo valor devuelve 0 y
+        // acabaríamos insertando una fila duplicada.
+        int existentes = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(1) FROM traf3 WHERE creferencia = @cref",
+            new { cref = crefAgrupada });
+
+        if (existentes > 0)
+        {
+            // creferencia NO es única (el índice CREF es NON_UNIQUE) y hay 5
+            // referencias con más de una fila: se actualizan todas para no dejar
+            // una con el dato y otra sin él.
+            await conn.ExecuteAsync(
+                @"UPDATE traf3
+                     SET hazmat_un    = COALESCE(@un, hazmat_un),
+                         hazmat_clase = COALESCE(@clase, hazmat_clase),
+                         hazmat_grupo = COALESCE(@grupo, hazmat_grupo)
+                   WHERE creferencia  = @cref",
+                parametros);
+        }
+        else
+        {
+            // Las revisiones que nunca pasaron por Entrada Bodega no tienen fila en
+            // traf3. fk_idtraf se resuelve desde traf; si tampoco está, queda en 0,
+            // que es como la dejan los flujos viejos.
+            await conn.ExecuteAsync(
+                @"INSERT INTO traf3 (fk_idtraf, creferencia, hazmat_un, hazmat_clase, hazmat_grupo)
+                  SELECT COALESCE((SELECT idtraf FROM traf WHERE creferencia = @cref LIMIT 1), 0),
+                         @cref, @un, @clase, @grupo",
+                parametros);
+        }
+
+        }
+        finally
+        {
+            await conn.ExecuteAsync("SELECT RELEASE_LOCK(@lockName)", new { lockName });
+        }
+        string detalle = $"HazMat registrado: UN {parametros.un ?? "sin cambio"}, clase {parametros.clase ?? "sin cambio"}, grupo {parametros.grupo ?? "sin cambio"}";
+        await _activityService.RegistrarAsync(
+            crefAgrupada,
+            usuario,
+            RevisionActivityTypes.HazmatRegistrado,
+            detalle: detalle);
+        await _hub.Clients.All.SendAsync(
+            "onActividadRecibida", crefAgrupada, usuario, "", detalle);
+
+        return true;
     }
 
     private static string? NullIfEmpty(string? valor) =>
@@ -1580,5 +1673,19 @@ new { creferencia });
         using IDbConnection conn = _db.CreateConnection();
         string sql = "UPDATE fact SET usuedit = '' WHERE cref_agrupada = @cref";
         await conn.ExecuteAsync(sql, new { cref });
+    }
+
+    private static async Task<string> GetOptionalLabelColumnsAsync(IDbConnection connection)
+    {
+        // Las instalaciones legacy no tienen siempre las mismas columnas. Solo se
+        // proyectan nombres constantes después de verificar el esquema real.
+        HashSet<string> columns = (await connection.QueryAsync<string>(@"
+            SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE()
+            AND table_name='revdet' AND column_name IN ('parte_cte','lhazmat','cpt_cve_hazmat')"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string customerPart = columns.Contains("parte_cte") ? "COALESCE(rd.parte_cte,'')" : "''";
+        string hazmat = columns.Contains("lhazmat") ? "CASE WHEN rd.lhazmat IN ('S','1') THEN 1 ELSE 0 END" : "0";
+        string un = columns.Contains("cpt_cve_hazmat") ? "COALESCE(rd.cpt_cve_hazmat,'')" : "''";
+        return $"{customerPart} AS ParteCte, {hazmat} AS Hazmat, {un} AS CptCveHazmat";
     }
 }

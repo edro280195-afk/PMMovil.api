@@ -32,6 +32,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Las regresiones son un ejecutable aparte, no archivos del servidor web. -->
+    <Compile Remove="Tests\**" />
+    <Content Remove="Tests\**" />
+    <None Remove="Tests\**" />
+
     <!-- appsettings.Local.json es SOLO para desarrollo local (secretos que
          nunca van a git, ver .gitignore). Program.cs lo carga como overlay
          OPCIONAL sin importar el ambiente (AddJsonFile, no esta condicionado

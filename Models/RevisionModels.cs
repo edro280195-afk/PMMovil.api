@@ -56,6 +56,9 @@ namespace PMMovil.Api.Models
         public int IdRevdet { get; set; }
         public string Cnofact { get; set; } = string.Empty;
         public string CnoParte { get; set; } = string.Empty;
+        public string ParteCte { get; set; } = string.Empty;
+        public bool Hazmat { get; set; }
+        public string CptCveHazmat { get; set; } = string.Empty;
         public string CDescripcion { get; set; } = string.Empty;
         public string Marca { get; set; } = string.Empty;
         public string Modelo { get; set; } = string.Empty;

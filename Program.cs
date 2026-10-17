@@ -129,6 +129,7 @@ try
     builder.Services.AddScoped<ReportService>();
     builder.Services.AddScoped<RevisionActivityService>();
     builder.Services.AddScoped<RevisionService>();
+    builder.Services.AddScoped<LabelCaptureService>();
     builder.Services.AddScoped<RackCensusService>();
     builder.Services.AddScoped<RevisionNormalCompletionService>();
     builder.Services.AddScoped<RevisionReportPdfService>();

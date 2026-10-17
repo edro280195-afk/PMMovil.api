@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 
 using PMMovil.Api.Data;
+using PMMovil.Api.Models;
 using PMMovil.Api.Services;
 
 namespace PMMovil.Api.Hubs;
@@ -19,6 +20,7 @@ namespace PMMovil.Api.Hubs;
 public class WarehouseHub : Hub
 {
     public const string SupervisoresBloqueoGroup = "SUPERVISORES_BLOQUEO";
+    public const string RevisionGroup = "REVISION_OPERADORES";
 
     public static class RevisionEstados
     {
@@ -35,6 +37,24 @@ public class WarehouseHub : Hub
         public string Estado { get; init; } = string.Empty;
         public string Fecha { get; init; } = string.Empty;
         public int EstatusFinal { get; init; }
+    }
+
+    /// <summary>
+    /// Snapshot del dato ya persistido. Se manda por una sola forma para que
+    /// Angular y Android apliquen el mismo cambio sin una segunda consulta.
+    /// </summary>
+    public sealed class RevisionActualizadaEvent
+    {
+        public string Entidad { get; init; } = string.Empty;
+        public string Creferencia { get; init; } = string.Empty;
+        public string Usuario { get; init; } = string.Empty;
+        public string Fecha { get; init; } = string.Empty;
+        public string? Cnofact { get; init; }
+        public IReadOnlyList<string>? Cnofacts { get; init; }
+        public int? IdRevdet { get; init; }
+        public FacturaRevision? Factura { get; init; }
+        public PartidaRevision? Partida { get; init; }
+        public string? ObservacionRevision { get; init; }
     }
 
     private readonly BaseRepository _db;

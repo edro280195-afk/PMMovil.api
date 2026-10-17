@@ -27,6 +27,7 @@ public static class RevisionActivityTypes
     public const string FacturaCompletada = "FACTURA_COMPLETADA";
     public const string FacturaDiscrepancia = "FACTURA_DISCREPANCIA";
     public const string LecturaCodigo = "LECTURA_CODIGO";
+    public const string HazmatRegistrado = "HAZMAT_REGISTRADO";
     public const string Pausada = "PAUSADA";
     public const string Finalizada = "FINALIZADA";
 }

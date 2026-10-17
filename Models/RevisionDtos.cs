@@ -52,3 +52,17 @@ public class GuardarObservacionEntradaDto
     public string crefAgrupada { get; set; } = "";
     public string valor { get; set; } = "";
 }
+
+/// <summary>Datos del rombo de mercancía peligrosa, SEPARADOS como vienen impresos:
+/// número UN arriba, clase en el vértice y grupo de embalaje al pie. Van a traf3,
+/// que es por referencia, no por partida.</summary>
+public class GuardarHazmatRevisionDto
+{
+    public string crefAgrupada { get; set; } = "";
+    /// <summary>Solo el número, sin el prefijo "UN": 1866, 3082.</summary>
+    public string? un { get; set; }
+    /// <summary>Clase de peligro del catálogo clase_hazmat: 3, 4.1, 6.1.</summary>
+    public string? clase { get; set; }
+    /// <summary>Grupo de embalaje: I, II o III.</summary>
+    public string? grupo { get; set; }
+}
