@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -85,6 +86,7 @@ public class RevisionController : ControllerBase
     // "Ver reporte" en Monitor abría este PDF con window.open() directo,
     // sin sesión -- 401 siempre. Este endpoint arma un link de 20 minutos
     // que sí abre sin cabecera Authorization (ver PublicoController).
+    [RequiereModulo(MobileModuleIds.Review, "Lectura", true, MobileModuleIds.SystemsMonitor)]
     [HttpPost("reporte/{creferencia}/link")]
     public async Task<IActionResult> GenerarLinkReporte(string creferencia)
     {
@@ -217,6 +219,45 @@ public class RevisionController : ControllerBase
         }
     }
 
+    [HttpPost("ar-entradas")]
+    public async Task<IActionResult> GetEntryArCards([FromBody] EntryArBatchRequest request)
+    {
+        if (request?.References == null)
+        {
+            return BadRequest(new { success = false, message = "Envía la lista de referencias." });
+        }
+
+        List<string> references = request.References
+            .Where(reference => !string.IsNullOrWhiteSpace(reference))
+            .Select(reference => reference.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (references.Count is < 1 or > 6 || references.Any(reference => reference.Length > 30))
+        {
+            return BadRequest(new
+            {
+                success = false,
+                message = "La consulta debe incluir de una a seis referencias de hasta 30 caracteres."
+            });
+        }
+
+        try
+        {
+            List<EntryArCardDto> items = await _revisionService.GetEntryArCardsAsync(references);
+            return Ok(new { success = true, items });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error al consultar tarjetas AR de entradas");
+            return StatusCode(500, new
+            {
+                success = false,
+                message = "No se pudieron consultar las entradas para AR."
+            });
+        }
+    }
+
     [HttpGet("facturas/{cref_agrupada}")]
     public async Task<IActionResult> GetFacturasEntrada(string cref_agrupada)
     {
@@ -317,6 +358,7 @@ public class RevisionController : ControllerBase
         }
     }
 
+    [RequiereModulo(MobileModuleIds.Review, "Lectura", true, MobileModuleIds.SystemsMonitor)]
     [HttpGet("entrada-completa/{cref_agrupada}")]
     public async Task<IActionResult> GetEntradaCompleta(string cref_agrupada)
     {

@@ -426,6 +426,102 @@ new { creferencia });
         return item;
     }
 
+    /// <summary>
+    /// Lee en dos consultas agrupadas los datos necesarios para las tarjetas AR.
+    /// Es de solo lectura y la lista ya viene limitada a seis referencias por el controlador.
+    /// </summary>
+    public async Task<List<EntryArCardDto>> GetEntryArCardsAsync(IReadOnlyCollection<string> references)
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        const string sql = @"
+            SELECT
+                t.creferencia AS Reference,
+                1 AS `Exists`,
+                COALESCE(MAX(c.cnombre), '') AS CustomerName,
+                COALESCE(MAX(td.Description), '') AS Description,
+                COALESCE(MAX(td.Location), '') AS Location,
+                CASE WHEN MAX(t.fcreatrafico) < '2000-01-01' THEN NULL
+                     ELSE DATE_FORMAT(MAX(t.fcreatrafico), '%Y-%m-%dT%H:%i:%s') END AS ArrivalDate,
+                MAX(CASE WHEN COALESCE(t.lhazmat, 0) = 1 THEN 1 ELSE 0 END) AS HasHazmat,
+                MAX(COALESCE(t3.HasDamage, 0)) AS HasDamage,
+                COALESCE(MAX(t3.DamageDescription), '') AS DamageDescription
+            FROM traf t
+            LEFT JOIN clientes c ON c.cidcte = t.cclienteidtraf AND c.inactivo = 0
+            LEFT JOIN (
+                SELECT
+                    creferencia,
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(cdescripcion), '') SEPARATOR ' · ') AS Description,
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(ubicacion), '') SEPARATOR ' · ') AS Location
+                FROM trafdet
+                GROUP BY creferencia
+            ) td ON td.creferencia = t.creferencia
+            LEFT JOIN (
+                SELECT
+                    fk_idtraf,
+                    MAX(CASE WHEN COALESCE(danada, 0) = 1 THEN 1 ELSE 0 END) AS HasDamage,
+                    MAX(COALESCE(danada_descripcion, '')) AS DamageDescription
+                FROM traf3
+                GROUP BY fk_idtraf
+            ) t3 ON t3.fk_idtraf = t.idtraf
+            WHERE t.creferencia IN @References
+            GROUP BY t.creferencia
+
+            UNION ALL
+
+            SELECT
+                f.cref_agrupada AS Reference,
+                1 AS `Exists`,
+                COALESCE(MAX(c.cnombre), '') AS CustomerName,
+                COALESCE(MAX(td.Description), '') AS Description,
+                COALESCE(MAX(td.Location), '') AS Location,
+                CASE WHEN MAX(f.dfecha) < '2000-01-01' THEN NULL
+                     ELSE DATE_FORMAT(MAX(f.dfecha), '%Y-%m-%dT%H:%i:%s') END AS ArrivalDate,
+                0 AS HasHazmat,
+                0 AS HasDamage,
+                '' AS DamageDescription
+            FROM fact f
+            LEFT JOIN clientes c ON c.cidcte = f.cclienteid AND c.inactivo = 0
+            LEFT JOIN (
+                SELECT
+                    creferencia,
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(cdescripcion), '') SEPARATOR ' · ') AS Description,
+                    GROUP_CONCAT(DISTINCT NULLIF(TRIM(ubicacion), '') SEPARATOR ' · ') AS Location
+                FROM trafdet
+                GROUP BY creferencia
+            ) td ON td.creferencia = f.cref_agrupada
+            WHERE f.cref_agrupada IN @References
+              AND NOT EXISTS (
+                  SELECT 1 FROM traf t0 WHERE t0.creferencia = f.cref_agrupada
+              )
+            GROUP BY f.cref_agrupada";
+
+        List<EntryArCardDto> found = (await conn.QueryAsync<EntryArCardDto>(sql, new { References = references }))
+            .GroupBy(item => item.Reference, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+        Dictionary<string, RevisionNormalCompletionSummary> summaries = await _normalCompletionService
+            .ObtenerResumenesAsync(conn, references);
+        foreach (EntryArCardDto item in found)
+        {
+            if (summaries.TryGetValue(item.Reference, out RevisionNormalCompletionSummary? summary))
+            {
+                item.ReviewStatus = summary.ReviewStatus;
+                item.TotalInvoices = summary.TotalInvoices;
+                item.CompletedInvoices = summary.CompletedInvoices;
+                item.TotalLines = summary.TotalLines;
+                item.ReviewedLines = summary.ReviewedLines;
+            }
+        }
+        Dictionary<string, EntryArCardDto> byReference = found.ToDictionary(
+            item => item.Reference,
+            StringComparer.OrdinalIgnoreCase);
+
+        return references.Select(reference => byReference.TryGetValue(reference, out EntryArCardDto? item)
+            ? item
+            : new EntryArCardDto { Reference = reference, Exists = false })
+            .ToList();
+    }
+
     public async Task<List<EntradaPendiente>> GetMisActivasAsync(string username)
     {
         if (string.IsNullOrEmpty(username))

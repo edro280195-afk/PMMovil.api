@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 
 using Dapper;
@@ -17,6 +19,18 @@ public sealed class RevisionNormalCompletionService
     private sealed class CompletionRow
     {
         public long TotalFacturas { get; set; }
+        public long FacturasIncompletas { get; set; }
+        public long FacturasConDiscrepancia { get; set; }
+        public long FacturasConPartidasIncompletas { get; set; }
+    }
+
+    private sealed class CompletionSummaryRow
+    {
+        public string Reference { get; set; } = string.Empty;
+        public long TotalFacturas { get; set; }
+        public long FacturasCompletas { get; set; }
+        public long TotalPartidas { get; set; }
+        public long PartidasRevisadas { get; set; }
         public long FacturasIncompletas { get; set; }
         public long FacturasConDiscrepancia { get; set; }
         public long FacturasConPartidasIncompletas { get; set; }
@@ -56,6 +70,55 @@ public sealed class RevisionNormalCompletionService
             checked((int)row.FacturasIncompletas),
             checked((int)row.FacturasConDiscrepancia),
             checked((int)row.FacturasConPartidasIncompletas));
+    }
+
+    /// <summary>
+    /// Calcula los mismos indicadores del cierre normal para varias entradas.
+    /// El conjunto de referencias llega acotado por el controlador AR.
+    /// </summary>
+    public async Task<Dictionary<string, RevisionNormalCompletionSummary>> ObtenerResumenesAsync(
+        IDbConnection connection,
+        IReadOnlyCollection<string> referencias,
+        IDbTransaction? transaction = null)
+    {
+        const string sql = @"
+            SELECT
+                f.cref_agrupada AS Reference,
+                COUNT(DISTINCT f.cnofact) AS TotalFacturas,
+                COUNT(DISTINCT CASE WHEN f.status_rev IN (1, 2) THEN f.cnofact END) AS FacturasCompletas,
+                COUNT(DISTINCT rd.idrevdet) AS TotalPartidas,
+                COUNT(DISTINCT CASE WHEN COALESCE(rd.revisada, 0) = 1 THEN rd.idrevdet END) AS PartidasRevisadas,
+                COUNT(DISTINCT CASE WHEN COALESCE(f.status_rev, 0) NOT IN (1, 2) THEN f.cnofact END) AS FacturasIncompletas,
+                COUNT(DISTINCT CASE WHEN f.status_rev = 2 THEN f.cnofact END) AS FacturasConDiscrepancia,
+                COUNT(DISTINCT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM revdet pending
+                    WHERE pending.cnofact = f.cnofact
+                      AND COALESCE(pending.revisada, 0) <> 1
+                ) THEN f.cnofact END) AS FacturasConPartidasIncompletas
+            FROM fact f
+            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            WHERE f.cref_agrupada IN @Referencias
+            GROUP BY f.cref_agrupada";
+
+        IEnumerable<CompletionSummaryRow> rows = await connection.QueryAsync<CompletionSummaryRow>(
+            sql,
+            new { Referencias = referencias },
+            transaction);
+
+        return rows.ToDictionary(
+            row => row.Reference,
+            row => new RevisionNormalCompletionSummary(
+                State: new RevisionNormalCompletionState(
+                    checked((int)row.TotalFacturas),
+                    checked((int)row.FacturasIncompletas),
+                    checked((int)row.FacturasConDiscrepancia),
+                    checked((int)row.FacturasConPartidasIncompletas)),
+                TotalInvoices: checked((int)row.TotalFacturas),
+                CompletedInvoices: checked((int)row.FacturasCompletas),
+                TotalLines: checked((int)row.TotalPartidas),
+                ReviewedLines: checked((int)row.PartidasRevisadas)),
+            StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -124,6 +187,25 @@ public sealed record RevisionNormalCompletionState(
         FacturasConDiscrepancia > 0
             ? 2
             : 1;
+}
+
+/// <summary>Indicadores de avance más el estado calculado con la regla de cierre normal.</summary>
+public sealed record RevisionNormalCompletionSummary(
+    RevisionNormalCompletionState State,
+    int TotalInvoices,
+    int CompletedInvoices,
+    int TotalLines,
+    int ReviewedLines)
+{
+    public string ReviewStatus => !State.TieneFacturas
+        ? "SIN_REVISAR"
+        : State.FacturasIncompletas == 0 && State.FacturasConPartidasIncompletas == 0
+            ? State.FacturasConDiscrepancia > 0
+                ? "COMPLETA_CON_DISCREPANCIAS"
+                : "COMPLETA"
+            : CompletedInvoices > 0 || ReviewedLines > 0
+                ? "EN_PROGRESO"
+                : "SIN_REVISAR";
 }
 
 /// <summary>
