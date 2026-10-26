@@ -105,6 +105,15 @@ public class SalidaService
 
     private async Task EnsureAutorizacionCasetaQrAsync(IDbConnection conn)
     {
+        // El token real ya NO se guarda en texto plano -- solo su hash (para
+        // validar, ver ValidateCasetaQrAuthorizationAsync) y un "hint" de 8
+        // caracteres en la columna legacy `token` (mismo criterio que
+        // EntradaShareService/RevisionShareService/ReportShareService). Aquí
+        // el UNIQUE KEY vive en token_hash, no en token: esta tabla inserta
+        // una fila por cada escaneo de QR de caseta (mucho más volumen que
+        // los enlaces compartidos), así que un UNIQUE sobre un hint de solo
+        // 8 caracteres eventualmente chocaría (cumpleaños) y tronaría el
+        // INSERT en producción.
         await conn.ExecuteAsync($@"
 CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -112,6 +121,7 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
     casetaid VARCHAR(64) NOT NULL,
     usuario VARCHAR(100) NOT NULL,
     token CHAR(32) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
     estado VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE',
     leido_at DATETIME NOT NULL,
     expira_at DATETIME NOT NULL,
@@ -120,7 +130,7 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
     motivo VARCHAR(100) NULL,
     ip_address VARCHAR(45) NOT NULL DEFAULT '',
     PRIMARY KEY (id),
-    UNIQUE KEY uq_salida_carga_qr_token (token),
+    UNIQUE KEY uq_salida_carga_qr_token_hash (token_hash),
     KEY idx_salida_carga_qr_pendiente (relno, usuario, estado, expira_at),
     KEY idx_salida_carga_qr_caseta (casetaid, leido_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
@@ -283,6 +293,14 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
         }
 
         string token = Guid.NewGuid().ToString("N");
+        // El token real ya NO se guarda en texto plano -- solo su hash (para
+        // validar) y un "hint" de 8 caracteres en la columna legacy `token`
+        // (mismo criterio que EntradaShareService/RevisionShareService/
+        // ReportShareService). El token completo solo se le regresa al
+        // cliente (result.AutorizacionToken); nunca vuelve a viajar en texto
+        // plano hacia la BD.
+        string tokenHash = ShareTokenHasher.Hash(token);
+        string tokenHint = token[..8];
         string ipAddress = request.IpAddress?.Trim() ?? string.Empty;
 
         conn.Open();
@@ -300,10 +318,10 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
 
             await conn.ExecuteAsync(
                 $@"INSERT INTO {TablaAutorizacionCasetaQr}
-                   (relno, casetaid, usuario, token, estado, leido_at, expira_at, ip_address)
-                   VALUES (@relno, @casetaId, @usuario, @token, 'PENDIENTE',
+                   (relno, casetaid, usuario, token, token_hash, estado, leido_at, expira_at, ip_address)
+                   VALUES (@relno, @casetaId, @usuario, @tokenHint, @tokenHash, 'PENDIENTE',
                            NOW(), DATE_ADD(NOW(), INTERVAL {VentanaCasetaQrSegundos} SECOND), @ipAddress)",
-                new { relno, casetaId, usuario, token, ipAddress },
+                new { relno, casetaId, usuario, tokenHint, tokenHash, ipAddress },
                 transaction);
 
             transaction.Commit();
@@ -758,17 +776,18 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 "PRIMERO ESCANEA EL QR DE CASETA");
         }
 
+        string tokenHash = ShareTokenHasher.Hash(token);
         var authorization = await conn.QueryFirstOrDefaultAsync<CasetaQrAuthorizationDbRow>(
             $@"SELECT id AS Id,
                       estado AS Estado,
                       IF(expira_at <= NOW(), 1, 0) AS Expirada
                FROM {TablaAutorizacionCasetaQr}
-               WHERE token = @token
+               WHERE token_hash = @tokenHash
                  AND relno = @relno
                  AND usuario = @usuario
                LIMIT 1
                FOR UPDATE",
-            new { token, relno, usuario },
+            new { tokenHash, relno, usuario },
             transaction);
 
         if (authorization == null)

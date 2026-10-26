@@ -69,7 +69,8 @@ public class SalidaCasetaController : ControllerBase
             var result = await _service.RegistrarSalidaAsync(
                 request.CasetaId,
                 ObtenerUsuario(),
-                request.Observaciones ?? string.Empty);
+                request.Observaciones ?? string.Empty,
+                ObtenerPlanta());
 
             return Ok(result);
         }
