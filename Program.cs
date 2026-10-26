@@ -425,6 +425,42 @@ try
         return;
     }
 
+    // Modo admin de un solo comando: mandar el correo de "revisión finalizada" que no salió (caso
+    // 01C263608160000, 26/oct: el revisor no pudo darle Terminar en la app). Misma mecánica que
+    // --reenviar-correo-caseta: usa el contenedor de DI de arriba, sin HTTP/JWT y sin arrancar Kestrel.
+    //   dotnet run -- --notificar-revision-finalizada <creferencia> <claveRevisor> <soloValidacion:true|false>
+    // soloValidacion=true (también si se omite) manda el correo completo SOLO a desarrollo3; en false va a los
+    // destinatarios reales (contactos del cliente + el revisor en el To, más las copias de siempre).
+    // Solo manda el correo: no cierra la sesión del revisor ni dispara los avisos en vivo (Monitor, SignalR).
+    if (args.Length >= 1 && args[0] == "--notificar-revision-finalizada")
+    {
+        string crefArg = args.Length > 1 ? args[1].Trim() : "";
+        string revisorArg = args.Length > 2 ? args[2].Trim() : "";
+        bool soloValidacionArg = args.Length <= 3 || !bool.TryParse(args[3], out bool parsedSoloValidacion) || parsedSoloValidacion;
+
+        if (crefArg.Length == 0 || revisorArg.Length == 0)
+        {
+            Console.WriteLine("ERROR: uso -> --notificar-revision-finalizada <creferencia> <claveRevisor> <soloValidacion:true|false>");
+            return;
+        }
+
+        using IServiceScope scope = app.Services.CreateScope();
+        var reportService = scope.ServiceProvider.GetRequiredService<IRevisionReportService>();
+        string[]? destinatariosValidacion = soloValidacionArg ? new[] { "desarrollo3@grupopmm.com" } : null;
+
+        bool enviado = await reportService.EnviarReporteRevisionNormalAsync(
+            crefArg,
+            baseUrl: null,
+            usuarioRevisorClaveManual: revisorArg,
+            destinatariosManual: destinatariosValidacion);
+
+        string destino = soloValidacionArg ? "solo desarrollo3 (validación)" : "destinatarios reales";
+        Console.WriteLine(enviado
+            ? $"OK: correo de revisión finalizada de {crefArg} enviado a {destino}; revisor {revisorArg}."
+            : $"ERROR: no se envió el correo de {crefArg} (facturas incompletas, entrada inexistente o fallo de SMTP; revisa el log).");
+        return;
+    }
+
     app.UseSerilogRequestLogging(options =>
     {
         options.MessageTemplate =

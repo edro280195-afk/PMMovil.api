@@ -18,7 +18,17 @@ namespace PMMovil.Api.Services;
 
 public interface IRevisionReportService
 {
-    Task<bool> EnviarReporteRevisionNormalAsync(string creferencia, string? baseUrl = null);
+    /// <summary>
+    /// Manda el correo de revisión finalizada al cliente. Los dos últimos parámetros son para el modo admin
+    /// <c>--notificar-revision-finalizada</c> (Program.cs); el flujo normal no los usa:
+    /// <paramref name="usuarioRevisorClaveManual"/> fija quién revisó cuando la sesión no quedó cerrada con su clave, y
+    /// <paramref name="destinatariosManual"/>, si trae algo, manda el correo SOLO a esas casillas, sin copias.
+    /// </summary>
+    Task<bool> EnviarReporteRevisionNormalAsync(
+        string creferencia,
+        string? baseUrl = null,
+        string? usuarioRevisorClaveManual = null,
+        IReadOnlyCollection<string>? destinatariosManual = null);
     Task<bool> EnviarReporteBarcodeAsync(int idSesion);
 }
 
@@ -92,7 +102,11 @@ public class RevisionReportService : IRevisionReportService
         _config = config;
     }
 
-    public async Task<bool> EnviarReporteRevisionNormalAsync(string creferencia, string? baseUrl = null)
+    public async Task<bool> EnviarReporteRevisionNormalAsync(
+        string creferencia,
+        string? baseUrl = null,
+        string? usuarioRevisorClaveManual = null,
+        IReadOnlyCollection<string>? destinatariosManual = null)
     {
         try
         {
@@ -194,6 +208,13 @@ public class RevisionReportService : IRevisionReportService
             }
 
             string usuarioRevisorClave = Convert.ToString(data.usuarioRevisorClave)?.Trim() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(usuarioRevisorClaveManual))
+            {
+                // Modo admin: la sesión de revisión no quedó cerrada con la clave de quien revisó, así que la
+                // consulta de arriba no la trae. El HTML lee al revisor de "data", por eso se escribe también ahí.
+                usuarioRevisorClave = usuarioRevisorClaveManual.Trim();
+                ((IDictionary<string, object>)data)["usuarioRevisorClave"] = usuarioRevisorClave;
+            }
             string clienteId = Convert.ToString(data.cidcte)?.Trim() ?? string.Empty;
 
             // "To" ahora son los contactos del cliente (tabla correoscl) que
@@ -225,6 +246,16 @@ public class RevisionReportService : IRevisionReportService
             List<string> copias = CorreosCcRevisionNormal
                 .Where(correo => !destinatarios.Contains(correo, StringComparer.OrdinalIgnoreCase))
                 .ToList();
+            IEnumerable<string> copiasOcultas = CorreosBccRevisionNormal;
+
+            if (destinatariosManual is { Count: > 0 })
+            {
+                // Modo admin en validación: el correo sale completo (mismo asunto, mismo cuerpo, mismo link)
+                // pero solo a estas casillas, sin copia al cliente ni a los de CC/BCC.
+                destinatarios = destinatariosManual.ToList();
+                copias = [];
+                copiasOcultas = [];
+            }
 
             EstadoGeneralRevision estado = CalcularEstadoGeneral(facturas);
 
@@ -254,7 +285,7 @@ public class RevisionReportService : IRevisionReportService
                 subject,
                 body,
                 copias: copias,
-                copiasOcultas: CorreosBccRevisionNormal,
+                copiasOcultas: copiasOcultas,
                 incluirCopiasOcultasAutomaticas: false);
         }
         catch (Exception ex)
