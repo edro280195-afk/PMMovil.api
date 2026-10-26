@@ -309,6 +309,44 @@ public static class TrazabilidadRules
         return facts.HasCaja || facts.HasRelacion ? TraceState.Pendiente : TraceState.SinDato;
     }
 
+    // ── Ficha compacta (AR) ─────────────────────────────────────────────────
+
+    /// <summary>Cuántos códigos se piden de una vez: los mismos seis QR que el AR puede tener a la vista.</summary>
+    public const int MaxCompactCodes = 6;
+
+    /// <summary>Solo las cajas y las relaciones tienen ficha compacta; una entrada ya tiene su tarjeta del AR.</summary>
+    public static bool HasCompact(string kind) => kind is TraceKind.Caja or TraceKind.Relacion;
+
+    /// <summary>
+    /// Reduce una ficha a lo que cabe en la marca de un QR: señal, estado de las estaciones, banderas y tres datos para
+    /// reconocer la pieza (cliente, caja, relación). El orden de <see cref="TraceCompactItem.States"/> es siempre el de
+    /// <see cref="TraceStationId.Order"/>, aunque la ficha traiga menos estaciones.
+    /// </summary>
+    public static TraceCompactItem ToCompact(TraceResult result)
+    {
+        var item = new TraceCompactItem
+        {
+            Code = result.Code,
+            Kind = result.Kind,
+            Found = result.Found,
+            Reason = result.Reason,
+            Signal = result.Signal,
+            Flags = result.Flags.ToList()
+        };
+
+        foreach (string id in TraceStationId.Order)
+            item.States.Add(result.Stations.FirstOrDefault(station => station.Id == id)?.State ?? TraceState.SinDato);
+
+        if (!result.Found) return item;
+
+        item.Customer = !string.IsNullOrWhiteSpace(result.Caja?.Cliente)
+            ? result.Caja!.Cliente
+            : result.Entradas.Select(entrada => entrada.Cliente).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name)) ?? string.Empty;
+        item.Box = !string.IsNullOrWhiteSpace(result.Caja?.NumCaja) ? result.Caja!.NumCaja : result.Relacion?.Caja ?? string.Empty;
+        item.Relno = !string.IsNullOrWhiteSpace(result.Relacion?.Relno) ? result.Relacion!.Relno : result.Caja?.Relacion ?? string.Empty;
+        return item;
+    }
+
     // ── Banderas, señal y acciones ──────────────────────────────────────────
 
     public static List<string> BuildFlags(TraceFacts facts)

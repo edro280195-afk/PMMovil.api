@@ -191,3 +191,38 @@ public sealed class TraceResult
     public TraceBulto? Bulto { get; set; }
     public TracePreregistro? Preregistro { get; set; }
 }
+
+/// <summary>Cuerpo de <c>POST api/Trazabilidad/compactas</c>: de uno a seis códigos de caja o de relación.</summary>
+public sealed class TraceCompactRequest
+{
+    public List<string>? Codes { get; set; }
+}
+
+/// <summary>
+/// La ficha en una línea, para la marca de un QR en el AR: la señal, el estado de las cinco estaciones y lo mínimo para
+/// reconocer la pieza. Solo cajas y relaciones; una entrada ya tiene su tarjeta propia (<c>ar-entradas</c>).
+/// </summary>
+public sealed class TraceCompactItem
+{
+    /// <summary>Código normalizado, el mismo con el que lo pidió la app. Vacío si el código no se reconoció.</summary>
+    public string Code { get; set; } = string.Empty;
+
+    public string Kind { get; set; } = string.Empty;
+    public bool Found { get; set; }
+    public string? Reason { get; set; }
+    public string Signal { get; set; } = TraceSignal.SinDato;
+
+    /// <summary>Estado de las cinco estaciones, en el orden de <see cref="TraceStationId.Order"/>.</summary>
+    public List<string> States { get; set; } = new();
+
+    public List<string> Flags { get; set; } = new();
+    public string Customer { get; set; } = string.Empty;
+    public string Box { get; set; } = string.Empty;
+    public string Relno { get; set; } = string.Empty;
+}
+
+public sealed class TraceCompactResponse
+{
+    public bool Success { get; set; }
+    public List<TraceCompactItem> Items { get; set; } = new();
+}

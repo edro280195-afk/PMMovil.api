@@ -43,6 +43,40 @@ public class TrazabilidadController : ControllerBase
     }
 
     /// <summary>
+    /// La ficha compacta de hasta seis códigos de caja o de relación, para las marcas del AR. 400 si no se manda ninguno,
+    /// si son más de seis o si alguno es absurdamente largo; un código que no es de caja ni de relación no falla el lote:
+    /// vuelve como no encontrado.
+    /// </summary>
+    [HttpPost("compactas")]
+    public async Task<IActionResult> Compactas([FromBody] TraceCompactRequest? request, CancellationToken ct)
+    {
+        List<string> codes = request?.Codes ?? new List<string>();
+        if (codes.Count is < 1 or > TrazabilidadRules.MaxCompactCodes || codes.Any(code => (code?.Length ?? 0) > 120))
+        {
+            return BadRequest(new TraceCompactResponse { Success = false });
+        }
+
+        try
+        {
+            return Ok(new TraceCompactResponse
+            {
+                Success = true,
+                Items = await _service.ResolveCompactAsync(codes!, ct)
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(StatusCodes.Status499ClientClosedRequest);
+        }
+        catch (Exception ex)
+        {
+            // No se registra ningún código: puede ser un QR de pre-registro con su token.
+            _logger.LogError(ex, "Error al resolver las fichas compactas del AR");
+            return StatusCode(500, new TraceCompactResponse { Success = false });
+        }
+    }
+
+    /// <summary>
     /// Resuelve un código a su ficha. 400 si el código no es de los que la ficha cubre (incluido el gafete, que
     /// jamás se consulta); 200 con <c>found = false</c> si tiene forma válida pero no existe.
     /// </summary>

@@ -9,6 +9,8 @@ using System.Threading.Tasks;
 
 using Dapper;
 
+using Microsoft.Extensions.Caching.Memory;
+
 using PMMovil.Api.Data;
 using PMMovil.Api.Models;
 
@@ -26,13 +28,18 @@ public sealed class TrazabilidadService
     /// <summary>Tope de entradas que se detallan por ficha (la relación con más entradas tiene 22).</summary>
     public const int MaxEntradas = 25;
 
+    /// <summary>Cuánto se conserva la ficha compacta de un código: el AR vuelve a preguntar cada vez que un QR reaparece.</summary>
+    private static readonly TimeSpan CompactCacheTime = TimeSpan.FromSeconds(15);
+
     private readonly BaseRepository _db;
     private readonly RevisionNormalCompletionService _completion;
+    private readonly IMemoryCache _cache;
 
-    public TrazabilidadService(BaseRepository db, RevisionNormalCompletionService completion)
+    public TrazabilidadService(BaseRepository db, RevisionNormalCompletionService completion, IMemoryCache cache)
     {
         _db = db;
         _completion = completion;
+        _cache = cache;
     }
 
     private sealed class CajaRow
@@ -152,6 +159,45 @@ public sealed class TrazabilidadService
         }
 
         return Compose(parsed, chain);
+    }
+
+    /// <summary>
+    /// La ficha compacta de hasta seis códigos de caja o de relación, para el AR. Cada código se resuelve igual que en
+    /// <see cref="ResolveAsync"/> y se reduce; los códigos repetidos se piden una sola vez y el resultado de cada uno se
+    /// guarda quince segundos. Lo que no sea caja ni relación (o no se reconozca) vuelve como no encontrado, sin tumbar al
+    /// resto del lote y sin devolver su valor: puede ser un gafete o un pre-registro con su token.
+    /// </summary>
+    public async Task<List<TraceCompactItem>> ResolveCompactAsync(IReadOnlyList<string> rawCodes, CancellationToken ct = default)
+    {
+        List<string> codes = rawCodes
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Select(code => code.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(TrazabilidadRules.MaxCompactCodes)
+            .ToList();
+
+        TraceCompactItem[] items = await Task.WhenAll(codes.Select(code => CompactOneAsync(code, ct)));
+        return items.ToList();
+    }
+
+    private async Task<TraceCompactItem> CompactOneAsync(string raw, CancellationToken ct)
+    {
+        TraceParsedCode parsed = TrazabilidadRules.Parse(raw);
+        if (!parsed.IsRecognized || !TrazabilidadRules.HasCompact(parsed.Kind))
+        {
+            return new TraceCompactItem
+            {
+                Found = false,
+                Reason = parsed.Rejection ?? TraceReason.Unsupported,
+                States = TraceStationId.Order.Select(_ => TraceState.SinDato).ToList()
+            };
+        }
+
+        return (await _cache.GetOrCreateAsync($"trz:compact:{parsed.Code}", async entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = CompactCacheTime;
+            return TrazabilidadRules.ToCompact(await ResolveAsync(parsed.Code, ct));
+        }))!;
     }
 
     // ── Caja ────────────────────────────────────────────────────────────────

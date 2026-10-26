@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 using PMMovil.Api.Models;
 using PMMovil.Api.Services;
 
@@ -246,5 +248,77 @@ Sequence(
         TraceAction.OpenEntry, TraceAction.ReviewEntry, TraceAction.ShowOnMap, TraceAction.RegisterPreRegistro
     },
     "Los nombres de las acciones no cambian sin avisar a la app");
+
+// ── Ficha compacta del AR ────────────────────────────────────────────────────
+
+Equal(6, TrazabilidadRules.MaxCompactCodes, "El AR muestra como mucho seis QR");
+Check(TrazabilidadRules.HasCompact(TraceKind.Caja), "La caja tiene ficha compacta");
+Check(TrazabilidadRules.HasCompact(TraceKind.Relacion), "La relación tiene ficha compacta");
+Check(!TrazabilidadRules.HasCompact(TraceKind.Carpeta), "La carpeta ya tiene su tarjeta (ar-entradas)");
+Check(!TrazabilidadRules.HasCompact(TraceKind.Bulto), "El bulto ya tiene su tarjeta (ar-entradas)");
+Check(!TrazabilidadRules.HasCompact(TraceKind.PreRegistro), "El pre-registro no se muestra en el AR");
+Check(!TrazabilidadRules.HasCompact(string.Empty), "Un código sin clase no tiene ficha");
+
+var fullBox = new TraceResult
+{
+    Success = true, Kind = TraceKind.Caja, Code = "E-17840/26", Found = true, Signal = TraceSignal.Aviso,
+    Stations = TrazabilidadRules.BuildStations(ready),
+    Flags = new List<string> { TraceFlag.EntradaPorRelacion, TraceFlag.Hazmat },
+    Caja = new TraceCaja { CasetaId = "E-17840/26", NumCaja = "1657-2", Cliente = "KATHION", Relacion = "01I26104549" },
+    Relacion = new TraceRelacion { Relno = "01I26104549", Caja = "1657-2" },
+    Entradas = new List<TraceEntrada> { new() { Reference = "01I265055540000", Cliente = "OTRO CLIENTE" } },
+    Actions = new List<string> { TraceAction.ExitGate }
+};
+TraceCompactItem compactBox = TrazabilidadRules.ToCompact(fullBox);
+Equal("E-17840/26", compactBox.Code, "Compacta: código");
+Equal(TraceKind.Caja, compactBox.Kind, "Compacta: clase");
+Check(compactBox.Found, "Compacta: encontrada");
+Equal(TraceSignal.Aviso, compactBox.Signal, "Compacta: señal");
+Sequence(new[] { TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.EnCurso }, compactBox.States, "Compacta: cinco estados en el orden de La Línea");
+Sequence(new[] { TraceFlag.EntradaPorRelacion, TraceFlag.Hazmat }, compactBox.Flags, "Compacta: banderas");
+Equal("KATHION", compactBox.Customer, "Compacta: el cliente de la caja manda sobre el de la entrada");
+Equal("1657-2", compactBox.Box, "Compacta: número de caja");
+Equal("01I26104549", compactBox.Relno, "Compacta: relación");
+
+var fullRelease = new TraceResult
+{
+    Success = true, Kind = TraceKind.Relacion, Code = "01I26104549", Found = true, Signal = TraceSignal.Listo,
+    Stations = TrazabilidadRules.BuildStations(ready),
+    Relacion = new TraceRelacion { Relno = "01I26104549", Caja = "1657-2" },
+    Entradas = new List<TraceEntrada> { new() { Reference = "A", Cliente = "" }, new() { Reference = "B", Cliente = "SEGUNDO" } }
+};
+TraceCompactItem compactRelease = TrazabilidadRules.ToCompact(fullRelease);
+Equal("SEGUNDO", compactRelease.Customer, "Compacta de relación: el primer cliente con nombre");
+Equal("1657-2", compactRelease.Box, "Compacta de relación: la caja sale de la relación");
+Equal("01I26104549", compactRelease.Relno, "Compacta de relación: su número");
+
+var lonely = new TraceResult { Success = true, Kind = TraceKind.Caja, Code = "E-99999/26", Found = false, Reason = TraceReason.NotFound };
+TraceCompactItem compactMissing = TrazabilidadRules.ToCompact(lonely);
+Check(!compactMissing.Found, "Compacta: no encontrada");
+Equal(TraceReason.NotFound, compactMissing.Reason, "Compacta: motivo");
+Equal(5, compactMissing.States.Count, "Compacta: siempre cinco estados");
+Check(compactMissing.States.All(state => state == TraceState.SinDato), "Compacta: sin dato en todas si no existe");
+Equal(string.Empty, compactMissing.Customer, "Compacta: sin cliente si no existe");
+
+// Una ficha con menos estaciones se completa con «sin dato», en el mismo orden.
+var partial = new TraceResult
+{
+    Success = true, Kind = TraceKind.Caja, Code = "E-1/26", Found = true,
+    Stations = new List<TraceStation> { new() { Id = TraceStationId.Salida, State = TraceState.Hecha }, new() { Id = TraceStationId.Caseta, State = TraceState.Pendiente } }
+};
+Sequence(new[] { TraceState.Pendiente, TraceState.SinDato, TraceState.SinDato, TraceState.SinDato, TraceState.Hecha }, TrazabilidadRules.ToCompact(partial).States, "Compacta: estaciones que faltan quedan en sin dato");
+
+// El contrato JSON con la app.
+using JsonDocument compactDoc = JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+    new TraceCompactResponse { Success = true, Items = new List<TraceCompactItem> { compactBox } },
+    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+JsonElement compactItem = compactDoc.RootElement.GetProperty("items")[0];
+Equal("E-17840/26", compactItem.GetProperty("code").GetString(), "JSON compacta: code");
+Equal("CAJA", compactItem.GetProperty("kind").GetString(), "JSON compacta: kind");
+Equal("AVISO", compactItem.GetProperty("signal").GetString(), "JSON compacta: signal");
+Equal(5, compactItem.GetProperty("states").GetArrayLength(), "JSON compacta: states");
+Equal("EN_CURSO", compactItem.GetProperty("states")[4].GetString(), "JSON compacta: states[4]");
+Equal("1657-2", compactItem.GetProperty("box").GetString(), "JSON compacta: box");
+Equal("KATHION", compactItem.GetProperty("customer").GetString(), "JSON compacta: customer");
 
 Console.WriteLine($"Trazabilidad.Regression: {checks} comprobaciones correctas.");
