@@ -1,3 +1,4 @@
+using System;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using PMMovil.Api.Services;
@@ -10,17 +11,20 @@ public class RequiereModuloAttribute : Attribute, IAsyncAuthorizationFilter
     private readonly int _moduloId;
     private readonly string? _accion;
     private readonly bool _reemplazaModuloPadre;
+    private readonly int[] _modulosAlternativos;
 
     public RequiereModuloAttribute(int moduloId)
     {
         _moduloId = moduloId;
+        _modulosAlternativos = Array.Empty<int>();
     }
 
-    public RequiereModuloAttribute(int moduloId, string accion, bool reemplazaModuloPadre = false)
+    public RequiereModuloAttribute(int moduloId, string accion, bool reemplazaModuloPadre = false, params int[] modulosAlternativos)
     {
         _moduloId = moduloId;
         _accion = accion;
         _reemplazaModuloPadre = reemplazaModuloPadre;
+        _modulosAlternativos = modulosAlternativos;
     }
 
     public async Task OnAuthorizationAsync(AuthorizationFilterContext context)
@@ -63,11 +67,21 @@ public class RequiereModuloAttribute : Attribute, IAsyncAuthorizationFilter
         var permissionService = context.HttpContext.RequestServices
             .GetRequiredService<IModulePermissionService>();
         var action = _accion ?? InferAction(context.HttpContext.Request.Method);
-        var allowed = await permissionService.HasPermissionAsync(
+        bool allowed = await permissionService.HasPermissionAsync(
             username,
             _moduloId,
             action,
             context.HttpContext.RequestAborted);
+
+        foreach (int moduloAlternativo in _modulosAlternativos)
+        {
+            if (allowed) break;
+            allowed = await permissionService.HasPermissionAsync(
+                username,
+                moduloAlternativo,
+                action,
+                context.HttpContext.RequestAborted);
+        }
 
         if (!allowed)
             context.Result = new ForbidResult();

@@ -81,7 +81,7 @@ public sealed class ModulePermissionService(
             // en cero y se quedaba sin ninguna opción en la aplicación.
             var access = hasFullAccess
                 ? new ModuleAccess(true, true, true, true)
-                : LegacyModuleMap.Resolve(module.ModuloId, accessByModule, user.DepartmentId);
+                : LegacyModuleMap.Resolve(module.ModuloId, accessByModule, username);
 
             return new ModuloPermisoDto
             {
@@ -215,9 +215,9 @@ public sealed class ModulePermissionService(
             return directPermission == 1;
         }
 
-        // Módulos sin equivalencia en el catálogo histórico que se conceden
-        // por departamento (hoy, Revisión al departamento de Revisión).
-        if (LegacyModuleMap.IsGrantedByDepartment(moduleId, user.DepartmentId))
+        // Módulos sin equivalencia en el catálogo histórico que se conceden a
+        // personas concretas (hoy, Revisión a la lista oficial de revisores).
+        if (LegacyModuleMap.IsGrantedToUser(moduleId, username))
             return true;
 
         // Se consulta también el módulo histórico que habilita al módulo

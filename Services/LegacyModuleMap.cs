@@ -52,8 +52,8 @@ public static class LegacyModuleMap
     ///
     /// Deliberadamente fuera de esta tabla:
     /// <list type="bullet">
-    ///   <item>Revisión, que se concede por departamento (ver
-    ///   <see cref="DepartmentGrants"/>).</item>
+    ///   <item>Revisión, que se concede a la lista oficial de revisores (ver
+    ///   <see cref="IsGrantedToUser"/>).</item>
     ///   <item>Monitor, Analítica y Reportes de Sistemas, que ya cubre el
     ///   acceso integral del departamento de Sistemas.</item>
     /// </list>
@@ -140,31 +140,24 @@ public static class LegacyModuleMap
         ]
     };
 
-    /// <summary>Departamento de Revisión en <c>pmmtraf.departamentos</c>.</summary>
-    public const int ReviewDepartmentId = 12;
-
     /// <summary>
-    /// Módulos que se conceden por pertenecer a un departamento.
+    /// True si el módulo se concede por sí solo a esa persona, sin pasar por
+    /// equivalencias del sistema web ni por departamento.
     ///
     /// La revisión de mercancía con escaneo es funcionalidad nueva de la
     /// aplicación móvil: no hay ningún módulo en el catálogo histórico que
     /// signifique lo mismo (los que se le parecen por nombre son de partes de
     /// pedimento, calidad o facturación). Colgarla de "Entrada de Bodega"
-    /// habría abierto la revisión a 136 personas, así que se concede por
-    /// departamento, igual que ya se hacía con Sistemas.
+    /// habría abierto la revisión a 136 personas. Tampoco sirve el
+    /// departamento: el 12 (Revisión) incluye a gente que no revisa y deja
+    /// fuera a dos revisores que están en el 7. Se concede a quienes están en
+    /// <see cref="ReviewerRoster"/>, que son los revisores de verdad.
     ///
     /// Da las cuatro acciones porque los endpoints de revisión usan las
     /// cuatro: leer pendientes, agregar lecturas, modificar y borrar.
     /// </summary>
-    private static readonly Dictionary<int, int[]> DepartmentGrants = new()
-    {
-        [MobileModuleIds.Review] = [ReviewDepartmentId]
-    };
-
-    /// <summary>True si el departamento concede el módulo por sí solo.</summary>
-    public static bool IsGrantedByDepartment(int mobileModuleId, int departmentId) =>
-        DepartmentGrants.TryGetValue(mobileModuleId, out var departments) &&
-        Array.IndexOf(departments, departmentId) >= 0;
+    public static bool IsGrantedToUser(int mobileModuleId, string? username) =>
+        mobileModuleId == MobileModuleIds.Review && ReviewerRoster.Contains(username);
 
     /// <summary>Módulos del sistema web que habilitan un módulo móvil.</summary>
     public static IReadOnlyList<int> LegacyIdsFor(int mobileModuleId) =>
@@ -182,7 +175,7 @@ public static class LegacyModuleMap
     public static ModuleAccess Resolve(
         int moduleId,
         IReadOnlyDictionary<int, ModuleAccess> accessByModule,
-        int departmentId)
+        string? username)
     {
         // Una fila explícita, incluso con todos sus valores en cero, es una
         // decisión deliberada del administrador y debe sobrescribir la
@@ -190,7 +183,7 @@ public static class LegacyModuleMap
         if (accessByModule.TryGetValue(moduleId, out var direct))
             return direct;
 
-        if (IsGrantedByDepartment(moduleId, departmentId))
+        if (IsGrantedToUser(moduleId, username))
             return new ModuleAccess(true, true, true, true);
 
         var effective = ModuleAccess.None;

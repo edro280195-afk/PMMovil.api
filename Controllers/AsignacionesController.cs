@@ -318,11 +318,16 @@ public class AsignacionesController : ControllerBase
         }
     }
 
-    // Departamento 12 = revisión de mercancía. Antes dependía de
-    // "RevisoresHabilitados" en appsettings, que nunca se llegó a configurar
-    // -- siempre regresaba vacío. El departamento en BD es la fuente real.
-    private const int DeptoRevisores = 12;
-
+    // Se puede asignar una entrada a los revisores de la lista oficial
+    // (ReviewerRoster) que sigan activos. Antes se tomaban del departamento 12,
+    // que incluía a gente que no revisa y dejaba fuera a alarumbe y
+    // eder.magana (están en el 7).
+    //
+    // La clave se devuelve tal como está guardada en usuarios: algunas traen
+    // relleno de espacios y ese es el mismo valor que lleva el token. De él
+    // dependen el grupo de SignalR "USER_<clave>" y la consulta de "mis
+    // asignaciones"; recortarla aquí haría que el revisor no recibiera sus
+    // avisos ni viera lo que se le asignó.
     [HttpGet("revisores-disponibles")]
     public async Task<IActionResult> GetRevisoresDisponibles()
     {
@@ -332,7 +337,7 @@ public class AsignacionesController : ControllerBase
             return Ok(new
             {
                 success = true,
-                items = await conn.QueryAsync<object>("SELECT claveusuario AS usuario, TRIM(CONCAT_WS(' ', TRIM(apaterno), TRIM(amaterno), TRIM(nombre))) AS nombre, COALESCE(area, '') AS area FROM usuarios WHERE inactivo = 0 AND iddepto = @depto ORDER BY nombre", new { depto = DeptoRevisores })
+                items = await conn.QueryAsync<object>("SELECT claveusuario AS usuario, TRIM(CONCAT_WS(' ', TRIM(apaterno), TRIM(amaterno), TRIM(nombre))) AS nombre, COALESCE(area, '') AS area FROM usuarios WHERE inactivo = 0 AND TRIM(claveusuario) IN @claves ORDER BY nombre", new { claves = ReviewerRoster.All.ToArray() })
             });
         }
         catch (Exception exception)
