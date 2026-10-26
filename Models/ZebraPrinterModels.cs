@@ -52,3 +52,34 @@ public class ZebraPrinterSaveResult
     public string Message { get; set; } = string.Empty;
     public ZebraPrinterDto? Item { get; set; }
 }
+
+public class ZebraLabelLayoutDto
+{
+    public int Id { get; set; }
+    public string LayoutType { get; set; } = string.Empty;
+    public string LayoutJson { get; set; } = string.Empty;
+    public int Version { get; set; } = 1;
+    public string UpdatedBy { get; set; } = string.Empty;
+    public DateTime? UpdatedAt { get; set; }
+}
+
+public class ZebraLabelLayoutListResult
+{
+    public bool Success { get; set; } = true;
+    public string Message { get; set; } = string.Empty;
+    public List<ZebraLabelLayoutDto> Items { get; set; } = new();
+}
+
+public class ZebraLabelLayoutSaveRequest
+{
+    public string LayoutType { get; set; } = string.Empty;
+    public string LayoutJson { get; set; } = string.Empty;
+}
+
+public class ZebraLabelLayoutSaveResult
+{
+    public bool Success { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public ZebraLabelLayoutDto? Item { get; set; }
+}
+

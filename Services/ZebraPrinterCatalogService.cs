@@ -299,4 +299,134 @@ public class ZebraPrinterCatalogService
             )
         );
     }
+
+    private static async Task EnsureLayoutTableAsync(System.Data.IDbConnection conn)
+    {
+        await conn.ExecuteAsync(
+            """
+            CREATE TABLE IF NOT EXISTS pmmovil_zebra_label_layouts (
+                id INT NOT NULL AUTO_INCREMENT,
+                layout_type VARCHAR(64) NOT NULL,
+                layout_json LONGTEXT NOT NULL,
+                version INT NOT NULL DEFAULT 1,
+                updated_by VARCHAR(80) NOT NULL DEFAULT '',
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY ux_pmmovil_zebra_label_layouts_type (layout_type)
+            );
+            """);
+    }
+
+    public async Task<ZebraLabelLayoutListResult> GetLayoutsAsync(CancellationToken ct)
+    {
+        using var conn = _db.CreatePmmtoolsConnection();
+        await EnsureLayoutTableAsync(conn);
+
+        var items = (await conn.QueryAsync<ZebraLabelLayoutDto>(
+            new CommandDefinition(
+                """
+                SELECT
+                    id AS Id,
+                    layout_type AS LayoutType,
+                    layout_json AS LayoutJson,
+                    version AS Version,
+                    updated_by AS UpdatedBy,
+                    updated_at AS UpdatedAt
+                FROM pmmovil_zebra_label_layouts
+                ORDER BY layout_type ASC;
+                """,
+                cancellationToken: ct
+            )
+        )).ToList();
+
+        return new ZebraLabelLayoutListResult
+        {
+            Success = true,
+            Message = items.Count == 0 ? "No hay plantillas de etiquetas guardadas en el servidor." : "Plantillas de etiquetas cargadas.",
+            Items = items
+        };
+    }
+
+    public async Task<ZebraLabelLayoutDto?> GetLayoutAsync(string layoutType, CancellationToken ct)
+    {
+        using var conn = _db.CreatePmmtoolsConnection();
+        await EnsureLayoutTableAsync(conn);
+
+        return await conn.QueryFirstOrDefaultAsync<ZebraLabelLayoutDto>(
+            new CommandDefinition(
+                """
+                SELECT
+                    id AS Id,
+                    layout_type AS LayoutType,
+                    layout_json AS LayoutJson,
+                    version AS Version,
+                    updated_by AS UpdatedBy,
+                    updated_at AS UpdatedAt
+                FROM pmmovil_zebra_label_layouts
+                WHERE layout_type = @LayoutType
+                LIMIT 1;
+                """,
+                new { LayoutType = layoutType?.Trim().ToUpperInvariant() },
+                cancellationToken: ct
+            )
+        );
+    }
+
+    public async Task<ZebraLabelLayoutSaveResult> SaveLayoutAsync(
+        ZebraLabelLayoutSaveRequest request,
+        string updatedBy,
+        CancellationToken ct)
+    {
+        string cleanType = (request.LayoutType ?? "").Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(cleanType))
+        {
+            return new ZebraLabelLayoutSaveResult
+            {
+                Success = false,
+                Message = "El tipo de plantilla es obligatorio."
+            };
+        }
+
+        if (string.IsNullOrWhiteSpace(request.LayoutJson))
+        {
+            return new ZebraLabelLayoutSaveResult
+            {
+                Success = false,
+                Message = "El JSON de la plantilla no puede estar vacío."
+            };
+        }
+
+        using var conn = _db.CreatePmmtoolsConnection();
+        await EnsureLayoutTableAsync(conn);
+
+        await conn.ExecuteAsync(
+            new CommandDefinition(
+                """
+                INSERT INTO pmmovil_zebra_label_layouts (layout_type, layout_json, version, updated_by, updated_at)
+                VALUES (@LayoutType, @LayoutJson, 1, @UpdatedBy, NOW())
+                ON DUPLICATE KEY UPDATE
+                    layout_json = VALUES(layout_json),
+                    version = version + 1,
+                    updated_by = VALUES(updated_by),
+                    updated_at = NOW();
+                """,
+                new
+                {
+                    LayoutType = cleanType,
+                    LayoutJson = request.LayoutJson,
+                    UpdatedBy = updatedBy ?? "sistema"
+                },
+                cancellationToken: ct
+            )
+        );
+
+        var saved = await GetLayoutAsync(cleanType, ct);
+
+        return new ZebraLabelLayoutSaveResult
+        {
+            Success = true,
+            Message = $"Plantilla {cleanType} guardada correctamente.",
+            Item = saved
+        };
+    }
 }

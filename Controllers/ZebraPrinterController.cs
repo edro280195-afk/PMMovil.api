@@ -96,4 +96,63 @@ public class ZebraPrinterController : ControllerBase
             });
         }
     }
+
+    [HttpGet("layouts")]
+    public async Task<IActionResult> GetLayouts(CancellationToken ct)
+    {
+        try
+        {
+            var result = await _printerCatalogService.GetLayoutsAsync(ct);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al obtener plantillas de etiquetas Zebra");
+            return StatusCode(500, new ZebraLabelLayoutListResult
+            {
+                Success = false,
+                Message = "No se pudieron cargar las plantillas de etiquetas: " + ex.Message
+            });
+        }
+    }
+
+    [HttpGet("layout/{type}")]
+    public async Task<IActionResult> GetLayout(string type, CancellationToken ct)
+    {
+        try
+        {
+            var item = await _printerCatalogService.GetLayoutAsync(type, ct);
+            if (item == null)
+            {
+                return NotFound(new { success = false, message = $"Plantilla no encontrada para '{type}'." });
+            }
+            return Ok(new { success = true, item });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al obtener plantilla de etiqueta Zebra {LayoutType}", type);
+            return StatusCode(500, new { success = false, message = ex.Message });
+        }
+    }
+
+    [HttpPut("layout/{type}")]
+    public async Task<IActionResult> SaveLayout(string type, [FromBody] ZebraLabelLayoutSaveRequest request, CancellationToken ct)
+    {
+        try
+        {
+            request.LayoutType = type;
+            string usuario = User.Identity?.Name ?? "sistema";
+            var result = await _printerCatalogService.SaveLayoutAsync(request, usuario, ct);
+            return result.Success ? Ok(result) : BadRequest(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al guardar plantilla de etiqueta Zebra {LayoutType}", type);
+            return StatusCode(500, new ZebraLabelLayoutSaveResult
+            {
+                Success = false,
+                Message = "No se pudo guardar la plantilla de etiqueta: " + ex.Message
+            });
+        }
+    }
 }
