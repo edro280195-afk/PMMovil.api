@@ -111,7 +111,13 @@ public class CasetaEntradaCatalogosResult
 
 public class CasetaEntradaGuardarRequest
 {
+    /// <summary>
+    /// Campo heredado para compatibilidad. La identidad que se guarda se toma del usuario autenticado.
+    /// </summary>
     public string Usuario { get; set; } = string.Empty;
+    /// <summary>
+    /// Campo heredado para compatibilidad. El nombre del responsable se resuelve en el servidor desde su sesión.
+    /// </summary>
     public string NombreUsuario { get; set; } = string.Empty;
     public string Planta { get; set; } = string.Empty;
     public string IdBodega { get; set; } = string.Empty;
@@ -161,6 +167,19 @@ public class CasetaEntradaGuardarRequest
     /// pre-registro vive en caseta_preregistro.casetaid.
     /// </summary>
     public bool OrigenPreRegistro { get; set; }
+
+    /// <summary>
+    /// Folio del pre-registro que se esta consumiendo al generar la entrada.
+    /// Es opcional para conservar compatibilidad con clientes anteriores; si
+    /// no llega, el API intenta vincularlo por unidad, placas, linea y bodega.
+    /// </summary>
+    public string PreregistroFolio { get; set; } = string.Empty;
+
+    /// <summary>
+    /// La app puede continuar con la entrada cuando el guardia confirma una
+    /// discrepancia de placas. Se conserva para auditoria del cierre del QR.
+    /// </summary>
+    public bool PlacasNoCoinciden { get; set; }
 
     /// <summary>
     /// "CAJA" (default) o "TRACTOCAMION". Decide que campos exime la

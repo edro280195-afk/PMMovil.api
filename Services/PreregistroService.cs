@@ -8,6 +8,8 @@ using System.Text;
 
 using Dapper;
 
+using MySqlConnector;
+
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.AspNetCore.SignalR;
 
@@ -35,10 +37,12 @@ namespace PMMovil.Api.Services;
 public partial class PreregistroService
 {
     private const int MaxIntentosFallidos = 5;
+    private static readonly SemaphoreSlim AlertSchemaLock = new(1, 1);
     private static readonly TimeSpan DuracionBloqueo = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan VigenciaQr = TimeSpan.FromHours(24);
     private static readonly TimeSpan RetencionTotal = TimeSpan.FromHours(72);
     private const int MaxVigentesPorCuenta = 20;
+    private const string CorreoPreregistroTemporal = "desarrollo3@grupopmm.com";
 
     private readonly BaseRepository _db;
     private readonly IConfiguration _configuration;
@@ -116,13 +120,25 @@ public partial class PreregistroService
 
         if (!passwordOk)
         {
-            int intentos = cuenta.IntentosFallidos + 1;
-            DateTime? bloqueo = intentos >= MaxIntentosFallidos ? DateTime.Now.Add(DuracionBloqueo) : null;
+            DateTime bloqueoCalculado = DateTime.Now.Add(DuracionBloqueo);
             await conn.ExecuteAsync(new CommandDefinition(@"
                 UPDATE preregistro_cuentas
-                SET intentos_fallidos = @intentos, fbloqueo = @bloqueo
+                SET intentos_fallidos = intentos_fallidos + 1,
+                    fbloqueo = CASE
+                        WHEN intentos_fallidos + 1 >= @maxIntentos THEN @bloqueo
+                        ELSE NULL
+                    END
+                WHERE id = @id AND activo = 1",
+                new { maxIntentos = MaxIntentosFallidos, bloqueo = bloqueoCalculado, id = cuenta.Id }, cancellationToken: ct));
+
+            CuentaIntentosRow estadoIntentos = await conn.QuerySingleAsync<CuentaIntentosRow>(new CommandDefinition(@"
+                SELECT intentos_fallidos AS IntentosFallidos, fbloqueo AS FBloqueo
+                FROM preregistro_cuentas
                 WHERE id = @id",
-                new { intentos, bloqueo, id = cuenta.Id }, cancellationToken: ct));
+                new { id = cuenta.Id }, cancellationToken: ct));
+
+            int intentos = estadoIntentos.IntentosFallidos;
+            DateTime? bloqueo = estadoIntentos.FBloqueo;
 
             await RegistrarAuditoriaAsync(conn, PreregistroEvento.LoginFallido, idCuenta: cuenta.Id, usuario: usuario, ip: ip,
                 detalle: bloqueo.HasValue ? "Bloqueada por intentos fallidos" : $"Intento {intentos}/{MaxIntentosFallidos}", ct: ct);
@@ -214,11 +230,37 @@ public partial class PreregistroService
         }
     }
 
+    public async Task<bool> CuentaActivaAsync(int idCuenta, CancellationToken ct = default)
+    {
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        return await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT activo = 1 FROM preregistro_cuentas WHERE id = @idCuenta LIMIT 1",
+            new { idCuenta }, cancellationToken: ct));
+    }
+
     public async Task<PreregistroCrearResponse> CrearAsync(int idCuenta, string cidTranspor, string nombreLinea, PreregistroCrearRequest req, string ip, CancellationToken ct = default)
     {
         string nunidad = req.Nunidad.Trim().ToUpperInvariant();
         string placas = req.Placas.Trim().ToUpperInvariant();
         string operador = req.Operador.Trim();
+        string idBodega = req.IdBodega.Trim();
+
+        if (string.IsNullOrWhiteSpace(nunidad) || string.IsNullOrWhiteSpace(placas) || string.IsNullOrWhiteSpace(operador))
+            return new PreregistroCrearResponse { Success = false, Message = "Unidad, placas y operador son obligatorios." };
+
+        if (!TieneCoordenadasValidas(req.Lat, req.Lon))
+            return new PreregistroCrearResponse { Success = false, Message = "La ubicación inicial no es válida." };
+
+        if (string.IsNullOrWhiteSpace(idBodega))
+            return new PreregistroCrearResponse { Success = false, Message = "Selecciona una bodega destino." };
+
+        PreregistroBodegaItem? destino = await _bodegaDestinoService.ObtenerAsync(idBodega, ct);
+        if (destino is null)
+            return new PreregistroCrearResponse
+            {
+                Success = false,
+                Message = "La bodega seleccionada no está configurada. Contacta a sistemas."
+            };
 
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
         conn.Open();
@@ -226,7 +268,7 @@ public partial class PreregistroService
         try
         {
             int vigentes = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-                "SELECT COUNT(*) FROM caseta_preregistro WHERE id_cuenta = @idCuenta AND estatus = @vigente",
+                "SELECT COUNT(*) FROM caseta_preregistro WHERE id_cuenta = @idCuenta AND estatus = @vigente AND fexpira >= NOW()",
                 new { idCuenta, vigente = PreregistroEstatus.Vigente }, tx, cancellationToken: ct));
 
             if (vigentes >= MaxVigentesPorCuenta)
@@ -239,7 +281,8 @@ public partial class PreregistroService
             await conn.ExecuteAsync(new CommandDefinition(@"
                 UPDATE caseta_preregistro
                 SET estatus = @cancelado
-                WHERE estatus = @vigente AND (placas = @placas OR nunidad = @nunidad)",
+                WHERE estatus = @vigente AND fexpira >= NOW()
+                  AND (placas = @placas OR nunidad = @nunidad)",
                 new { cancelado = PreregistroEstatus.Cancelado, vigente = PreregistroEstatus.Vigente, placas, nunidad },
                 tx, cancellationToken: ct));
 
@@ -261,21 +304,6 @@ public partial class PreregistroService
             DateTime ahora = DateTime.Now;
             DateTime fexpira = ahora.Add(VigenciaQr);
             DateTime fpurga = ahora.Add(RetencionTotal);
-
-            string? idBodega = string.IsNullOrWhiteSpace(req.IdBodega) ? null : req.IdBodega.Trim();
-            PreregistroBodegaItem? destino = idBodega is null
-                ? null
-                : await _bodegaDestinoService.ObtenerAsync(idBodega, ct);
-
-            if (idBodega is not null && destino is null)
-            {
-                tx.Rollback();
-                return new PreregistroCrearResponse
-                {
-                    Success = false,
-                    Message = "La bodega seleccionada no está configurada. Contacta a sistemas."
-                };
-            }
 
             RouteEtaResult? eta = await CalcularEtaSiHayUbicacionAsync(req.Lat, req.Lon, idBodega, ct);
 
@@ -338,7 +366,7 @@ public partial class PreregistroService
                 Placas = placas,
                 Operador = operador,
                 NombreLinea = nombreLinea,
-                IdBodega = req.IdBodega ?? string.Empty,
+                IdBodega = idBodega,
                 FechaCrea = ahora,
                 FechaExpira = fexpira,
                 EtaMinutos = eta?.Minutos,
@@ -428,13 +456,61 @@ public partial class PreregistroService
     public async Task<bool> CancelarAsync(int idCuenta, string folio, CancellationToken ct = default)
     {
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
-        int rows = await conn.ExecuteAsync(new CommandDefinition(@"
-            UPDATE caseta_preregistro
-            SET estatus = @cancelado
-            WHERE folio = @folio AND id_cuenta = @idCuenta AND estatus = @vigente",
-            new { cancelado = PreregistroEstatus.Cancelado, folio, idCuenta, vigente = PreregistroEstatus.Vigente },
-            cancellationToken: ct));
-        return rows > 0;
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            // Normaliza el vencimiento aquí mismo. El worker de purga es una
+            // limpieza eventual, no una condición de seguridad del folio.
+            await conn.ExecuteAsync(new CommandDefinition(@"
+                UPDATE caseta_preregistro
+                SET estatus = @expirado
+                WHERE folio = @folio AND id_cuenta = @idCuenta
+                  AND estatus = @vigente AND fexpira < NOW()",
+                new
+                {
+                    expirado = PreregistroEstatus.Expirado,
+                    folio,
+                    idCuenta,
+                    vigente = PreregistroEstatus.Vigente
+                }, tx, cancellationToken: ct));
+
+            int rows = await conn.ExecuteAsync(new CommandDefinition(@"
+                UPDATE caseta_preregistro
+                SET estatus = @cancelado
+                WHERE folio = @folio AND id_cuenta = @idCuenta
+                  AND estatus = @vigente AND fexpira >= NOW()",
+                new
+                {
+                    cancelado = PreregistroEstatus.Cancelado,
+                    folio,
+                    idCuenta,
+                    vigente = PreregistroEstatus.Vigente
+                }, tx, cancellationToken: ct));
+
+            if (rows == 0)
+            {
+                tx.Commit();
+                return false;
+            }
+
+            await RegistrarAuditoriaAsync(
+                conn,
+                PreregistroEvento.CancelaPrereg,
+                idCuenta: idCuenta,
+                folio: folio,
+                detalle: "Cancelado por la línea transportista",
+                tx: tx,
+                ct: ct);
+
+            tx.Commit();
+            return true;
+        }
+        catch
+        {
+            try { tx.Rollback(); } catch { }
+            throw;
+        }
     }
 
     // ── Ubicacion + ETA ───────────────────────────────────────────────────
@@ -471,7 +547,9 @@ public partial class PreregistroService
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
 
         var row = await conn.QuerySingleOrDefaultAsync<EstadoUbicacionRow>(new CommandDefinition(
-            @"SELECT idbodega AS IdBodega, estatus AS Estatus, fpurga AS FPurga,
+            @"SELECT id_cuenta AS IdCuenta, idbodega AS IdBodega, estatus AS Estatus, fpurga AS FPurga,
+                      fexpira AS FechaExpira,
+                      eta_minutos AS EtaMinutos,
                       destino_lat AS DestinoLat, destino_lon AS DestinoLon,
                       destino_geocerca_lat AS DestinoGeocercaLat,
                       destino_geocerca_lon AS DestinoGeocercaLon,
@@ -482,6 +560,33 @@ public partial class PreregistroService
 
         if (row is null)
             return new PreregistroUbicacionResponse { Success = false, Message = "Pre-registro no encontrado." };
+
+        if (!TieneCoordenadasValidas(req.Lat, req.Lon)
+            || req.PrecisionM is < 0 or > 10000
+            || req.Velocidad is < 0 or > 250)
+        {
+            return new PreregistroUbicacionResponse { Success = false, Message = "La ubicación enviada no es válida." };
+        }
+
+        string origen = string.IsNullOrWhiteSpace(req.Origen)
+            ? "PORTAL"
+            : req.Origen.Trim().ToUpperInvariant();
+        if (origen is not ("PORTAL" or "APP" or "TELEMATICA"))
+            return new PreregistroUbicacionResponse { Success = false, Message = "El origen de la ubicación no es válido." };
+
+        if (row.Estatus == PreregistroEstatus.Vigente && row.FechaExpira < DateTime.Now)
+        {
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE caseta_preregistro SET estatus = @expirado WHERE folio = @folio AND estatus = @vigente",
+                new
+                {
+                    expirado = PreregistroEstatus.Expirado,
+                    folio,
+                    vigente = PreregistroEstatus.Vigente
+                }, cancellationToken: ct));
+
+            return new PreregistroUbicacionResponse { Success = false, Message = "Este pre-registro ya expiró." };
+        }
 
         if (row.Estatus != PreregistroEstatus.Vigente)
             return new PreregistroUbicacionResponse { Success = false, Message = "Este pre-registro ya no esta vigente." };
@@ -545,7 +650,7 @@ public partial class PreregistroService
                 fecha = fechaSenal,
                 precision = req.PrecisionM,
                 velocidad = req.Velocidad,
-                origen = string.IsNullOrWhiteSpace(req.Origen) ? "PORTAL" : req.Origen.Trim().ToUpperInvariant(),
+                origen,
                 etaMinutos = eta?.Minutos,
                 etaKm = eta?.Km,
                 distanciaKm,
@@ -570,12 +675,60 @@ public partial class PreregistroService
                 idCuenta
             }, cancellationToken: ct));
 
+        // El panel interno recibe la señal al instante. La consulta periódica
+        // se mantiene como respaldo para reconexiones y para no hacer
+        // depender el mapa exclusivamente de SignalR.
+        await NotificarUbicacionAsync(
+            folio,
+            row.IdBodega ?? string.Empty,
+            lat,
+            lon,
+            fechaSenal,
+            eta?.Minutos,
+            eta?.Km,
+            distanciaKm,
+            dentro,
+            arriboDetectado,
+            ct);
+
         if (arriboDetectado)
         {
+            await CrearAlertaAsync(
+                conn,
+                PreregistroAlertaTipo.ArriboGeocerca,
+                "ALTA",
+                folio,
+                row.IdCuenta,
+                row.IdBodega,
+                "Arribo a geocerca",
+                $"El pre-registro {folio} entró a la geocerca del destino {row.IdBodega ?? "—"}.",
+                ct);
+            await NotificarAlertaAsync(
+                PreregistroAlertaTipo.ArriboGeocerca,
+                folio,
+                ct);
             await RegistrarAuditoriaAsync(conn, PreregistroEvento.ArriboGeocerca, folio: folio,
                 detalle: $"a {distanciaKm * 1000:F0} m de la planta {row.IdBodega}", ct: ct);
             await NotificarArriboAsync(folio, row.IdBodega ?? string.Empty, ct);
             await NotificarArriboPushAsync(folio, row.IdBodega ?? string.Empty);
+        }
+
+        if (eta?.Minutos is <= 30 && (row.EtaMinutos is null || row.EtaMinutos > 30))
+        {
+            await CrearAlertaAsync(
+                conn,
+                PreregistroAlertaTipo.EtaCritico,
+                "ALTA",
+                folio,
+                row.IdCuenta,
+                row.IdBodega,
+                "ETA crítico",
+                $"El pre-registro {folio} tiene un ETA de {eta.Minutos} minutos.",
+                ct);
+            await NotificarAlertaAsync(
+                PreregistroAlertaTipo.EtaCritico,
+                folio,
+                ct);
         }
 
         return new PreregistroUbicacionResponse
@@ -652,7 +805,7 @@ public partial class PreregistroService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("onPreregistroArribo", new
+            await _hub.Clients.Group(WarehouseHub.PreregistroOperationsGroup).SendAsync("onPreregistroArribo", new
             {
                 Type = "preregistro-arribo",
                 Folio = folio,
@@ -663,6 +816,78 @@ public partial class PreregistroService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "No se pudo notificar el arribo del pre-registro {Folio}.", folio);
+        }
+    }
+
+    /// <summary>
+    /// Publica únicamente datos operativos necesarios para actualizar el mapa
+    /// del panel interno. No incluye el operador, placas ni el token del
+    /// pre-registro; esos datos se consultan por el endpoint protegido cuando
+    /// el usuario abre el detalle.
+    /// </summary>
+    private async Task NotificarUbicacionAsync(
+        string folio,
+        string idBodega,
+        double lat,
+        double lon,
+        DateTime fecha,
+        int? etaMinutos,
+        double? etaKm,
+        double? distanciaKm,
+        bool dentroGeocerca,
+        bool arriboDetectado,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _hub.Clients.Group(WarehouseHub.PreregistroOperationsGroup).SendAsync("onPreregistroUbicacion", new
+            {
+                Type = "preregistro-ubicacion",
+                Folio = folio,
+                IdBodega = idBodega,
+                Lat = lat,
+                Lon = lon,
+                Fecha = fecha.ToString("o"),
+                EtaMinutos = etaMinutos,
+                EtaKm = etaKm,
+                DistanciaKm = distanciaKm,
+                DentroGeocerca = dentroGeocerca,
+                ArriboDetectado = arriboDetectado
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            // Guardar la ubicación es la operación principal. Una caída de
+            // SignalR no debe convertir una señal válida en un error de GPS.
+            _logger.LogWarning(ex, "No se pudo publicar la ubicación del pre-registro {Folio}.", folio);
+        }
+    }
+
+    /// <summary>
+    /// Invalida la cola de alertas en el panel sólo cuando ocurre una situación
+    /// operativa nueva. Las señales normales no generan una consulta adicional.
+    /// El mensaje contiene únicamente datos de operación, nunca placas,
+    /// operador ni token.
+    /// </summary>
+    private async Task NotificarAlertaAsync(
+        string tipo,
+        string folio,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _hub.Clients.Group(WarehouseHub.PreregistroOperationsGroup).SendAsync("onPreregistroAlerta", new
+            {
+                Type = "preregistro-alerta",
+                Tipo = tipo,
+                Folio = folio
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            // Persistir la alerta es la operación principal. SignalR sólo
+            // acelera la actualización del panel y no debe romper el GPS.
+            _logger.LogWarning(ex, "No se pudo publicar la alerta del pre-registro {Folio}.", folio);
         }
     }
 
@@ -679,6 +904,20 @@ public partial class PreregistroService
         }
 
         return await _routeEtaService.ComputeEtaAsync(lat.Value, lon.Value, destino.Value.Lat, destino.Value.Lon, ct);
+    }
+
+    private static bool TieneCoordenadasValidas(double? lat, double? lon)
+    {
+        if (!lat.HasValue && !lon.HasValue)
+            return true;
+
+        if (!lat.HasValue || !lon.HasValue)
+            return false;
+
+        return double.IsFinite(lat.Value)
+            && double.IsFinite(lon.Value)
+            && lat.Value is >= -90 and <= 90
+            && lon.Value is >= -180 and <= 180;
     }
 
     // ── Garita ───────────────────────────────────────────────────────────
@@ -748,18 +987,31 @@ public partial class PreregistroService
     /// </summary>
     public async Task<PreregistroUsarResponse> UsarAsync(string folio, PreregistroUsarRequest req, string usuarioGuardia, CancellationToken ct = default)
     {
+        string casetaId = req.CasetaId.Trim();
+        if (string.IsNullOrWhiteSpace(folio) || string.IsNullOrWhiteSpace(casetaId))
+            return new PreregistroUsarResponse { Success = false, Message = "El folio y la entrada de caseta son obligatorios." };
+
+        using (IDbConnection casetaConn = _db.CreateConnection())
+        {
+            int existeCaseta = await casetaConn.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COUNT(*) FROM caseta WHERE casetaid = @casetaId",
+                new { casetaId }, cancellationToken: ct));
+            if (existeCaseta == 0)
+                return new PreregistroUsarResponse { Success = false, Message = "La entrada de caseta no existe." };
+        }
+
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
 
         int rows = await conn.ExecuteAsync(new CommandDefinition(@"
             UPDATE caseta_preregistro
             SET estatus = @usado, fuso = @ahora, usuario_uso = @usuario, casetaid = @casetaId
-            WHERE folio = @folio AND estatus = @vigente",
+            WHERE folio = @folio AND estatus = @vigente AND fexpira >= NOW()",
             new
             {
                 usado = PreregistroEstatus.Usado,
                 ahora = DateTime.Now,
                 usuario = usuarioGuardia,
-                casetaId = req.CasetaId,
+                casetaId,
                 folio,
                 vigente = PreregistroEstatus.Vigente
             }, cancellationToken: ct));
@@ -767,7 +1019,7 @@ public partial class PreregistroService
         if (rows == 0)
             return new PreregistroUsarResponse { Success = false, Message = "El pre-registro ya no estaba vigente." };
 
-        await RegistrarAuditoriaAsync(conn, PreregistroEvento.UsaQr, usuario: usuarioGuardia, folio: folio, detalle: $"casetaid={req.CasetaId}", ct: ct);
+        await RegistrarAuditoriaAsync(conn, PreregistroEvento.UsaQr, usuario: usuarioGuardia, folio: folio, detalle: $"casetaid={casetaId}", ct: ct);
 
         if (req.PlacasNoCoinciden)
         {
@@ -778,9 +1030,270 @@ public partial class PreregistroService
         return new PreregistroUsarResponse { Success = true, Message = "Pre-registro marcado como usado." };
     }
 
-    public async Task<List<PreregistroEnCaminoItem>> EnCaminoAsync(string? idBodega, CancellationToken ct = default)
+    /// <summary>
+    /// Vincula una entrada de caseta con el pre-registro que la origino.
+    ///
+    /// El folio explicito es la ruta preferida. El segundo camino permite que
+    /// versiones anteriores de la app, que solo enviaban los datos precargados
+    /// del QR, no dejen el registro eternamente en VIGENTE: se busca un unico
+    /// pre-registro vigente por unidad/placas y se confirma como USADO despues
+    /// de que la entrada de caseta ya fue guardada.
+    /// </summary>
+    public async Task<PreregistroUsarResponse?> UsarPorEntradaAsync(
+        CasetaEntradaGuardarRequest entrada,
+        string casetaId,
+        string usuarioGuardia,
+        CancellationToken ct = default)
+    {
+        string folio = (entrada.PreregistroFolio ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(folio))
+        {
+            string nunidad = (entrada.NoCamion ?? string.Empty).Trim();
+            string placas = (entrada.Placas ?? string.Empty).Trim();
+
+            // Sin una identidad del vehiculo no es seguro adivinar que folio
+            // debe consumirse. El cliente puede reenviar el folio explicito.
+            if (string.IsNullOrWhiteSpace(nunidad) && string.IsNullOrWhiteSpace(placas))
+                return null;
+
+            string idLinea = (entrada.IdLineaCamion ?? string.Empty).Trim();
+            string nombreLinea = (entrada.NombreLineaCamion ?? entrada.LineaCamion ?? string.Empty).Trim();
+            string idBodega = (entrada.IdBodega ?? string.Empty).Trim();
+
+            using IDbConnection conn = _db.CreatePmmutileriaConnection();
+            List<string> candidatos = (await conn.QueryAsync<string>(new CommandDefinition(@"
+                SELECT folio
+                FROM caseta_preregistro
+                WHERE estatus = @vigente
+                  AND fexpira >= NOW()
+                  AND (@nunidad = '' OR UPPER(TRIM(nunidad)) = UPPER(@nunidad))
+                  AND (@placas = '' OR UPPER(TRIM(placas)) = UPPER(@placas))
+                  AND (@idBodega = '' OR idbodega = @idBodega)
+                  AND (@idLinea = '' OR idtransporu = @idLinea
+                       OR UPPER(TRIM(transporu)) = UPPER(@nombreLinea))
+                ORDER BY
+                    (CASE WHEN @nunidad <> '' AND UPPER(TRIM(nunidad)) = UPPER(@nunidad) THEN 1 ELSE 0 END) DESC,
+                    (CASE WHEN @placas <> '' AND UPPER(TRIM(placas)) = UPPER(@placas) THEN 1 ELSE 0 END) DESC,
+                    fcrea DESC
+                    LIMIT 2",
+                new
+                {
+                    vigente = PreregistroEstatus.Vigente,
+                    nunidad,
+                    placas,
+                    idBodega,
+                    idLinea,
+                    nombreLinea
+                }, cancellationToken: ct))).ToList();
+
+            if (candidatos.Count > 1)
+            {
+                _logger.LogWarning(
+                    "No se vinculó automáticamente la entrada {CasetaId}: hay {Cantidad} pre-registros compatibles.",
+                    casetaId,
+                    candidatos.Count);
+                return null;
+            }
+
+            folio = candidatos.SingleOrDefault() ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(folio))
+                return null;
+
+            _logger.LogInformation(
+                "Pre-registro {Folio} vinculado automaticamente con entrada de caseta {CasetaId} por unidad/placas.",
+                folio,
+                casetaId);
+        }
+
+        return await UsarAsync(
+            folio,
+            new PreregistroUsarRequest { CasetaId = casetaId },
+            usuarioGuardia,
+            ct);
+    }
+
+    /// <summary>
+    /// Deja en una cola durable el cierre del QR cuando la entrada de caseta ya
+    /// fue guardada pero la segunda operacion no pudo completarse. El folio
+    /// explicito es obligatorio para encolar: adivinar entre varios QR seria
+    /// peor que dejar el caso visible para reintento.
+    /// </summary>
+    public async Task RegistrarCierrePendienteAsync(
+        CasetaEntradaGuardarRequest entrada,
+        string casetaId,
+        string usuarioGuardia,
+        string motivo,
+        CancellationToken ct = default)
+    {
+        string folio = (entrada.PreregistroFolio ?? string.Empty).Trim();
+        casetaId = (casetaId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(folio) || string.IsNullOrWhiteSpace(casetaId))
+        {
+            _logger.LogWarning(
+                "No se encolo el cierre pendiente: falta folio explicito o casetaid. casetaid={CasetaId}",
+                casetaId);
+            return;
+        }
+
+        string usuario = string.IsNullOrWhiteSpace(usuarioGuardia)
+            ? "caseta"
+            : usuarioGuardia.Trim();
+        if (usuario.Length > 30) usuario = usuario[..30];
+
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            INSERT INTO preregistro_cierres_pendientes
+                (folio, casetaid, usuario, placas_no_coinciden, estado, intentos, ultimo_error, fcrea)
+            VALUES
+                (@folio, @casetaId, @usuario, @placasNoCoinciden, 'PENDIENTE', 0, @motivo, @ahora)
+            ON DUPLICATE KEY UPDATE
+                usuario = VALUES(usuario),
+                placas_no_coinciden = GREATEST(placas_no_coinciden, VALUES(placas_no_coinciden)),
+                estado = IF(estado = 'RESUELTO', estado, 'PENDIENTE'),
+                ultimo_error = VALUES(ultimo_error),
+                fresuelto = IF(estado = 'RESUELTO', fresuelto, NULL)",
+            new
+            {
+                folio,
+                casetaId,
+                usuario,
+                placasNoCoinciden = entrada.PlacasNoCoinciden,
+                motivo = string.IsNullOrWhiteSpace(motivo) ? "Reintento pendiente." : motivo[..Math.Min(motivo.Length, 255)],
+                ahora = DateTime.Now
+            }, cancellationToken: ct));
+
+        _logger.LogWarning(
+            "Cierre de pre-registro {Folio} encolado para caseta {CasetaId}: {Motivo}",
+            folio,
+            casetaId,
+            motivo);
+    }
+
+    /// <summary>
+    /// Reintenta los cierres que sobrevivieron a un fallo de red o de base de
+    /// datos. La operación de consumo sigue siendo condicional a VIGENTE, por
+    /// lo que repetirla no duplica el uso ni cambia un QR ya consumido.
+    /// </summary>
+    public async Task<int> ProcesarCierresPendientesAsync(CancellationToken ct = default)
     {
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        var pendientes = (await conn.QueryAsync<PreregistroCierrePendienteRow>(new CommandDefinition(@"
+            SELECT id AS Id, folio AS Folio, casetaid AS CasetaId, usuario AS Usuario,
+                   placas_no_coinciden AS PlacasNoCoinciden
+            FROM preregistro_cierres_pendientes
+            WHERE estado = 'PENDIENTE'
+              AND (fultimo_intento IS NULL OR fultimo_intento < DATE_SUB(NOW(), INTERVAL 1 MINUTE))
+            ORDER BY fcrea, id
+            LIMIT 50", cancellationToken: ct))).ToList();
+
+        int resueltos = 0;
+        foreach (PreregistroCierrePendienteRow pendiente in pendientes)
+        {
+            await conn.ExecuteAsync(new CommandDefinition(@"
+                UPDATE preregistro_cierres_pendientes
+                SET intentos = intentos + 1, fultimo_intento = @ahora
+                WHERE id = @id AND estado = 'PENDIENTE'",
+                new { id = pendiente.Id, ahora = DateTime.Now }, cancellationToken: ct));
+
+            try
+            {
+                PreregistroUsarResponse resultado = await UsarAsync(
+                    pendiente.Folio,
+                    new PreregistroUsarRequest
+                    {
+                        CasetaId = pendiente.CasetaId,
+                        PlacasNoCoinciden = pendiente.PlacasNoCoinciden
+                    },
+                    string.IsNullOrWhiteSpace(pendiente.Usuario) ? "sincronizacion" : pendiente.Usuario,
+                    ct);
+
+                if (resultado.Success)
+                {
+                    await MarcarCierrePendienteResueltoAsync(conn, pendiente.Id, ct);
+                    resueltos++;
+                    continue;
+                }
+
+                var estado = await conn.QuerySingleOrDefaultAsync<EstadoCierrePreregistroRow>(new CommandDefinition(@"
+                    SELECT estatus AS Estatus, casetaid AS CasetaId
+                    FROM caseta_preregistro
+                    WHERE folio = @folio
+                    LIMIT 1", new { folio = pendiente.Folio }, cancellationToken: ct));
+
+                if (estado is not null &&
+                    estado.Estatus == PreregistroEstatus.Usado &&
+                    string.Equals(estado.CasetaId, pendiente.CasetaId, StringComparison.OrdinalIgnoreCase))
+                {
+                    await MarcarCierrePendienteResueltoAsync(conn, pendiente.Id, ct);
+                    resueltos++;
+                }
+                else if (estado is null || estado.Estatus is PreregistroEstatus.Expirado or PreregistroEstatus.Cancelado)
+                {
+                    await MarcarCierrePendienteErrorAsync(conn, pendiente.Id, resultado.Message, ct);
+                }
+                else
+                {
+                    await MarcarCierrePendienteErrorAsync(conn, pendiente.Id, resultado.Message, ct, conservarPendiente: true);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                await MarcarCierrePendienteErrorAsync(conn, pendiente.Id, ex.Message, ct, conservarPendiente: true);
+                _logger.LogWarning(ex,
+                    "Error reintentando cierre de pre-registro {Folio} para caseta {CasetaId}.",
+                    pendiente.Folio,
+                    pendiente.CasetaId);
+            }
+        }
+
+        return resueltos;
+    }
+
+    private static async Task MarcarCierrePendienteResueltoAsync(
+        IDbConnection conn,
+        long id,
+        CancellationToken ct)
+    {
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            UPDATE preregistro_cierres_pendientes
+            SET estado = 'RESUELTO', fresuelto = @ahora, ultimo_error = NULL
+            WHERE id = @id",
+            new { id, ahora = DateTime.Now }, cancellationToken: ct));
+    }
+
+    private static async Task MarcarCierrePendienteErrorAsync(
+        IDbConnection conn,
+        long id,
+        string? error,
+        CancellationToken ct,
+        bool conservarPendiente = false)
+    {
+        string mensaje = string.IsNullOrWhiteSpace(error) ? "No fue posible cerrar el pre-registro." : error.Trim();
+        if (mensaje.Length > 255) mensaje = mensaje[..255];
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            UPDATE preregistro_cierres_pendientes
+            SET estado = @estado, ultimo_error = @error
+            WHERE id = @id",
+            new
+            {
+                id,
+                estado = conservarPendiente ? "PENDIENTE" : "ERROR",
+                error = mensaje
+            }, cancellationToken: ct));
+    }
+
+    public async Task<List<PreregistroEnCaminoItem>> EnCaminoAsync(string? idBodega, CancellationToken ct = default)
+    {
+        await SincronizarUsosConEntradasCasetaAsync(ct);
+
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        await SincronizarAlertasAsync(conn, ct);
         var rows = await conn.QueryAsync<PreregistroEnCaminoItem>(new CommandDefinition(@"
             SELECT folio AS Folio, nunidad AS Nunidad, placas AS Placas, transporu AS NombreLinea,
                    operador AS Operador, idbodega AS IdBodega, eta_minutos AS EtaMinutos, eta_km AS EtaKm, fubicacion AS FechaUbicacion,
@@ -800,6 +1313,164 @@ public partial class PreregistroService
             new { vigente = PreregistroEstatus.Vigente, idBodega }, cancellationToken: ct));
 
         return rows.ToList();
+    }
+
+    /// <summary>
+    /// Repara folios que quedaron VIGENTES porque una versión anterior de la
+    /// app guardó la entrada de caseta pero no llamó a /usar. Se compara contra
+    /// entradas posteriores al alta del QR para no consumir un folio por una
+    /// entrada histórica del mismo vehículo.
+    /// </summary>
+    private async Task SincronizarUsosConEntradasCasetaAsync(CancellationToken ct)
+    {
+        try
+        {
+            using IDbConnection preregConn = _db.CreatePmmutileriaConnection();
+            var vigentes = (await preregConn.QueryAsync<PreregistroCasetaSyncRow>(new CommandDefinition(@"
+                SELECT folio AS Folio, nunidad AS Nunidad, placas AS Placas,
+                       idtransporu AS IdTransporu, transporu AS NombreLinea,
+                       idbodega AS IdBodega, fcrea AS FechaCrea
+                FROM caseta_preregistro
+                WHERE estatus = @vigente AND fexpira >= NOW()",
+                new { vigente = PreregistroEstatus.Vigente }, cancellationToken: ct))).ToList();
+
+            if (vigentes.Count == 0)
+                return;
+
+            using IDbConnection casetaConn = _db.CreateConnection();
+            foreach (PreregistroCasetaSyncRow preregistro in vigentes)
+            {
+                if (string.IsNullOrWhiteSpace(preregistro.Nunidad) && string.IsNullOrWhiteSpace(preregistro.Placas))
+                    continue;
+
+                string? casetaId = await casetaConn.QueryFirstOrDefaultAsync<string>(new CommandDefinition(@"
+                    SELECT casetaid
+                    FROM caseta
+                    WHERE fcrea >= @fechaCrea
+                      AND (@nunidad = '' OR UPPER(TRIM(nunidad)) = UPPER(@nunidad))
+                      AND (@placas = '' OR UPPER(TRIM(placas)) = UPPER(@placas))
+                      AND (@idBodega = '' OR idbodega = @idBodega)
+                      AND (@idLinea = '' OR idtransporu = @idLinea
+                           OR UPPER(TRIM(transporu)) = UPPER(@nombreLinea))
+                    ORDER BY fcrea DESC
+                    LIMIT 1",
+                    new
+                    {
+                        fechaCrea = preregistro.FechaCrea,
+                        nunidad = preregistro.Nunidad.Trim(),
+                        placas = preregistro.Placas.Trim(),
+                        idBodega = (preregistro.IdBodega ?? string.Empty).Trim(),
+                        idLinea = (preregistro.IdTransporu ?? string.Empty).Trim(),
+                        nombreLinea = (preregistro.NombreLinea ?? string.Empty).Trim()
+                    }, cancellationToken: ct));
+
+                if (string.IsNullOrWhiteSpace(casetaId))
+                    continue;
+
+                int rows = await preregConn.ExecuteAsync(new CommandDefinition(@"
+                    UPDATE caseta_preregistro
+                    SET estatus = @usado,
+                        fuso = @ahora,
+                        usuario_uso = 'sincronizacion',
+                        casetaid = @casetaId
+                    WHERE folio = @folio AND estatus = @vigente",
+                    new
+                    {
+                        usado = PreregistroEstatus.Usado,
+                        ahora = DateTime.Now,
+                        casetaId,
+                        folio = preregistro.Folio,
+                        vigente = PreregistroEstatus.Vigente
+                    }, cancellationToken: ct));
+
+                if (rows > 0)
+                {
+                    await RegistrarAuditoriaAsync(
+                        preregConn,
+                        PreregistroEvento.UsaQr,
+                        folio: preregistro.Folio,
+                        detalle: $"casetaid={casetaId}; origen=sincronizacion",
+                        ct: ct);
+                    _logger.LogInformation(
+                        "Pre-registro {Folio} reparado como USADO al detectar entrada de caseta {CasetaId}.",
+                        preregistro.Folio,
+                        casetaId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // La reparación es complementaria. Si una base no está disponible,
+            // la consulta normal de en-camino sigue funcionando.
+            _logger.LogWarning(ex, "No se pudo sincronizar pre-registros con entradas de caseta.");
+        }
+    }
+
+    public async Task<List<PreregistroAlertaItem>> ListarAlertasAsync(
+        string? estado = null,
+        int limite = 100,
+        CancellationToken ct = default)
+    {
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        await SincronizarAlertasAsync(conn, ct);
+
+        string estadoNormalizado = string.IsNullOrWhiteSpace(estado)
+            ? PreregistroAlertaEstado.Pendiente
+            : estado.Trim().ToUpperInvariant();
+        if (estadoNormalizado is not (PreregistroAlertaEstado.Pendiente or PreregistroAlertaEstado.Atendida))
+            estadoNormalizado = PreregistroAlertaEstado.Pendiente;
+
+        var rows = await conn.QueryAsync<PreregistroAlertaItem>(new CommandDefinition(@"
+            SELECT id AS Id, tipo AS Tipo, prioridad AS Prioridad, folio AS Folio,
+                   id_bodega AS IdBodega, titulo AS Titulo, detalle AS Detalle,
+                   estado AS Estado, fecha_crea AS FechaCrea,
+                   fecha_atiende AS FechaAtiende, usuario_atiende AS UsuarioAtiende
+            FROM preregistro_alertas
+            WHERE estado = @estado
+            ORDER BY FIELD(prioridad, 'CRITICA', 'ALTA', 'MEDIA', 'BAJA'), fecha_crea DESC, id DESC
+            LIMIT @limite",
+            new { estado = estadoNormalizado, limite = Math.Clamp(limite, 1, 200) },
+            cancellationToken: ct));
+
+        return rows.ToList();
+    }
+
+    public async Task<bool> AtenderAlertaAsync(long id, string usuario, CancellationToken ct = default)
+    {
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        var alerta = await conn.QuerySingleOrDefaultAsync<AlertaRow>(new CommandDefinition(@"
+            SELECT id AS Id, folio AS Folio, id_cuenta AS IdCuenta, tipo AS Tipo
+            FROM preregistro_alertas
+            WHERE id = @id AND estado = @pendiente
+            LIMIT 1",
+            new { id, pendiente = PreregistroAlertaEstado.Pendiente }, cancellationToken: ct));
+
+        if (alerta is null) return false;
+
+        int rows = await conn.ExecuteAsync(new CommandDefinition(@"
+            UPDATE preregistro_alertas
+            SET estado = @atendida, fecha_atiende = @fecha, usuario_atiende = @usuario
+            WHERE id = @id AND estado = @pendiente",
+            new
+            {
+                id,
+                atendida = PreregistroAlertaEstado.Atendida,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                fecha = DateTime.Now,
+                usuario = usuario.Trim()
+            }, cancellationToken: ct));
+
+        if (rows == 0) return false;
+
+        await RegistrarAuditoriaAsync(
+            conn,
+            PreregistroEvento.AlertaAtendida,
+            idCuenta: alerta.IdCuenta,
+            usuario: usuario,
+            folio: alerta.Folio,
+            detalle: $"tipo={alerta.Tipo}; alerta={alerta.Id}",
+            ct: ct);
+        return true;
     }
 
     /// <summary>
@@ -872,9 +1543,29 @@ public partial class PreregistroService
     {
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
 
+        string cidTranspor = req.CidTranspor.Trim();
+        string nombreLinea = req.NombreLinea.Trim();
+        string contacto = req.Contacto?.Trim() ?? string.Empty;
+        string usuarioSolicitado = req.Usuario.Trim();
+
+        if (string.IsNullOrWhiteSpace(cidTranspor) || cidTranspor.Length > 10 ||
+            string.IsNullOrWhiteSpace(nombreLinea) || nombreLinea.Length > 100 ||
+            contacto.Length > 100 || usuarioSolicitado.Length > 30)
+        {
+            return new PreregistroCuentaCrearResponse
+            {
+                Success = false,
+                Message = "Revisa los datos de la cuenta: línea, transportista y contacto deben tener un formato válido."
+            };
+        }
+
+        string usuario = string.IsNullOrWhiteSpace(usuarioSolicitado)
+            ? await GenerarUsuarioDisponibleAsync(conn, cidTranspor, ct)
+            : usuarioSolicitado;
+
         bool existe = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
             "SELECT COUNT(*) > 0 FROM preregistro_cuentas WHERE usuario = @usuario",
-            new { usuario = req.Usuario.Trim() }, cancellationToken: ct));
+            new { usuario }, cancellationToken: ct));
 
         if (existe)
             return new PreregistroCuentaCrearResponse { Success = false, Message = "Ya existe una cuenta con ese usuario." };
@@ -883,26 +1574,34 @@ public partial class PreregistroService
         string hash = BCrypt.Net.BCrypt.HashPassword(passwordInicial);
         DateTime ahora = DateTime.Now;
 
-        int id = await conn.ExecuteScalarAsync<int>(new CommandDefinition(@"
-            INSERT INTO preregistro_cuentas
-                (usuario, password_hash, cidtranspor, nombre_linea, contacto, activo, fcrea, usucrea)
-            VALUES
-                (@usuario, @hash, @cidTranspor, @nombreLinea, @contacto, 1, @ahora, @usucrea);
-            SELECT LAST_INSERT_ID();",
-            new
-            {
-                usuario = req.Usuario.Trim(),
-                hash,
-                cidTranspor = req.CidTranspor.Trim(),
-                nombreLinea = req.NombreLinea.Trim(),
-                contacto = req.Contacto,
-                ahora,
-                usucrea = usuarioTrafico
-            }, cancellationToken: ct));
+        int id;
+        try
+        {
+            id = await conn.ExecuteScalarAsync<int>(new CommandDefinition(@"
+                INSERT INTO preregistro_cuentas
+                    (usuario, password_hash, cidtranspor, nombre_linea, contacto, activo, fcrea, usucrea)
+                VALUES
+                    (@usuario, @hash, @cidTranspor, @nombreLinea, @contacto, 1, @ahora, @usucrea);
+                SELECT LAST_INSERT_ID();",
+                new
+                {
+                    usuario,
+                    hash,
+                    cidTranspor,
+                    nombreLinea,
+                    contacto = string.IsNullOrWhiteSpace(contacto) ? null : contacto,
+                    ahora,
+                    usucrea = usuarioTrafico
+                }, cancellationToken: ct));
+        }
+        catch (MySqlException ex) when (ex.Number == 1062)
+        {
+            return new PreregistroCuentaCrearResponse { Success = false, Message = "Ya existe una cuenta con ese usuario." };
+        }
 
-        await RegistrarAuditoriaAsync(conn, PreregistroEvento.AltaCuenta, idCuenta: id, usuario: usuarioTrafico, detalle: $"usuario={req.Usuario}", ct: ct);
+        await RegistrarAuditoriaAsync(conn, PreregistroEvento.AltaCuenta, idCuenta: id, usuario: usuarioTrafico, detalle: $"usuario={usuario}", ct: ct);
 
-        return new PreregistroCuentaCrearResponse { Success = true, Message = "Cuenta creada.", Id = id, PasswordInicial = passwordInicial };
+        return new PreregistroCuentaCrearResponse { Success = true, Message = "Cuenta creada.", Id = id, Usuario = usuario, PasswordInicial = passwordInicial };
     }
 
     public async Task<PreregistroResetPasswordResponse> ResetPasswordAsync(int id, string usuarioTrafico, CancellationToken ct = default)
@@ -989,6 +1688,180 @@ public partial class PreregistroService
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Crea alertas derivadas de situaciones que el panel puede detectar al
+    /// consultar la cola. La clave única evita duplicados entre pestañas y
+    /// entre varios supervisores consultando al mismo tiempo.
+    /// </summary>
+    private static async Task SincronizarAlertasAsync(IDbConnection conn, CancellationToken ct)
+    {
+        await EnsureAlertSchemaAsync(conn, ct);
+
+        // Una señal nueva resuelve automáticamente la alerta técnica de
+        // conectividad. Las alertas de operación (arribo y ETA) sí requieren
+        // que una persona las confirme.
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            UPDATE preregistro_alertas a
+            INNER JOIN caseta_preregistro p ON p.folio = a.folio
+            SET a.estado = @resuelta, a.fecha_atiende = NOW(), a.usuario_atiende = 'sistema'
+            WHERE a.estado = @pendiente
+              AND a.tipo = @sinReporte
+              AND p.fubicacion IS NOT NULL",
+            new
+            {
+                resuelta = PreregistroAlertaEstado.Resuelta,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                sinReporte = PreregistroAlertaTipo.SenalSinReporte
+            }, cancellationToken: ct));
+
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            UPDATE preregistro_alertas a
+            INNER JOIN caseta_preregistro p ON p.folio = a.folio
+            SET a.estado = @resuelta, a.fecha_atiende = NOW(), a.usuario_atiende = 'sistema'
+            WHERE a.estado = @pendiente
+              AND a.tipo = @senalVencida
+              AND (p.fubicacion IS NULL OR p.fubicacion >= DATE_SUB(NOW(), INTERVAL 25 MINUTE))",
+            new
+            {
+                resuelta = PreregistroAlertaEstado.Resuelta,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                senalVencida = PreregistroAlertaTipo.SenalVencida
+            }, cancellationToken: ct));
+
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            INSERT INTO preregistro_alertas
+                (clave, tipo, prioridad, folio, id_cuenta, id_bodega, titulo, detalle, estado, fecha_crea, fecha_condicion)
+            SELECT CONCAT('SENAL_SIN_REPORTE:', folio),
+                   @tipo, 'ALTA', folio, id_cuenta, idbodega,
+                   'Sin señal inicial',
+                   CONCAT('El pre-registro ', folio, ' todavía no reporta ubicación.'),
+                   @pendiente, NOW(), fcrea
+            FROM caseta_preregistro
+            -- Un pre-registro recien creado aun no implica que el camion deba
+            -- estar reportando. La tolerancia evita alertas falsas al generar
+            -- la clave y da tiempo a que el chofer inicie el recorrido.
+            WHERE estatus = @vigente AND fexpira >= NOW()
+              AND fcrea <= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+              AND fubicacion IS NULL
+            ON DUPLICATE KEY UPDATE
+                estado = IF(
+                    VALUES(fecha_condicion) > COALESCE(fecha_condicion, '1000-01-01')
+                    AND (fecha_atiende IS NULL OR fecha_atiende < VALUES(fecha_condicion)),
+                    'PENDIENTE', estado),
+                fecha_condicion = GREATEST(COALESCE(fecha_condicion, '1000-01-01'), VALUES(fecha_condicion)),
+                detalle = VALUES(detalle)",
+            new
+            {
+                tipo = PreregistroAlertaTipo.SenalSinReporte,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                vigente = PreregistroEstatus.Vigente
+            }, cancellationToken: ct));
+
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            INSERT INTO preregistro_alertas
+                (clave, tipo, prioridad, folio, id_cuenta, id_bodega, titulo, detalle, estado, fecha_crea, fecha_condicion)
+            SELECT CONCAT('SENAL_VENCIDA:', folio),
+                   @tipo, 'MEDIA', folio, id_cuenta, idbodega,
+                   'Señal vencida',
+                   CONCAT('La última señal del pre-registro ', folio, ' tiene más de 25 minutos.'),
+                   @pendiente, NOW(), fubicacion
+            FROM caseta_preregistro
+            WHERE estatus = @vigente AND fexpira >= NOW()
+              AND fubicacion IS NOT NULL
+              AND fubicacion < DATE_SUB(NOW(), INTERVAL 25 MINUTE)
+            ON DUPLICATE KEY UPDATE
+                estado = IF(
+                    VALUES(fecha_condicion) > COALESCE(fecha_condicion, '1000-01-01')
+                    AND (fecha_atiende IS NULL OR fecha_atiende < VALUES(fecha_condicion)),
+                    'PENDIENTE', estado),
+                fecha_condicion = GREATEST(COALESCE(fecha_condicion, '1000-01-01'), VALUES(fecha_condicion)),
+                detalle = VALUES(detalle)",
+            new
+            {
+                tipo = PreregistroAlertaTipo.SenalVencida,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                vigente = PreregistroEstatus.Vigente
+            }, cancellationToken: ct));
+    }
+
+    private static async Task CrearAlertaAsync(
+        IDbConnection conn,
+        string tipo,
+        string prioridad,
+        string folio,
+        int idCuenta,
+        string? idBodega,
+        string titulo,
+        string detalle,
+        CancellationToken ct,
+        DateTime? fechaCondicion = null)
+    {
+        await EnsureAlertSchemaAsync(conn, ct);
+
+        await conn.ExecuteAsync(new CommandDefinition(@"
+            INSERT INTO preregistro_alertas
+                (clave, tipo, prioridad, folio, id_cuenta, id_bodega, titulo, detalle, estado, fecha_crea, fecha_condicion)
+            VALUES
+                (@clave, @tipo, @prioridad, @folio, @idCuenta, @idBodega, @titulo, @detalle, @pendiente, NOW(), COALESCE(@fechaCondicion, NOW()))
+            ON DUPLICATE KEY UPDATE
+                estado = IF(
+                    VALUES(fecha_condicion) > COALESCE(fecha_condicion, '1000-01-01')
+                    AND (fecha_atiende IS NULL OR fecha_atiende < VALUES(fecha_condicion)),
+                    'PENDIENTE', estado),
+                fecha_condicion = GREATEST(COALESCE(fecha_condicion, '1000-01-01'), VALUES(fecha_condicion)),
+                prioridad = VALUES(prioridad), titulo = VALUES(titulo), detalle = VALUES(detalle)",
+            new
+            {
+                clave = $"{tipo}:{folio}",
+                tipo,
+                prioridad,
+                folio,
+                idCuenta,
+                idBodega,
+                titulo,
+                detalle,
+                pendiente = PreregistroAlertaEstado.Pendiente,
+                fechaCondicion
+            }, cancellationToken: ct));
+    }
+
+    private static async Task EnsureAlertSchemaAsync(IDbConnection conn, CancellationToken ct)
+    {
+        // Se comprueba la base de esta conexión: una caché global podría ocultar
+        // una tabla antigua al cambiar de base o restaurar un respaldo.
+        await AlertSchemaLock.WaitAsync(ct);
+        try
+        {
+            int columnExists = await conn.ExecuteScalarAsync<int>(new CommandDefinition(@"
+                SELECT COUNT(*)
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = @tableName
+                  AND COLUMN_NAME = @columnName",
+                new { tableName = "preregistro_alertas", columnName = "fecha_condicion" },
+                cancellationToken: ct));
+
+            if (columnExists != 0) return;
+
+            try
+            {
+                await conn.ExecuteAsync(new CommandDefinition(@"
+                    ALTER TABLE preregistro_alertas
+                    ADD COLUMN fecha_condicion DATETIME DEFAULT NULL AFTER fecha_crea",
+                    cancellationToken: ct));
+            }
+            catch (MySqlException ex) when (ex.Number == 1060)
+            {
+                // Otra instancia del API pudo agregar la columna entre la
+                // comprobación y el ALTER. Los demás errores sí se propagan.
+            }
+        }
+        finally
+        {
+            AlertSchemaLock.Release();
+        }
+    }
+
     private static string MensajeEstatus(string estatus) => estatus switch
     {
         PreregistroEstatus.Vigente => "Pre-registro valido.",
@@ -1002,7 +1875,7 @@ public partial class PreregistroService
     {
         try
         {
-            await _hub.Clients.All.SendAsync("onPreregistroCreado", notification, ct);
+            await _hub.Clients.Group(WarehouseHub.PreregistroOperationsGroup).SendAsync("onPreregistroCreado", notification, ct);
         }
         catch (Exception ex)
         {
@@ -1011,17 +1884,11 @@ public partial class PreregistroService
 
         try
         {
-            string[] destinatarios = _configuration
-                .GetSection("Preregistro:NotificationEmails")
-                .Get<string[]>()
-                ?? _configuration.GetSection("RevisionReportEmails:FixedRecipients").Get<string[]>()
-                ?? Array.Empty<string>();
-
-            if (destinatarios.Length == 0)
-            {
-                _logger.LogWarning("No hay destinatarios configurados para avisos de pre-registro.");
-                return;
-            }
+            // Temporalmente todos los correos propios del pre-registro deben
+            // llegar solo a desarrollo3. No se usa el fallback de reportes ni
+            // una lista externa para evitar que una configuracion antigua del
+            // servidor vuelva a incluir a trafico/operacion.
+            string[] destinatarios = [CorreoPreregistroTemporal];
 
             string asunto = $"Nuevo pre-registro de camión: {notification.Folio} | Unidad: {notification.Nunidad} | {notification.NombreLinea}";
             string cuerpo = BuildPreregistroCreadoEmailBody(notification);
@@ -1163,6 +2030,34 @@ public partial class PreregistroService
         return Convert.ToHexString(bytes); // 32 caracteres, coincide con CHAR(32)
     }
 
+    private static async Task<string> GenerarUsuarioDisponibleAsync(IDbConnection conn, string cidTranspor, CancellationToken ct)
+    {
+        string codigo = new string(cidTranspor
+            .Where(char.IsLetterOrDigit)
+            .ToArray())
+            .ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(codigo)) codigo = "linea";
+
+        string baseUsuario = $"linea-{codigo}";
+        // El sufijo de colisión agrega 7 caracteres (guion + 6 hex).
+        if (baseUsuario.Length > 23) baseUsuario = baseUsuario[..23];
+
+        for (int intento = 0; intento < 6; intento++)
+        {
+            string usuario = intento == 0
+                ? baseUsuario
+                : $"{baseUsuario}-{Convert.ToHexString(RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
+
+            bool existe = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT COUNT(*) > 0 FROM preregistro_cuentas WHERE usuario = @usuario",
+                new { usuario }, cancellationToken: ct));
+
+            if (!existe) return usuario;
+        }
+
+        throw new InvalidOperationException("No fue posible generar un usuario disponible para la cuenta.");
+    }
+
     private static string GenerarPasswordTemporal()
     {
         // Legible para dictarla por telefono: sin caracteres ambiguos (0/O, 1/I/l).
@@ -1259,14 +2154,31 @@ public partial class PreregistroService
     /// copia denormalizada en cada miga del recorrido.</summary>
     private class EstadoUbicacionRow
     {
+        public int IdCuenta { get; set; }
         public string? IdBodega { get; set; }
         public string Estatus { get; set; } = string.Empty;
+        public DateTime FechaExpira { get; set; }
         public DateTime FPurga { get; set; }
+        public int? EtaMinutos { get; set; }
         public double? DestinoLat { get; set; }
         public double? DestinoLon { get; set; }
         public double? DestinoGeocercaLat { get; set; }
         public double? DestinoGeocercaLon { get; set; }
         public int? DestinoGeocercaMetros { get; set; }
+    }
+
+    private class CuentaIntentosRow
+    {
+        public int IntentosFallidos { get; set; }
+        public DateTime? FBloqueo { get; set; }
+    }
+
+    private sealed class AlertaRow
+    {
+        public long Id { get; set; }
+        public string Folio { get; set; } = string.Empty;
+        public int IdCuenta { get; set; }
+        public string Tipo { get; set; } = string.Empty;
     }
 
     private class PreregistroRow
@@ -1283,6 +2195,32 @@ public partial class PreregistroService
         public DateTime FechaExpira { get; set; }
         public DateTime? FechaUso { get; set; }
         public string? UsuarioUso { get; set; }
+        public string? CasetaId { get; set; }
+    }
+
+    private sealed class PreregistroCasetaSyncRow
+    {
+        public string Folio { get; set; } = string.Empty;
+        public string Nunidad { get; set; } = string.Empty;
+        public string Placas { get; set; } = string.Empty;
+        public string? IdTransporu { get; set; }
+        public string? NombreLinea { get; set; }
+        public string? IdBodega { get; set; }
+        public DateTime FechaCrea { get; set; }
+    }
+
+    private sealed class PreregistroCierrePendienteRow
+    {
+        public long Id { get; set; }
+        public string Folio { get; set; } = string.Empty;
+        public string CasetaId { get; set; } = string.Empty;
+        public string Usuario { get; set; } = string.Empty;
+        public bool PlacasNoCoinciden { get; set; }
+    }
+
+    private sealed class EstadoCierrePreregistroRow
+    {
+        public string Estatus { get; set; } = string.Empty;
         public string? CasetaId { get; set; }
     }
 }

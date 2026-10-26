@@ -201,12 +201,74 @@ public class CasetaController : ControllerBase
         try
         {
             var result = await _casetaService.GuardarEntradaCasetaAsync(request, ObtenerUsuario(), ct);
+
+            // Guardar la entrada y consumir el QR son pasos distintos. Se
+            // ejecuta despues de confirmar la entrada para que un fallo de
+            // este enlace nunca borre ni deshaga la entrada ya registrada.
+            if (result.Success)
+            {
+                try
+                {
+                    var preregistro = await _preregistroService.UsarPorEntradaAsync(
+                        request,
+                        result.CasetaId,
+                        ObtenerUsuario(),
+                        ct);
+
+                    if (preregistro is { Success: false })
+                    {
+                        await _preregistroService.RegistrarCierrePendienteAsync(
+                            request,
+                            result.CasetaId,
+                            ObtenerUsuario(),
+                            preregistro.Message,
+                            ct);
+                        _logger.LogWarning(
+                            "Entrada de caseta {CasetaId} guardada, pero el pre-registro quedo pendiente: {Message}",
+                            result.CasetaId,
+                            preregistro.Message);
+                        result.Message += " El pre-registro quedó en cola para reintento automático.";
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Entrada de caseta {CasetaId} guardada, pero fallo el cierre del pre-registro.",
+                        result.CasetaId);
+                    try
+                    {
+                        await _preregistroService.RegistrarCierrePendienteAsync(
+                            request,
+                            result.CasetaId,
+                            ObtenerUsuario(),
+                            "Fallo temporal al cerrar el pre-registro.",
+                            ct);
+                    }
+                    catch (Exception queueException)
+                    {
+                        _logger.LogError(queueException,
+                            "No se pudo encolar el cierre pendiente de la entrada {CasetaId}.",
+                            result.CasetaId);
+                    }
+
+                    result.Message += " El pre-registro quedó pendiente de sincronización.";
+                }
+            }
+
             return Ok(result);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error al guardar entrada caseta");
-            return StatusCode(500, new CasetaEntradaGuardarResult { Success = false, Message = "Error al guardar: " + ex.Message });
+            return StatusCode(500, new CasetaEntradaGuardarResult
+            {
+                Success = false,
+                Message = "No fue posible guardar la entrada de caseta. Intenta nuevamente."
+            });
         }
     }
 
@@ -489,7 +551,12 @@ public class CasetaController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error validando pre-registro. Codigo: {Codigo}", codigo);
-            return Ok(new PreregistroValidarResponse { Success = false, Estatus = PreregistroEstatus.NoEncontrado, Message = "Error: " + ex.Message });
+            return StatusCode(500, new PreregistroValidarResponse
+            {
+                Success = false,
+                Estatus = PreregistroEstatus.NoEncontrado,
+                Message = "No fue posible validar el pre-registro. Intenta nuevamente."
+            });
         }
     }
 
@@ -516,7 +583,11 @@ public class CasetaController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error marcando como usado el pre-registro {Folio}", folio);
-            return Ok(new PreregistroUsarResponse { Success = false, Message = "Error: " + ex.Message });
+            return StatusCode(500, new PreregistroUsarResponse
+            {
+                Success = false,
+                Message = "No fue posible cerrar el pre-registro. La entrada puede reintentarse."
+            });
         }
     }
 
@@ -531,7 +602,10 @@ public class CasetaController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error obteniendo camiones en camino");
-            return Ok(new List<PreregistroEnCaminoItem>());
+            return StatusCode(500, new
+            {
+                message = "No fue posible consultar los camiones en camino. Intenta nuevamente."
+            });
         }
     }
 

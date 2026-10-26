@@ -759,6 +759,8 @@ LIMIT 1", new { casetaId });
             return new CasetaEntradaGuardarResult { Success = false, Message = "Datos de caseta invalidos." };
         }
 
+        datos.NombreUsuario = await ObtenerNombreUsuarioSeguroAsync(datos.Usucrea, ct);
+
         var listaFotos = PrepararFotosEntrada(datosF.Fotos);
         if (listaFotos.Count > 15)
         {
@@ -766,6 +768,8 @@ LIMIT 1", new { casetaId });
         }
 
         datos.Planta = FirstNonEmpty(await ObtenerPlantaUsuarioSeguroAsync(datos.Usucrea, ct), datos.Planta);
+        if (!datos.EsPreRegistro)
+            datos.EsPreRegistro = await TienePreregistroVigenteAsync(datosF, ct);
 
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
@@ -878,6 +882,42 @@ LIMIT 1", new { casetaId });
         {
             _logger.LogWarning(ex, "No se pudo obtener planta del usuario {Usuario}; se usara la planta enviada por el cliente.", usuario);
             return string.Empty;
+        }
+    }
+
+    private async Task<string> ObtenerNombreUsuarioSeguroAsync(string usuario, CancellationToken ct)
+    {
+        string usuarioNormalizado = (usuario ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(usuarioNormalizado))
+            return "sistema";
+
+        try
+        {
+            using IDbConnection conn = _db.CreateConnection();
+            string? nombre = await conn.QueryFirstOrDefaultAsync<string?>(new CommandDefinition(
+                @"SELECT NULLIF(TRIM(CONCAT_WS(' ',
+                    NULLIF(TRIM(nombre), ''),
+                    NULLIF(TRIM(apaterno), '')
+                )), '')
+                FROM usuarios
+                WHERE claveusuario = @usuario
+                LIMIT 1",
+                new { usuario = usuarioNormalizado },
+                cancellationToken: ct));
+
+            return FirstNonEmpty(nombre, usuarioNormalizado);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "No se pudo obtener el nombre del usuario autenticado {Usuario}; se usara su clave.",
+                usuarioNormalizado);
+            return usuarioNormalizado;
         }
     }
 
@@ -1908,8 +1948,9 @@ ORDER BY Nombre
        : FirstNonEmpty(datosF.DescTipoCaja, datosF.TipoCaja);
 
         string casetaId = FirstNonEmpty(datosF.Casetaid, "N/A");
-        string usuario = FirstNonEmpty(datosF.Usuario, usuarioActual);
-        string nombreUsuario = FirstNonEmpty(datosF.NombreUsuario, usuario);
+        // La identidad del movimiento siempre sale del JWT; los campos de
+        // usuario del cuerpo se conservan por compatibilidad con clientes.
+        string usuario = FirstNonEmpty(usuarioActual, "sistema");
 
         return new CasetaEntradaRegistro
         {
@@ -1933,7 +1974,7 @@ ORDER BY Nombre
             Sellos = datosF.Sellos.Trim(),
             Farribo = DateTime.Now,
             Usucrea = usuario,
-            NombreUsuario = nombreUsuario,
+            NombreUsuario = usuario,
             Fcrea = DateTime.Now,
             Usumodi = usuario,
             Fmodi = DateTime.Now,
@@ -1949,7 +1990,8 @@ ORDER BY Nombre
             Combustible = datosF.Combustible.Trim(),
             Planta = datosF.Planta.Trim(),
             RequiereImpo = datosF.RequiereImpo,
-            Actualizado = datosF.Actualizado
+            Actualizado = datosF.Actualizado,
+            EsPreRegistro = datosF.OrigenPreRegistro || !string.IsNullOrWhiteSpace(datosF.PreregistroFolio)
         };
     }
 
@@ -2406,12 +2448,27 @@ ORDER BY nlineno", new { casetaId }))
 
             msg.From.Add(new MailboxAddress(fromName, from));
 
+            // El enlace puede ejecutarse despues de que el correo se encola
+            // (por ejemplo, en el controlador que consume el QR). Confirmamos
+            // aqui tambien contra la tabla de pre-registro para que una version
+            // vieja de la app nunca mande el correo operativo de un arribo QR.
+            if (!datos.EsPreRegistro)
+                datos.EsPreRegistro = await EsEntradaDePreregistroAsync(datos.CasetaId, ct);
+
             // destinatariosOverride es para el reenvío manual (ReenviarCorreoEntradaAsync):
             // ahí la intención ya es explícita (validar con desarrollo3 o mandar a los
             // reales) y no debe pasar por la protección de entorno, que es solo para el
             // envío automático de EncolarCorreoEntradaCaseta al guardar una entrada nueva.
             IEnumerable<string> destinatarios;
-            if (destinatariosOverride != null)
+            if (datos.EsPreRegistro)
+            {
+                destinatarios = new[] { CorreoPruebasDesarrollo };
+                _logger.LogInformation(
+                    "Entrada de caseta {CasetaId} originada en pre-registro: correo redirigido únicamente a {Destino}.",
+                    datos.CasetaId,
+                    CorreoPruebasDesarrollo);
+            }
+            else if (destinatariosOverride != null)
             {
                 destinatarios = destinatariosOverride;
             }
@@ -2431,9 +2488,12 @@ ORDER BY nlineno", new { casetaId }))
             foreach (string destinatario in destinatarios)
                 AddMailbox(msg.To, destinatario);
 
-            AddMailbox(msg.Cc, CorreoCalidad);
-            AddMailbox(msg.Cc, CorreoPruebasDesarrollo);
-            AddMailbox(msg.Cc, CorreoDesarrolloPrincipal);
+            if (!datos.EsPreRegistro)
+            {
+                AddMailbox(msg.Cc, CorreoCalidad);
+                AddMailbox(msg.Cc, CorreoPruebasDesarrollo);
+                AddMailbox(msg.Cc, CorreoDesarrolloPrincipal);
+            }
 
             if (msg.To.Count == 0)
             {
@@ -2510,6 +2570,73 @@ ORDER BY nlineno", new { casetaId }))
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error enviando correo de entrada caseta {CasetaId}", datos.CasetaId);
+            return false;
+        }
+    }
+
+    private async Task<bool> EsEntradaDePreregistroAsync(string casetaId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(casetaId))
+            return false;
+
+        try
+        {
+            using IDbConnection conn = _db.CreatePmmutileriaConnection();
+            int count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(@"
+                SELECT COUNT(*)
+                FROM caseta_preregistro
+                WHERE casetaid = @casetaId",
+                new { casetaId }, cancellationToken: ct));
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "No se pudo verificar si la entrada de caseta {CasetaId} proviene de un pre-registro.",
+                casetaId);
+            return false;
+        }
+    }
+
+    private async Task<bool> TienePreregistroVigenteAsync(
+        CasetaEntradaGuardarRequest entrada,
+        CancellationToken ct)
+    {
+        string nunidad = (entrada.NoCamion ?? string.Empty).Trim();
+        string placas = (entrada.Placas ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(nunidad) && string.IsNullOrWhiteSpace(placas))
+            return false;
+
+        try
+        {
+            using IDbConnection conn = _db.CreatePmmutileriaConnection();
+            int count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(@"
+                SELECT COUNT(*)
+                FROM caseta_preregistro
+                WHERE estatus = @vigente
+                  AND fexpira >= NOW()
+                  AND (@nunidad = '' OR UPPER(TRIM(nunidad)) = UPPER(@nunidad))
+                  AND (@placas = '' OR UPPER(TRIM(placas)) = UPPER(@placas))
+                  AND (@idBodega = '' OR idbodega = @idBodega)
+                  AND (@idLinea = '' OR idtransporu = @idLinea
+                       OR UPPER(TRIM(transporu)) = UPPER(@nombreLinea))",
+                new
+                {
+                    vigente = "VIGENTE",
+                    nunidad,
+                    placas,
+                    idBodega = (entrada.IdBodega ?? string.Empty).Trim(),
+                    idLinea = (entrada.IdLineaCamion ?? string.Empty).Trim(),
+                    nombreLinea = (entrada.NombreLineaCamion ?? entrada.LineaCamion ?? string.Empty).Trim()
+                }, cancellationToken: ct));
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "No se pudo detectar si la entrada de caseta corresponde a un pre-registro vigente.");
             return false;
         }
     }
@@ -3277,6 +3404,7 @@ internal class CasetaEntradaRegistro
     public string Planta { get; set; } = string.Empty;
     public bool RequiereImpo { get; set; }
     public bool Actualizado { get; set; }
+    public bool EsPreRegistro { get; set; }
 }
 
 internal class CasetaEntradaFoto

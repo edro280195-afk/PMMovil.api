@@ -22,6 +22,7 @@ public static class PreregistroEvento
     public const string LoginFallido = "LOGIN_FALLIDO";
     public const string LoginBloqueado = "LOGIN_BLOQUEADO";
     public const string CreaPrereg = "CREA_PREREG";
+    public const string CancelaPrereg = "CANCELA_PREREG";
     public const string ValidaQr = "VALIDA_QR";
     public const string UsaQr = "USA_QR";
     /// <summary>Primera senal de ubicacion dentro de la geocerca de la planta: el arribo real.</summary>
@@ -31,6 +32,22 @@ public static class PreregistroEvento
     public const string BajaCuenta = "BAJA_CUENTA";
     public const string ReactivaCuenta = "REACTIVA_CUENTA";
     public const string ResetPass = "RESET_PASS";
+    public const string AlertaAtendida = "ALERTA_ATENDIDA";
+}
+
+public static class PreregistroAlertaEstado
+{
+    public const string Pendiente = "PENDIENTE";
+    public const string Atendida = "ATENDIDA";
+    public const string Resuelta = "RESUELTA";
+}
+
+public static class PreregistroAlertaTipo
+{
+    public const string ArriboGeocerca = "ARRIBO_GEOCERCA";
+    public const string EtaCritico = "ETA_CRITICO";
+    public const string SenalVencida = "SENAL_VENCIDA";
+    public const string SenalSinReporte = "SENAL_SIN_REPORTE";
 }
 
 // ── Portal: login ──────────────────────────────────────────────────────────
@@ -66,8 +83,8 @@ public class PreregistroCrearRequest
     [Required, MaxLength(100)]
     public string Operador { get; set; } = string.Empty;
 
-    [MaxLength(5)]
-    public string? IdBodega { get; set; }
+    [Required, MaxLength(5)]
+    public string IdBodega { get; set; } = string.Empty;
 
     /// <summary>Opcional: ubicacion capturada al momento de crear.</summary>
     public double? Lat { get; set; }
@@ -141,16 +158,18 @@ public class PreregistroAdminItem
 
 public class PreregistroUbicacionRequest
 {
-    [Required]
+    [Range(-90, 90)]
     public double Lat { get; set; }
 
-    [Required]
+    [Range(-180, 180)]
     public double Lon { get; set; }
 
     /// <summary>Radio de incertidumbre en metros que reporta el GPS del dispositivo.</summary>
+    [Range(0, 10000)]
     public int? PrecisionM { get; set; }
 
     /// <summary>km/h reportados por el dispositivo. Null si el navegador no los da.</summary>
+    [Range(0, 250)]
     public double? Velocidad { get; set; }
 
     /// <summary>
@@ -224,7 +243,7 @@ public class PreregistroValidarResponse
 public class PreregistroUsarRequest
 {
     /// <summary>Folio de caseta generado al promover el registro (CasetaEntradaGuardarResult.CasetaId).</summary>
-    [Required]
+    [Required, MaxLength(80)]
     public string CasetaId { get; set; } = string.Empty;
 
     /// <summary>El guardia marca explicitamente si coteja placas fisicas y no coinciden (pantalla 5e). No bloquea.</summary>
@@ -355,7 +374,7 @@ public class PreregistroCuentaListItem
 
 public class PreregistroCuentaCrearRequest
 {
-    [Required, MaxLength(30)]
+    [MaxLength(30)]
     public string Usuario { get; set; } = string.Empty;
 
     [Required, MaxLength(10)]
@@ -373,6 +392,8 @@ public class PreregistroCuentaCrearResponse
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public int Id { get; set; }
+    /// <summary>Usuario generado automáticamente cuando no se captura uno.</summary>
+    public string? Usuario { get; set; }
     /// <summary>Se muestra una sola vez; no se puede volver a consultar despues.</summary>
     public string? PasswordInicial { get; set; }
 }
@@ -392,6 +413,21 @@ public class PreregistroAuditoriaItem
     public string? Folio { get; set; }
     public string? Ip { get; set; }
     public string? Detalle { get; set; }
+}
+
+public class PreregistroAlertaItem
+{
+    public long Id { get; set; }
+    public string Tipo { get; set; } = string.Empty;
+    public string Prioridad { get; set; } = string.Empty;
+    public string Folio { get; set; } = string.Empty;
+    public string? IdBodega { get; set; }
+    public string Titulo { get; set; } = string.Empty;
+    public string Detalle { get; set; } = string.Empty;
+    public string Estado { get; set; } = PreregistroAlertaEstado.Pendiente;
+    public DateTime FechaCrea { get; set; }
+    public DateTime? FechaAtiende { get; set; }
+    public string? UsuarioAtiende { get; set; }
 }
 
 public class PreregistroAuditoriaFiltro

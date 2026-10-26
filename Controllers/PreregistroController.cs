@@ -71,6 +71,8 @@ public class PreregistroController : ControllerBase
         int? idCuenta = ObtenerIdCuenta();
         if (idCuenta is null)
             return Unauthorized(new { message = "Token invalido." });
+        if (!await _service.CuentaActivaAsync(idCuenta.Value))
+            return Unauthorized(new { message = "La cuenta del portal está desactivada." });
 
         var response = await _service.CrearAsync(idCuenta.Value, ObtenerCidTranspor(), ObtenerNombreLinea(), request, ObtenerIp());
         if (!response.Success)
@@ -80,23 +82,29 @@ public class PreregistroController : ControllerBase
     }
 
     [Authorize(AuthenticationSchemes = "Portal")]
+    [EnableRateLimiting("PreregistroPortalPolicy")]
     [HttpGet("mis-registros")]
     public async Task<IActionResult> MisRegistros()
     {
         int? idCuenta = ObtenerIdCuenta();
         if (idCuenta is null)
             return Unauthorized(new { message = "Token invalido." });
+        if (!await _service.CuentaActivaAsync(idCuenta.Value))
+            return Unauthorized(new { message = "La cuenta del portal está desactivada." });
 
         return Ok(await _service.MisRegistrosAsync(idCuenta.Value));
     }
 
     [Authorize(AuthenticationSchemes = "Portal")]
+    [EnableRateLimiting("PreregistroPortalPolicy")]
     [HttpPost("{folio}/cancelar")]
     public async Task<IActionResult> Cancelar(string folio)
     {
         int? idCuenta = ObtenerIdCuenta();
         if (idCuenta is null)
             return Unauthorized(new { message = "Token invalido." });
+        if (!await _service.CuentaActivaAsync(idCuenta.Value))
+            return Unauthorized(new { message = "La cuenta del portal está desactivada." });
 
         bool ok = await _service.CancelarAsync(idCuenta.Value, folio);
         if (!ok)
@@ -113,6 +121,7 @@ public class PreregistroController : ControllerBase
     /// veia la garita podia tener horas.
     /// </summary>
     [Authorize(AuthenticationSchemes = "Portal")]
+    [EnableRateLimiting("PreregistroPortalPolicy")]
     [HttpPost("{folio}/ubicacion")]
     public async Task<IActionResult> ActualizarUbicacion(string folio, [FromBody] PreregistroUbicacionRequest request)
     {
@@ -122,6 +131,8 @@ public class PreregistroController : ControllerBase
         int? idCuenta = ObtenerIdCuenta();
         if (idCuenta is null)
             return Unauthorized(new { message = "Token invalido." });
+        if (!await _service.CuentaActivaAsync(idCuenta.Value))
+            return Unauthorized(new { message = "La cuenta del portal está desactivada." });
 
         var response = await _service.ActualizarUbicacionAsync(idCuenta.Value, folio, request);
         if (!response.Success)
@@ -135,12 +146,15 @@ public class PreregistroController : ControllerBase
     /// suyos: se valida contra mis-registros antes de devolver nada.
     /// </summary>
     [Authorize(AuthenticationSchemes = "Portal")]
+    [EnableRateLimiting("PreregistroPortalPolicy")]
     [HttpGet("{folio}/recorrido")]
     public async Task<IActionResult> Recorrido(string folio, [FromQuery] int limite = 500)
     {
         int? idCuenta = ObtenerIdCuenta();
         if (idCuenta is null)
             return Unauthorized(new { message = "Token invalido." });
+        if (!await _service.CuentaActivaAsync(idCuenta.Value))
+            return Unauthorized(new { message = "La cuenta del portal está desactivada." });
 
         var propios = await _service.MisRegistrosAsync(idCuenta.Value);
         if (!propios.Any(p => string.Equals(p.Folio, folio, StringComparison.OrdinalIgnoreCase)))

@@ -41,6 +41,26 @@ public class PreregistroAdminController : ControllerBase
         return Ok(await _service.ListarRegistrosAdminAsync(filtro));
     }
 
+    /// <summary>Alertas operativas deduplicadas del centro de control.</summary>
+    [HttpGet("alertas")]
+    public async Task<IActionResult> Alertas(
+        [FromQuery] string? estado = null,
+        [FromQuery] int limite = 100,
+        CancellationToken ct = default)
+    {
+        return Ok(await _service.ListarAlertasAsync(estado, limite, ct));
+    }
+
+    [HttpPost("alertas/{id:long}/atender")]
+    [RequiereModulo(MobileModuleIds.TransporterPreRegistration, "Modificar")]
+    public async Task<IActionResult> AtenderAlerta(long id, CancellationToken ct)
+    {
+        bool atendida = await _service.AtenderAlertaAsync(id, ObtenerUsuario(), ct);
+        return atendida
+            ? Ok(new { success = true, message = "Alerta marcada como atendida." })
+            : Conflict(new { success = false, message = "La alerta ya fue atendida o no existe." });
+    }
+
     /// <summary>Catálogo de líneas transportistas para el combo de "Nueva cuenta".</summary>
     [HttpGet("lineas-transporte")]
     public async Task<IActionResult> LineasTransporte()
