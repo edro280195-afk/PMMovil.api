@@ -68,13 +68,22 @@ public class MetricasRevisionController : ControllerBase
         [FromQuery] string? cliente = null,
         [FromQuery] string? revisor = null,
         [FromQuery] string? origen = null,
-        [FromQuery] string? crossFilter = null)
+        [FromQuery] string? crossFilter = null,
+        [FromQuery] bool incluirRevisadas = false)
     {
         try
         {
             DateTime desde = string.IsNullOrEmpty(fechaInicio) ? DateTime.Today : DateTime.Parse(fechaInicio);
             DateTime hasta = string.IsNullOrEmpty(fechaFin) ? DateTime.Today : DateTime.Parse(fechaFin);
-            var resultado = await _service.ObtenerEvidenciaAsync(desde, hasta, planta, cliente, revisor, origen, crossFilter);
+            var resultado = await _service.ObtenerEvidenciaAsync(
+                desde,
+                hasta,
+                planta,
+                cliente,
+                revisor,
+                origen,
+                crossFilter,
+                incluirRevisadas: incluirRevisadas);
             return Ok(resultado);
         }
         catch (Exception ex)

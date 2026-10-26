@@ -20,6 +20,7 @@ public class MetricaRevisionRow
     public string Planta { get; set; } = "";
     public int Status { get; set; }
     public DateTime? FechaFactura { get; set; }
+    public DateTime? FechaPrimeraFactura { get; set; }
     public DateTime? FInicioRevision { get; set; }
     public DateTime? FFinRevision { get; set; }
     public string? Revisor { get; set; }
@@ -29,6 +30,9 @@ public class MetricaRevisionRow
     public decimal? Peso { get; set; }
     public decimal? Cantidad { get; set; }
     public int TotalFacturas { get; set; }
+    public int FacturasPendientesRevision { get; set; }
+    public int Discrepancias { get; set; }
+    public string? OficinaOrigen { get; set; }
 }
 
 public class KpisDto
@@ -45,6 +49,14 @@ public class KpisDto
     public int Subdivisiones { get; set; }
     public int ViaApp { get; set; }
     public int ViaManual { get; set; }
+    /// <summary>Entradas PIPA que quedaron fuera del resumen (no cuentan en ningún número).</summary>
+    public int Pipa { get; set; }
+    /// <summary>Entradas que llegaron después de las 17:00 del día de arribo.</summary>
+    public int EntradasTarde { get; set; }
+    /// <summary>Unión: entrada tardía y/o factura fuera de ventana (cada entrada cuenta una sola vez).</summary>
+    public int DespuesDeCinco { get; set; }
+    public int ConFacturaEnVentana { get; set; }
+    public int RevisadasConFacturaEnVentana { get; set; }
     public double PctFacturaRevisada { get; set; }
     public double PctVentana { get; set; }
     public double PctApp { get; set; }
@@ -96,6 +108,7 @@ public class EvidenciaRowDto
     public string? Cliente { get; set; }
     public DateTime Arribo { get; set; }
     public DateTime? FechaFactura { get; set; }
+    public DateTime? FechaPrimeraFactura { get; set; }
     public bool TieneFactura { get; set; }
     public bool FueraVentana { get; set; }
     public string? Manejo { get; set; }
@@ -107,6 +120,9 @@ public class EvidenciaRowDto
     public int? TiempoMin { get; set; }
     public bool Extraordinaria { get; set; }
     public bool EsSubdivision { get; set; }
+    public int FacturasPendientesRevision { get; set; }
+    public int Discrepancias { get; set; }
+    public string? OficinaOrigen { get; set; }
 }
 
 public class EvidenciaResponse
