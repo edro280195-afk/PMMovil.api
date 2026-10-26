@@ -21,15 +21,43 @@ copian a una carpeta local, no hay Web Deploy/FTP/SSH configurado hacia el
 servidor real. Generar el build es responsabilidad de Claude; subirlo al
 servidor y correr las migraciones es responsabilidad de Eduardo.
 
-## Cómo generar el release
+## Regla obligatoria de configuración
 
-```bash
-cd PMMovil.Api/PMMovil.Api
-dotnet publish -c Release -r win-x64 --self-contained false \
-  -o "../../_release/api/PMMovil.Api-release-<fecha>-<slug-descriptivo>"
+El despliegue productivo actual funciona con configuración basada en archivos.
+El release de la API **debe incluir** estos archivos:
+
+- `appsettings.json`
+- `appsettings.Local.json`
+- `appsettings.Production.json`
+- `web.config`
+
+`Program.cs` carga `appsettings.Local.json` también cuando el entorno es
+`Production`, por compatibilidad con el servidor existente. Por eso el ZIP de
+la API contiene información sensible: debe copiarse directamente al servidor,
+no subirse a Git, no enviarse por canales públicos y no quedar expuesto por
+IIS. `appsettings.Development.json` no se incluye.
+
+`ConnectionStrings:PmmutileriaDb` no es obligatoria si `PmmtrafDb` permite que
+`BaseRepository` derive la conexión de `pmmutileria`. No agregar una validación
+manual que vuelva a exigirla.
+
+## Cómo generar el release (comando oficial)
+
+Desde `C:\Codigos\PMMovil-migracion` ejecutar PowerShell:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\scripts\publish-pmmovil-api.ps1 -ReleaseSlug "preregistro-config"
 ```
 
-Ejemplo real: `_release/api/PMMovil.Api-release-20260928-seguridad-publico/`.
+El script usa `dotnet publish`, verifica que estén los cuatro archivos de
+configuración requeridos, elimina cualquier `appsettings.Development.json`,
+incluye las migraciones de preregistro como trazabilidad, genera el ZIP y
+calcula su SHA-256. No usar un `dotnet publish -o` manual para producción,
+porque es fácil olvidar `appsettings.Local.json`.
+
+El artefacto queda en `_release/api/` con el formato:
+`PMMovil.Api-release-<fecha>-<slug>.zip`.
 
 ## Antes de copiar un release al servidor
 
@@ -48,3 +76,7 @@ Ejemplo real: `_release/api/PMMovil.Api-release-20260928-seguridad-publico/`.
 3. Los logs de producción quedan en `C:\inetpub\wwwroot\pmmovil\_api\Logs`
    (ver `Program.cs`, `ResolveLogFilePath`) — revisar ahí si algo falla
    después del deploy.
+
+4. Verificar que el sitio conserve `ASPNETCORE_ENVIRONMENT=Production`, copiar
+   el contenido del release al directorio de la API, reciclar el App Pool y
+   ejecutar el smoke test de login antes de entregar el cambio.

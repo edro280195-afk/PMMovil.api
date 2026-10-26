@@ -7,6 +7,7 @@ using FluentValidation;
 using FluentValidation.AspNetCore;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -70,7 +71,12 @@ try
         .Enrich.FromLogContext();
     });
 
+    // El despliegue existente de PMMovil conserva los secretos operativos en
+    // appsettings.Local.json. Se carga también en Production para mantener la
+    // compatibilidad con ese esquema; el archivo debe protegerse en el
+    // servidor y nunca exponerse al navegador.
     builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false);
+    ValidateProductionConfiguration(builder);
 
     builder.Services.AddFluentValidationAutoValidation();
 
@@ -79,6 +85,9 @@ try
     {
         options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     });
+
+    builder.Services.AddDataProtection()
+        .SetApplicationName("PMMovil.Api");
 
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen(c =>
@@ -117,7 +126,7 @@ try
     builder.Services.AddScoped<IRevisionShareService, RevisionShareService>();
     builder.Services.AddScoped<IReportShareService, ReportShareService>();
     builder.Services.AddScoped<IMonitorTvLinkService, MonitorTvLinkService>();
-    builder.Services.AddScoped<MonitorTvPublicService>();
+    builder.Services.AddSingleton<MonitorTvRealtimePublisher>();
     builder.Services.AddScoped<SalidaService>();
     builder.Services.AddScoped<CasetaService>();
     builder.Services.AddScoped<SalidaCasetaService>();
@@ -128,11 +137,12 @@ try
     builder.Services.AddScoped<ProveedorService>();
     builder.Services.AddScoped<ReportService>();
     builder.Services.AddScoped<RevisionActivityService>();
+    builder.Services.AddScoped<RevisionAuditService>();
     builder.Services.AddScoped<RevisionService>();
     builder.Services.AddScoped<LabelCaptureService>();
     builder.Services.AddScoped<EtiquetaGrupoClienteService>();
-    builder.Services.AddScoped<RackCensusService>();
     builder.Services.AddScoped<RevisionNormalCompletionService>();
+    builder.Services.AddScoped<TrazabilidadService>();
     builder.Services.AddScoped<RevisionReportPdfService>();
     builder.Services.AddScoped<WarehouseLayoutService>();
     builder.Services.AddScoped<ClaseModelService>();
@@ -227,10 +237,7 @@ try
                     Window = TimeSpan.FromMinutes(1),
                     QueueLimit = 0
                 }));
-        // Una pantalla publica consulta cada 15 segundos. El limite permite
-        // varias pantallas desde la misma oficina sin convertir el enlace en
-        // un endpoint de alto volumen para scraping.
-        options.AddPolicy("MonitorTvPublicPolicy", context =>
+        options.AddPolicy("PreregistroPortalPolicy", context =>
             System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
                 partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "sin-ip",
                 factory: _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
@@ -240,8 +247,7 @@ try
                     QueueLimit = 0
                 }));
         // Enlaces públicos de "Ver reporte" / "Seguimiento de entrada" /
-        // "Seguimiento de revisión" (PublicoController): igual que
-        // MonitorTvPublicPolicy, por IP. Una sola persona abriendo su enlace
+        // "Seguimiento de revisión" (PublicoController), por IP. Una sola persona abriendo su enlace
         // y viendo varias fotos no debería acercarse a este límite, pero sí
         // frena un scraping o fuerza bruta automatizado desde la misma IP.
         options.AddPolicy("PublicoLinksPolicy", context =>
@@ -263,6 +269,7 @@ try
         builder.Services.AddHostedService<RevisionHygieneService>();
         builder.Services.AddHostedService<CasetaPhotoSyncWorker>();
         builder.Services.AddHostedService<PreregistroPurgeWorker>();
+        builder.Services.AddHostedService<PreregistroClosureWorker>();
     }
 
     var jwtSettings = builder.Configuration.GetSection("Jwt");
@@ -334,22 +341,29 @@ try
         };
     });
 
+    var configuredOrigins = builder.Configuration
+        .GetSection("Cors:AllowedOrigins")
+        .Get<string[]>() ?? Array.Empty<string>();
     var allowedOrigins = new[]
     {
-   "http://localhost:4200",
-   "http://localhost:4201",
-   "http://127.0.0.1:4200",
-   "http://127.0.0.1:4201",
-   "http://localhost",
-   "https://localhost",
-   "capacitor://localhost",
-   "https://revision.grupopmm.com",
-   "http://revision.grupopmm.com",
-   "http://192.168.10.29:85"
-   // TODO Fase 6: agregar aqui el dominio publico del portal de pre-registro
-   // (p.ej. https://preregistro.grupopmm.com) una vez que exista el reverse
-   // proxy. Sin esto el navegador del chofer bloqueara las llamadas por CORS.
-    };
+        "http://localhost:4200",
+        "http://localhost:4201",
+        "http://127.0.0.1:4200",
+        "http://127.0.0.1:4201",
+        "http://localhost",
+        "https://localhost",
+        "capacitor://localhost",
+        "https://revision.grupopmm.com",
+        "http://revision.grupopmm.com",
+        "http://192.168.10.29:85"
+    }
+    .Concat(configuredOrigins)
+    .Select(origin => origin.Trim().TrimEnd('/'))
+    .Where(origin => Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri)
+                     && !string.IsNullOrWhiteSpace(uri.Scheme)
+                     && !string.IsNullOrWhiteSpace(uri.Host))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
     builder.Services.AddCors(options =>
     {
         options.AddPolicy("PMMovilCors", policy =>
@@ -421,6 +435,9 @@ try
         };
     });
 
+    // CORS debe ejecutarse antes de los middlewares que pueden devolver errores.
+    // Así el navegador no convierte un 4xx/5xx de la API en un error engañoso de CORS.
+    app.UseCors("PMMovilCors");
     app.UseMiddleware<SecurityHeadersMiddleware>();
     app.UseMiddleware<GlobalExceptionMiddleware>();
 
@@ -435,7 +452,6 @@ try
         app.UseSwaggerUI();
     }
 
-    app.UseCors("PMMovilCors");
     app.UseStaticFiles();
     if (!app.Environment.IsDevelopment())
     {
@@ -448,6 +464,7 @@ try
 
     app.MapControllers();
     app.MapHub<WarehouseHub>("/hubs/warehouse");
+    app.MapHub<MonitorTvHub>("/hubs/monitor-tv").AllowAnonymous();
     app.MapHub<BodegaHub>("/hubs/bodega").AllowAnonymous();
 
     app.Run();
@@ -479,4 +496,45 @@ static string ResolveLogFilePath()
     // sobre C:\inetpub. El log queda junto al ejecutable para poder leerlo
     // desde Android Studio o desde el explorador de archivos.
     return Path.Combine(AppContext.BaseDirectory, "Logs", "pmmovil-api-.log");
+}
+
+static void ValidateProductionConfiguration(WebApplicationBuilder builder)
+{
+    if (!builder.Environment.IsProduction())
+        return;
+
+    // La configuración puede venir de variables de entorno o de los archivos
+    // appsettings.json/appsettings.Local.json del despliegue existente.
+    string[] requiredConfigurationKeys =
+    [
+        "ConnectionStrings:ReportesDb",
+        "ConnectionStrings:PmmtrafDb",
+        "ConnectionStrings:PmmtoolsDb",
+        "Jwt:Secret",
+        "PreregistroJwt:Secret",
+        "Smtp:Password",
+        "PushNotifications:Vapid:PrivateKey",
+        "DashboardApiKey",
+        "GeminiApiKey"
+    ];
+
+    string[] missing = requiredConfigurationKeys
+        .Where(key => string.IsNullOrWhiteSpace(builder.Configuration[key]))
+        .ToArray();
+
+    if (missing.Length > 0)
+    {
+        throw new InvalidOperationException(
+            $"Configuracion de produccion incompleta. Faltan claves de configuracion: {string.Join(", ", missing)}.");
+    }
+
+    string[] shortSecrets = new[] { "Jwt:Secret", "PreregistroJwt:Secret" }
+        .Where(key => (builder.Configuration[key]?.Length ?? 0) < 32)
+        .ToArray();
+
+    if (shortSecrets.Length > 0)
+    {
+        throw new InvalidOperationException(
+            $"Los secretos JWT de produccion deben tener al menos 32 caracteres: {string.Join(", ", shortSecrets)}.");
+    }
 }

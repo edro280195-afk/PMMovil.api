@@ -37,18 +37,28 @@
     <Content Remove="Tests\**" />
     <None Remove="Tests\**" />
 
-    <!-- appsettings.Local.json es SOLO para desarrollo local (secretos que
-         nunca van a git, ver .gitignore). Program.cs lo carga como overlay
-         OPCIONAL sin importar el ambiente (AddJsonFile, no esta condicionado
-         a ASPNETCORE_ENVIRONMENT); si este archivo llega al servidor de
-         produccion, pisa en silencio las cadenas de conexion de .30/.29 con
-         las de localhost/root. CopyToPublishDirectory=Never asegura que
-         "dotnet publish" nunca lo incluya en la carpeta que se copia al
-         servidor, aunque siga funcionando con "dotnet run" en local (que lee
-         directo del directorio del proyecto, no del publish). -->
+    <!-- El despliegue productivo existente conserva la configuración sensible
+         en appsettings.json/appsettings.Local.json. Program.cs carga Local
+         también en Production; el release debe tratarse como confidencial y
+         nunca exponerse al navegador ni subirse al repositorio. -->
     <Content Update="appsettings.Local.json">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+
+    <!-- No publicar credenciales ni salidas de pruebas locales que viven en
+         carpetas ignoradas por Git dentro del directorio del proyecto. -->
+    <None Update="firebase-service-account.json">
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+    <Content Update="firebase-service-account.json">
       <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </Content>
+    <Content Remove="publish\**" />
+    <Content Remove="publish-*\**" />
+    <Content Remove="verify-build*\**" />
+    <None Remove="publish\**" />
+    <None Remove="publish-*\**" />
+    <None Remove="verify-build*\**" />
   </ItemGroup>
 
 </Project>
