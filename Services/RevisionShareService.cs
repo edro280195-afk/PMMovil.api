@@ -17,6 +17,7 @@ public interface IRevisionShareService
     Task<(string Token, DateTime Expira)?> GenerarLinkAsync(string crefAgrupada, string usuario);
     Task<RevisionShareResumen?> ObtenerResumenAsync(string token);
     Task<(string FilePath, string Extension)?> ObtenerFotoAsync(string token, int idFotos);
+    Task<(string FilePath, string Extension)?> ObtenerFotoDeEventoMonitorAsync(long eventId, DateTime shiftDate);
 
     /// <summary>Resuelve la lista de archivos (ruta real en disco + nombre ya
     /// renombrado para descarga) de toda la evidencia de esta revisión, para
@@ -249,6 +250,80 @@ public class RevisionShareService : IRevisionShareService
             ext);
 
         return filePath == null ? null : (filePath, ext);
+    }
+
+    public async Task<(string FilePath, string Extension)?> ObtenerFotoDeEventoMonitorAsync(long eventId, DateTime shiftDate)
+    {
+        if (eventId <= 0) return null;
+
+        string? reference;
+        string? eventType;
+        using (IDbConnection activityConnection = _db.CreatePmmutileriaConnection())
+        {
+            const string eventSql = @"
+                SELECT TRIM(creferencia)
+                FROM revision_actividad
+                WHERE id = @eventId
+                  AND fecha >= @start AND fecha < @end
+                  AND tipo IN (@completed, @discrepancy)
+                LIMIT 1";
+            reference = await activityConnection.QueryFirstOrDefaultAsync<string?>(eventSql, new
+            {
+                eventId,
+                start = shiftDate.Date,
+                end = shiftDate.Date.AddDays(1),
+                completed = RevisionActivityTypes.Finalizada,
+                discrepancy = RevisionActivityTypes.FacturaDiscrepancia
+            });
+            if (string.IsNullOrWhiteSpace(reference)) return null;
+
+            eventType = await activityConnection.QueryFirstOrDefaultAsync<string?>(
+                "SELECT tipo FROM revision_actividad WHERE id = @eventId LIMIT 1",
+                new { eventId });
+        }
+
+        using IDbConnection conn = _db.CreateConnection();
+        const string photoSql = @"
+            SELECT TRIM(f.creferencia) AS Creferencia,
+                   f.cextension AS CExtension,
+                   f.nlineno AS NLineNo,
+                   f.ntipodocto AS NTipoDocto,
+                   COALESCE(NULLIF(fa.cclienteidtraf, ''), NULLIF(ff.cclienteid, '')) AS Cidcte
+            FROM fotos f
+            LEFT JOIN traf fa ON fa.creferencia = f.creferencia
+            LEFT JOIN fact ff ON ff.cnofact = f.creferencia
+                OR ff.cref_agrupada = f.creferencia
+                OR ff.creferencia = f.creferencia
+            WHERE f.creferencia = @reference
+              AND f.ntipodocto IN (103, 107)
+            ORDER BY CASE
+                WHEN @eventType = @discrepancy AND f.ntipodocto = 103 THEN 0
+                WHEN @eventType = @completed AND f.ntipodocto = 107 THEN 0
+                ELSE 1
+            END, f.fcrea DESC, f.idfotos DESC
+            LIMIT 1";
+        FotoVerInfo? foto = await conn.QueryFirstOrDefaultAsync<FotoVerInfo>(photoSql, new
+        {
+            reference,
+            eventType,
+            discrepancy = RevisionActivityTypes.FacturaDiscrepancia,
+            completed = RevisionActivityTypes.Finalizada
+        });
+        if (foto == null) return null;
+
+        string clientId = (foto.Cidcte ?? string.Empty).Trim();
+        string folder = ((await conn.ExecuteScalarAsync<string>(
+            "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1",
+            new { id = clientId })) ?? clientId).Trim();
+        string extension = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
+        string? filePath = PhotoFileNameResolver.FindExistingPath(
+            _basePath,
+            folder,
+            foto.Creferencia,
+            foto.NTipoDocto,
+            foto.NLineNo,
+            extension);
+        return filePath == null ? null : (filePath, extension);
     }
 
     public async Task<(string CrefAgrupada, List<(string FilePath, string FileName)> Archivos)?> ObtenerArchivosParaZipAsync(string token)

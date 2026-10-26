@@ -34,13 +34,23 @@ public class RevisionService
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly ILogger<RevisionService> _logger;
     private readonly RevisionActivityService _activityService;
+    private readonly RevisionNormalCompletionService _normalCompletionService;
+    private readonly MonitorTvRealtimePublisher _monitorTvRealtimePublisher;
 
-    public RevisionService(BaseRepository db, IHubContext<WarehouseHub> hub, ILogger<RevisionService> logger, RevisionActivityService activityService)
+    public RevisionService(
+        BaseRepository db,
+        IHubContext<WarehouseHub> hub,
+        ILogger<RevisionService> logger,
+        RevisionActivityService activityService,
+        RevisionNormalCompletionService normalCompletionService,
+        MonitorTvRealtimePublisher monitorTvRealtimePublisher)
     {
         _db = db;
         _hub = hub;
         _logger = logger;
         _activityService = activityService;
+        _normalCompletionService = normalCompletionService;
+        _monitorTvRealtimePublisher = monitorTvRealtimePublisher;
     }
 
     public async Task<(List<EntradaPendiente> Items, bool Truncado)> GetEntradasPendientesAsync(string filtro, bool strict)
@@ -694,6 +704,7 @@ new { creferencia });
                 {optionalColumns}
             FROM fact f
             INNER JOIN revdet rd ON rd.cnofact = f.cnofact
+                AND rd.cref_agrupada = f.cref_agrupada
             WHERE f.cref_agrupada = @cref
             ORDER BY f.cnofact, rd.idrevdet";
         return await conn.QueryAsync<PartidaRevision>(sql, new { cref = cref_agrupada });
@@ -844,6 +855,7 @@ new { creferencia });
                     usuario,
                     factura ?? string.Empty,
                     detalle);
+                await NotificarPartidaActualizadaAsync(cref, id, usuario);
             }
         }
 
@@ -904,6 +916,7 @@ new { creferencia });
         }
 
         int rows = await conn.ExecuteAsync(sql, parameters);
+        long? activityEventId = null;
 
         if (rows > 0)
         {
@@ -911,7 +924,7 @@ new { creferencia });
             string tipoActividad = campo.Equals("status_rev", StringComparison.OrdinalIgnoreCase)
                 ? valor == "1" ? RevisionActivityTypes.FacturaCompletada : valor == "2" ? RevisionActivityTypes.FacturaDiscrepancia : RevisionActivityTypes.CampoFactura
                 : RevisionActivityTypes.CampoFactura;
-            await _activityService.RegistrarAsync(
+            activityEventId = await _activityService.RegistrarAsync(
                 crefActividad ?? string.Empty,
                 usuario,
                 tipoActividad,
@@ -925,6 +938,7 @@ new { creferencia });
                     usuario,
                     cnofact,
                     $"Campo actualizado: {campo}");
+                await NotificarFacturaActualizadaAsync(cnofact, usuario);
             }
         }
 
@@ -936,7 +950,8 @@ new { creferencia });
                 string cref = (string)data.cref_agrupada;
                 string usu = (string)data.usurev;
                 string mot = (string)data.discrepancias;
-                await _hub.Clients.All.SendAsync("onDiscrepanciaReportada", cref, usu, cnofact, mot);
+                await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onDiscrepanciaReportada", cref, usu, cnofact, mot);
+                await _monitorTvRealtimePublisher.DiscrepanciaReportadaAsync(cref, usu, cnofact, mot, eventId: activityEventId);
             }
         }
 
@@ -970,6 +985,16 @@ new { creferencia });
                 detalle: "Observación general actualizada");
             await _hub.Clients.All.SendAsync(
                 "onActividadRecibida", crefAgrupada, usuario, "", "Observación general actualizada");
+            await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                "onRevisionActualizada",
+                new WarehouseHub.RevisionActualizadaEvent
+                {
+                    Entidad = "ENTRADA",
+                    Creferencia = crefAgrupada,
+                    Usuario = usuario,
+                    Fecha = DateTime.UtcNow.ToString("O"),
+                    ObservacionRevision = valor
+                });
             return true;
         }
 
@@ -1128,6 +1153,7 @@ new { creferencia });
             if (!string.IsNullOrWhiteSpace(cref))
             {
                 await _hub.Clients.All.SendAsync("onActividadRecibida", cref, usuario, factura ?? string.Empty, "Campo actualizado: npesolibras");
+                await NotificarPartidaActualizadaAsync(cref, id, usuario);
             }
             return true;
         }
@@ -1194,6 +1220,7 @@ new { creferencia });
             if (!string.IsNullOrWhiteSpace(cref))
             {
                 await _hub.Clients.All.SendAsync("onActividadRecibida", cref, usuario, factura ?? string.Empty, detalle);
+                await NotificarPartidaActualizadaAsync(cref, id, usuario);
             }
         }
 
@@ -1219,6 +1246,7 @@ new { creferencia });
                 id,
                 "Partida agregada");
             await _hub.Clients.All.SendAsync("onActividadRecibida", cref, usuario, cnofact, "Partida agregada");
+            await NotificarPartidaActualizadaAsync(cref, id, usuario);
         }
         return id;
     }
@@ -1241,6 +1269,17 @@ new { creferencia });
             if (!string.IsNullOrWhiteSpace(cref))
             {
                 await _hub.Clients.All.SendAsync("onActividadRecibida", cref, usuario, factura ?? string.Empty, "Partida eliminada");
+                await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                    "onRevisionActualizada",
+                    new WarehouseHub.RevisionActualizadaEvent
+                    {
+                        Entidad = "PARTIDA_ELIMINADA",
+                        Creferencia = cref,
+                        Usuario = usuario,
+                        Fecha = DateTime.UtcNow.ToString("O"),
+                        Cnofact = factura,
+                        IdRevdet = id
+                    });
             }
         }
         return rows > 0;
@@ -1271,6 +1310,7 @@ new { creferencia });
             if (!string.IsNullOrWhiteSpace(crefActividad))
             {
                 await _hub.Clients.All.SendAsync("onActividadRecibida", crefActividad, usuario, cnofact, "Discrepancias aclaradas");
+                await NotificarFacturaActualizadaAsync(cnofact, usuario);
             }
         }
         return rows > 0;
@@ -1493,8 +1533,9 @@ new { creferencia });
         foreach (dynamic permiso in lista)
         {
             string cnofact = (string)permiso.cnofact;
-            await _hub.Clients.All.SendAsync("onFacturaRechazada", cnofact, "SYSTEM");
-            await _hub.Clients.All.SendAsync("onDesbloqueoRechazado", new { cnofact, supervisor = "SYSTEM" });
+            await _hub.Clients.Group("USER_" + (string)permiso.usuario_solicita).SendAsync(
+                "onDesbloqueoRechazado",
+                new { cnofact, supervisor = "SYSTEM" });
         }
     }
 
@@ -1516,6 +1557,23 @@ new { creferencia });
     public async Task AsignarRevisoresPendientesAsync(string creferencia, string usuario)
     {
         using IDbConnection conn = _db.CreateConnection();
+        var parameters = new { usuario, cref = creferencia };
+        string sqlFacturasElegibles = @"
+            SELECT TRIM(cnofact)
+            FROM fact
+            WHERE cref_agrupada = @cref
+              AND status_rev = 1
+              AND (usurev IS NULL OR TRIM(usurev) = '')
+              AND cnofact NOT IN (
+                  SELECT cnofact FROM (
+                      SELECT cnofact FROM fact
+                      WHERE cref_agrupada = @cref AND TRIM(COALESCE(usurev, '')) != ''
+                  ) already_reviewed
+              )";
+        List<string> cnofacts = (await conn.QueryAsync<string>(sqlFacturasElegibles, parameters))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         string sql = @"
             UPDATE fact 
             SET usurev = @usuario, usumodi = @usuario, fmodi = NOW() 
@@ -1526,9 +1584,18 @@ new { creferencia });
                   SELECT cnofact FROM (
                       SELECT cnofact FROM fact 
                       WHERE cref_agrupada = @cref AND TRIM(COALESCE(usurev, '')) != ''
-                  ) already_reviewed
+                      ) already_reviewed
               )";
-        await conn.ExecuteAsync(sql, new { usuario, cref = creferencia });
+        int rows = await conn.ExecuteAsync(sql, parameters);
+        if (rows == 0)
+        {
+            return;
+        }
+
+        foreach (string cnofact in cnofacts)
+        {
+            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+        }
     }
 
     public async Task<bool> LimpiarUsurevAsync(string cnofact, string usuario)
@@ -1536,6 +1603,10 @@ new { creferencia });
         using IDbConnection conn = _db.CreateConnection();
         string sql = "UPDATE fact SET usurev = '', usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
         int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact });
+        if (rows > 0)
+        {
+            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+        }
         return rows > 0;
     }
 
@@ -1609,7 +1680,7 @@ new { creferencia });
                     usuario,
                     RevisionActivityTypes.TomaDocumentos,
                     detalle: "Documentos tomados");
-                await _hub.Clients.All.SendAsync(
+                await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
                     "onRevisionEstadoCambiado",
                     new
                     {
@@ -1655,7 +1726,11 @@ new { creferencia });
         using IDbConnection conn = _db.CreateConnection();
         string sql = "UPDATE fact SET usuedit = @usuario WHERE cnofact = @cnofact";
         int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact });
-        await _hub.Clients.All.SendAsync("onFacturaEnUso", new { cnofact, usuario });
+        if (rows > 0)
+        {
+            await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaEnUso", new { cnofact, usuario });
+            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+        }
         return rows > 0;
     }
 
@@ -1664,7 +1739,11 @@ new { creferencia });
         using IDbConnection conn = _db.CreateConnection();
         string sql = "UPDATE fact SET usuedit = '' WHERE cnofact = @cnofact";
         int rows = await conn.ExecuteAsync(sql, new { cnofact });
-        await _hub.Clients.All.SendAsync("onFacturaLiberada", new { cnofact });
+        if (rows > 0)
+        {
+            await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaLiberada", new { cnofact });
+            await NotificarFacturaActualizadaAsync(cnofact, string.Empty);
+        }
         return rows > 0;
     }
 
@@ -1672,7 +1751,120 @@ new { creferencia });
     {
         using IDbConnection conn = _db.CreateConnection();
         string sql = "UPDATE fact SET usuedit = '' WHERE cref_agrupada = @cref";
-        await conn.ExecuteAsync(sql, new { cref });
+        int rows = await conn.ExecuteAsync(sql, new { cref });
+        if (rows > 0)
+        {
+            List<string> cnofacts = (await conn.QueryAsync<string>(
+                "SELECT TRIM(cnofact) FROM fact WHERE cref_agrupada = @cref",
+                new { cref })).ToList();
+            await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                "onRevisionActualizada",
+                new WarehouseHub.RevisionActualizadaEvent
+                {
+                    Entidad = "EDITORES_ENTRADA",
+                    Creferencia = cref,
+                    Usuario = string.Empty,
+                    Fecha = DateTime.UtcNow.ToString("O"),
+                    Cnofacts = cnofacts
+                });
+        }
+    }
+
+    private async Task NotificarFacturaActualizadaAsync(string cnofact, string usuario)
+    {
+        FacturaRevision? factura = await GetRevisionFacturaAsync(cnofact);
+        if (factura == null)
+        {
+            return;
+        }
+
+        string oficinaOrigen = string.IsNullOrWhiteSpace(usuario)
+            ? string.Empty
+            : await GetLugarUsuarioAsync(usuario);
+
+        var evento = new WarehouseHub.RevisionActualizadaEvent
+        {
+            Entidad = "FACTURA",
+            Creferencia = factura.CrefAgrupada,
+            Usuario = usuario,
+            Fecha = DateTime.UtcNow.ToString("O"),
+            Cnofact = factura.Cnofact,
+            Factura = factura,
+            OficinaOrigen = oficinaOrigen
+        };
+
+        await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+            "onRevisionActualizada",
+            evento);
+        await _monitorTvRealtimePublisher.RevisionActualizadaAsync(
+            evento.Creferencia,
+            evento.Usuario,
+            evento.Entidad,
+            evento.OficinaOrigen);
+    }
+
+    private async Task NotificarPartidaActualizadaAsync(string creferencia, int id, string usuario)
+    {
+        PartidaRevision? partida = await ObtenerPartidaActualizadaAsync(id);
+        if (partida == null)
+        {
+            return;
+        }
+
+        await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+            "onRevisionActualizada",
+            new WarehouseHub.RevisionActualizadaEvent
+            {
+                Entidad = "PARTIDA",
+                Creferencia = creferencia,
+                Usuario = usuario,
+                Fecha = DateTime.UtcNow.ToString("O"),
+                Cnofact = partida.Cnofact,
+                IdRevdet = partida.IdRevdet,
+                Partida = partida
+            });
+    }
+
+    private async Task<PartidaRevision?> ObtenerPartidaActualizadaAsync(int id)
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        string optionalColumns = await GetOptionalLabelColumnsAsync(conn);
+        return await conn.QueryFirstOrDefaultAsync<PartidaRevision>($@"
+            SELECT
+                rd.idrevdet AS IdRevdet,
+                TRIM(rd.cnofact) AS Cnofact,
+                rd.cnoparte AS CnoParte,
+                COALESCE(rd.cdescripcion, '') AS CDescripcion,
+                rd.marca,
+                rd.modelo,
+                rd.numser,
+                COALESCE(rd.numlote, '') AS NumLote,
+                COALESCE(rd.ncantfactura, 0) AS NCantFactura,
+                rd.ncantout,
+                rd.cpaisorigen,
+                COALESCE(rd.cpt_cve_tmateria, '') AS CptCveTmateria,
+                COALESCE(rd.cpt_desc_tmateria, '') AS CptDescTmateria,
+                COALESCE(rd.tipo_material, '') AS TipoMaterial,
+                rd.revisada,
+                COALESCE(rd.obsrevpartida, '') AS Obsrevpartida,
+                COALESCE(rd.mnotapartida, '') AS Mnotapartida,
+                COALESCE(rd.npeso, 0) AS NPeso,
+                COALESCE(rd.cantumc, 0) AS CantidadComercial,
+                COALESCE(rd.umcint, '') AS UnidadComercial,
+                COALESCE(rd.cunidadfactura, '') AS UnidadFactura,
+                COALESCE(rd.ncanttarifa, 0) AS CantidadTarifa,
+                COALESCE(rd.cunidadtarifa, '') AS UnidadTarifa,
+                COALESCE(rd.npesounitario, 0) AS PesoUnitario,
+                COALESCE(rd.valuni, 0) AS ValorUnitario,
+                COALESCE(rd.nvaloragregado, 0) AS ValorAgregado,
+                COALESCE(rd.nvalorpartidame, 0) AS ValorPartidaMe,
+                COALESCE(f.nfactorequiv, 0) AS FactorEquivalencia,
+                COALESCE(rd.cclienteid, '') AS Cclienteid,
+                {optionalColumns}
+            FROM revdet rd
+            INNER JOIN fact f ON f.cnofact = rd.cnofact
+            WHERE rd.idrevdet = @id
+            LIMIT 1", new { id });
     }
 
     private static async Task<string> GetOptionalLabelColumnsAsync(IDbConnection connection)

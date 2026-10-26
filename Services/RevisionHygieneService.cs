@@ -94,6 +94,7 @@ public class RevisionHygieneService : BackgroundService
         using IServiceScope scope = _services.CreateScope();
         BaseRepository db = scope.ServiceProvider.GetRequiredService<BaseRepository>();
         IHubContext<WarehouseHub> hub = scope.ServiceProvider.GetRequiredService<IHubContext<WarehouseHub>>();
+        MonitorTvRealtimePublisher monitorTvPublisher = scope.ServiceProvider.GetRequiredService<MonitorTvRealtimePublisher>();
         RevisionActivityService activityService = scope.ServiceProvider.GetRequiredService<RevisionActivityService>();
         RevisionNormalCompletionService completionService =
             scope.ServiceProvider.GetRequiredService<RevisionNormalCompletionService>();
@@ -110,6 +111,7 @@ public class RevisionHygieneService : BackgroundService
             activityService,
             completionService,
             reportService,
+            monitorTvPublisher,
             stoppingToken);
     }
 
@@ -201,7 +203,7 @@ public class RevisionHygieneService : BackgroundService
             string detalle = $"Sin actividad por {minutosInactividad} minutos.";
             await activityService.RegistrarAsync(creferencia, usuario, RevisionActivityTypes.Pausada, detalle: detalle, origen: Sistema);
 
-            await hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+            await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
             {
                 creferencia,
                 usuario,
@@ -241,7 +243,7 @@ public class RevisionHygieneService : BackgroundService
         // necesita ver. Acotar a cierres recientes es lo que hace que esto
         // sea "atajar staleness de hoy", no "reescribir el histórico".
         string sqlHuerfanas = @"
-            SELECT f.cnofact, f.usuedit
+            SELECT f.cnofact, f.usuedit, f.cref_agrupada
             FROM fact f
             WHERE f.usuedit IS NOT NULL AND f.usuedit != ''
               AND NOT EXISTS (
@@ -255,12 +257,12 @@ public class RevisionHygieneService : BackgroundService
                       AND t2.ffinrevision IS NOT NULL AND YEAR(t2.ffinrevision) >= 2000
                       AND t2.ffinrevision >= DATE_SUB(NOW(), INTERVAL 30 DAY)
               )";
-        List<(string Cnofact, string Usuedit)> huerfanas =
-            (await conn.QueryAsync<(string, string)>(sqlHuerfanas)).ToList();
+        List<(string Cnofact, string Usuedit, string? CrefAgrupada)> huerfanas =
+            (await conn.QueryAsync<(string, string, string?)>(sqlHuerfanas)).ToList();
 
         if (huerfanas.Count == 0) return;
 
-        foreach ((string cnofact, string usuedit) in huerfanas)
+        foreach ((string cnofact, string usuedit, string? crefAgrupada) in huerfanas)
         {
             if (stoppingToken.IsCancellationRequested) return;
 
@@ -269,7 +271,20 @@ public class RevisionHygieneService : BackgroundService
                 new { cnofact, usuedit });
             if (rows == 0) continue;
 
-            await hub.Clients.All.SendAsync("onFacturaLiberada", new { cnofact });
+            await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaLiberada", new { cnofact });
+            if (!string.IsNullOrWhiteSpace(crefAgrupada))
+            {
+                await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                    "onRevisionActualizada",
+                    new WarehouseHub.RevisionActualizadaEvent
+                    {
+                        Entidad = "EDITORES_ENTRADA",
+                        Creferencia = crefAgrupada,
+                        Usuario = "SISTEMA",
+                        Fecha = DateTime.UtcNow.ToString("O"),
+                        Cnofacts = new[] { cnofact }
+                    });
+            }
             _logger.LogInformation(
                 "RevisionHygieneService: factura huérfana liberada — {Cnofact} (tenía a {Usuario}).", cnofact, usuedit);
         }
@@ -287,6 +302,7 @@ public class RevisionHygieneService : BackgroundService
         RevisionActivityService activityService,
         RevisionNormalCompletionService completionService,
         IRevisionReportService reportService,
+        MonitorTvRealtimePublisher monitorTvPublisher,
         CancellationToken stoppingToken)
     {
         using IDbConnection conn = db.CreateConnection();
@@ -355,10 +371,10 @@ public class RevisionHygieneService : BackgroundService
             }
             if (rows == 0) continue;
 
-            await activityService.RegistrarAsync(cref, "AUTO-INSTANT", RevisionActivityTypes.Finalizada,
+            long? activityEventId = await activityService.RegistrarAsync(cref, "AUTO-INSTANT", RevisionActivityTypes.Finalizada,
                 detalle: "Se completó la última factura y no quedaban discrepancias.", origen: Sistema);
 
-            await hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+            await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
             {
                 creferencia = cref,
                 usuario = "AUTO-INSTANT",
@@ -366,7 +382,14 @@ public class RevisionHygieneService : BackgroundService
                 fecha = DateTime.Now.ToString("o"),
                 estatusFinal = 1
             });
-            await hub.Clients.All.SendAsync("onRevisionCompletada", cref, "AUTO-INSTANT");
+            await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                "onRevisionCompletada",
+                new WarehouseHub.RevisionCompletadaEvent
+                {
+                    Creferencia = cref,
+                    Usuario = "AUTO-INSTANT"
+                });
+            await monitorTvPublisher.RevisionCompletadaAsync(cref, "AUTO-INSTANT", stoppingToken, activityEventId);
             _ = await reportService.EnviarReporteRevisionNormalAsync(cref, _publicApiBaseUrl);
 
             _logger.LogInformation("RevisionHygieneService: entrada finalizada al completarse — {Cref}.", cref);

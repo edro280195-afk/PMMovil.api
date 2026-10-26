@@ -9,11 +9,13 @@ using Dapper;
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 using PMMovil.Api.Attributes;
 using PMMovil.Api.Data;
+using PMMovil.Api.Hubs;
 using PMMovil.Api.Models;
 using PMMovil.Api.Services;
 
@@ -35,13 +37,15 @@ public class FotoController : ControllerBase
     private readonly CasetaPhotoStorage _casetaPhotoStorage;
 
     private readonly IModulePermissionService _permissionService;
+    private readonly IHubContext<WarehouseHub> _hub;
 
     public FotoController(
         BaseRepository db,
         IConfiguration config,
         ILogger<FotoController> logger,
         CasetaPhotoStorage casetaPhotoStorage,
-        IModulePermissionService permissionService)
+        IModulePermissionService permissionService,
+        IHubContext<WarehouseHub> hub)
     {
         _db = db;
         _config = config;
@@ -49,10 +53,11 @@ public class FotoController : ControllerBase
         _basePath = _config["PhotoSettings:BasePath"] ?? "F:\\Trafico\\fotos";
         _casetaPhotoStorage = casetaPhotoStorage;
         _permissionService = permissionService;
+        _hub = hub;
     }
 
     [HttpGet("ver/{id}")]
-    [RequiereModulo(MobileModuleIds.Review)]
+    [RequiereModulo(MobileModuleIds.Review, "Lectura", true, MobileModuleIds.SystemsMonitor)]
     public async Task<IActionResult> VerFoto(int id)
     {
 
@@ -135,7 +140,7 @@ public class FotoController : ControllerBase
     }
 
     [HttpGet("{creferencia}")]
-    [RequiereModulo(MobileModuleIds.Review)]
+    [RequiereModulo(MobileModuleIds.Review, "Lectura", true, MobileModuleIds.SystemsMonitor)]
     public async Task<IActionResult> GetFotos(string creferencia)
     {
         try
@@ -343,6 +348,7 @@ public class FotoController : ControllerBase
                 string fullFilePath = Path.Combine(finalPath, fileName);
                 _logger.LogInformation("SubirFoto: Guardando en {path}", fullFilePath);
                 await System.IO.File.WriteAllBytesAsync(fullFilePath, imageBytes);
+                await NotificarFotosActualizadasAsync(creferencia, usuario);
                 return Ok(new
                 {
                     success = true,
@@ -399,6 +405,9 @@ public class FotoController : ControllerBase
             if (string.IsNullOrWhiteSpace(username))
                 return Unauthorized(new { success = false, message = "No se pudo identificar al usuario." });
 
+            bool puedeBorrarFotoRevision = (ntipodocto == 107 || ntipodocto == 103)
+                && await _permissionService.HasPermissionAsync(
+                    username, MobileModuleIds.Review, "Borrar", HttpContext.RequestAborted);
             // ntipodocto=103 lo escriben DOS flujos distintos que comparten el
             // mismo apartado en el PMM/FoxPro: daño de Entrada Bodega y
             // discrepancia de Revisión. No hay forma de saber, solo con la fila
@@ -409,13 +418,11 @@ public class FotoController : ControllerBase
             bool canDelete;
             if (ntipodocto == 107)
             {
-                canDelete = await _permissionService.HasPermissionAsync(
-                    username, MobileModuleIds.Review, "Borrar", HttpContext.RequestAborted);
+                canDelete = puedeBorrarFotoRevision;
             }
             else if (ntipodocto == 103)
             {
-                canDelete = await _permissionService.HasPermissionAsync(
-                    username, MobileModuleIds.Review, "Borrar", HttpContext.RequestAborted)
+                canDelete = puedeBorrarFotoRevision
                     || await _permissionService.HasPermissionAsync(
                     username, MobileModuleIds.WarehouseOperations, "Borrar", HttpContext.RequestAborted);
             }
@@ -433,8 +440,12 @@ public class FotoController : ControllerBase
             })) ?? data.Cidcte).Trim();
             string sqlDel = "DELETE FROM fotos WHERE idfotos = @id";
             await conn.ExecuteAsync(sqlDel, new { id });
-            string ext = PhotoFileNameResolver.NormalizeExtension(data.CExtension);
             string cref = data.Creferencia.Trim();
+            if (puedeBorrarFotoRevision)
+            {
+                await NotificarFotosActualizadasAsync(cref, username);
+            }
+            string ext = PhotoFileNameResolver.NormalizeExtension(data.CExtension);
             int line = data.NLineNo;
             foreach (string filePath in PhotoFileNameResolver.GetCandidatePaths(
                          _basePath,
@@ -460,6 +471,19 @@ public class FotoController : ControllerBase
                 message = "Error al eliminar la fotografía"
             });
         }
+    }
+
+    private async Task NotificarFotosActualizadasAsync(string creferencia, string usuario)
+    {
+        await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+            "onRevisionActualizada",
+            new WarehouseHub.RevisionActualizadaEvent
+            {
+                Entidad = "FOTOS",
+                Creferencia = creferencia,
+                Usuario = usuario,
+                Fecha = DateTime.UtcNow.ToString("O")
+            });
     }
 
     [HttpGet("caseta/ver")]

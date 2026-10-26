@@ -29,8 +29,6 @@ public class PublicoController : ControllerBase
     private readonly IRevisionShareService _revisionShareService;
     private readonly IReportShareService _reportShareService;
     private readonly RevisionReportPdfService _reportPdfService;
-    private readonly IMonitorTvLinkService _monitorTvLinkService;
-    private readonly MonitorTvPublicService _monitorTvPublicService;
     private readonly BaseRepository _db;
     private readonly IConfiguration _config;
     private readonly ILogger<PublicoController> _logger;
@@ -40,8 +38,6 @@ public class PublicoController : ControllerBase
         IRevisionShareService revisionShareService,
         IReportShareService reportShareService,
         RevisionReportPdfService reportPdfService,
-        IMonitorTvLinkService monitorTvLinkService,
-        MonitorTvPublicService monitorTvPublicService,
         BaseRepository db,
         IConfiguration config,
         ILogger<PublicoController> logger)
@@ -50,38 +46,9 @@ public class PublicoController : ControllerBase
         _revisionShareService = revisionShareService;
         _reportShareService = reportShareService;
         _reportPdfService = reportPdfService;
-        _monitorTvLinkService = monitorTvLinkService;
-        _monitorTvPublicService = monitorTvPublicService;
         _db = db;
         _config = config;
         _logger = logger;
-    }
-
-    /// <summary>
-    /// Snapshot de solo lectura para una pantalla TV autorizada por enlace.
-    /// El token llega por header porque el enlace de la aplicación vive en el
-    /// fragmento (#token=...), que no se envía al servidor ni queda en logs HTTP.
-    /// </summary>
-    [HttpGet("monitor-tv")]
-    [EnableRateLimiting("MonitorTvPublicPolicy")]
-    public async Task<IActionResult> MonitorTv(
-        [FromHeader(Name = "X-PMM-TV-TOKEN")] string? token,
-        CancellationToken cancellationToken)
-    {
-        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
-        Response.Headers.Pragma = "no-cache";
-        Response.Headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
-        Response.Headers["Referrer-Policy"] = "no-referrer";
-
-        MonitorTvLinkAccess? access = await _monitorTvLinkService.ResolverAsync(token ?? string.Empty, cancellationToken);
-        if (access == null)
-        {
-            // No distinguimos enlace inexistente, revocado o expirado.
-            return NotFound(new { success = false, message = "Este enlace ya no está disponible." });
-        }
-
-        MonitorTvSnapshot snapshot = await _monitorTvPublicService.ObtenerSnapshotAsync(cancellationToken);
-        return Ok(new { success = true, data = snapshot });
     }
 
     [HttpGet("reporte/{token}.pdf")]

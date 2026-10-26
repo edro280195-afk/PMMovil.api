@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Serialization;
 
 namespace PMMovil.Api.Models
 {
@@ -48,6 +49,7 @@ namespace PMMovil.Api.Models
         public string fModi { get; set; } = string.Empty;
         public bool RelacionCompleta { get; set; }
         public string Obsrev2 { get; set; } = string.Empty;
+        [JsonPropertyName("usuedit")]
         public string UsuEdit { get; set; } = string.Empty;
     }
 

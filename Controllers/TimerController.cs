@@ -33,6 +33,7 @@ public class TimerController : ControllerBase
     private readonly RevisionActivityService _activityService;
     private readonly RevisionNormalCompletionService _normalCompletionService;
     private readonly RevisionService _revisionService;
+    private readonly MonitorTvRealtimePublisher _monitorTvRealtimePublisher;
 
     public TimerController(
         BaseRepository db,
@@ -42,7 +43,8 @@ public class TimerController : ControllerBase
         ILogger<TimerController> logger,
         RevisionActivityService activityService,
         RevisionNormalCompletionService normalCompletionService,
-        RevisionService revisionService)
+        RevisionService revisionService,
+        MonitorTvRealtimePublisher monitorTvRealtimePublisher)
     {
         _db = db;
         _hub = hub;
@@ -52,6 +54,7 @@ public class TimerController : ControllerBase
         _activityService = activityService;
         _normalCompletionService = normalCompletionService;
         _revisionService = revisionService;
+        _monitorTvRealtimePublisher = monitorTvRealtimePublisher;
     }
 
     [HttpGet("estado/{creferencia}")]
@@ -243,7 +246,7 @@ public class TimerController : ControllerBase
                     usuario,
                     RevisionActivityTypes.InicioRevision,
                     detalle: "Revisión iniciada");
-                await _hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+                await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
                 {
                     creferencia,
                     usuario,
@@ -251,6 +254,8 @@ public class TimerController : ControllerBase
                     fecha = DateTime.Now.ToString("o"),
                     estatusFinal = 0
                 });
+                await _monitorTvRealtimePublisher.RevisionEstadoCambiadoAsync(
+                    creferencia, usuario, "EN_REVISION", estatusFinal: 0);
                 await _hub.Clients.All.SendAsync("onActividadRecibida", creferencia, usuario, "", "");
                 return Ok(new
                 {
@@ -398,12 +403,12 @@ public class TimerController : ControllerBase
                         await _revisionService.RevocarDesbloqueosDeEntradaAsync(creferencia);
                     }
 
-                    await _activityService.RegistrarAsync(
+                    long? activityEventId = await _activityService.RegistrarAsync(
                         creferencia,
                         usuario,
                         req.EsFinal ? RevisionActivityTypes.Finalizada : RevisionActivityTypes.Pausada,
                         detalle: req.EsFinal ? "Revisión finalizada" : "Revisión pausada");
-                    await _hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+                    await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
                     {
                         creferencia,
                         usuario,
@@ -411,9 +416,22 @@ public class TimerController : ControllerBase
                         fecha = DateTime.Now.ToString("o"),
                         estatusFinal = statusFinal
                     });
-                    if (req.EsFinal && completionState.PuedeEnviarCorreo && statusFinal == 1)
+                    await _monitorTvRealtimePublisher.RevisionEstadoCambiadoAsync(
+                        creferencia,
+                        usuario,
+                        req.EsFinal ? "FINALIZADA" : "PAUSADA",
+                        statusFinal,
+                        eventId: activityEventId);
+                    if (req.EsFinal && completionState.PuedeEnviarCorreo)
                     {
-                        await _hub.Clients.All.SendAsync("onRevisionCompletada", creferencia, usuario);
+                        await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                            "onRevisionCompletada",
+                            new WarehouseHub.RevisionCompletadaEvent
+                            {
+                                Creferencia = creferencia,
+                                Usuario = usuario
+                            });
+                        await _monitorTvRealtimePublisher.RevisionCompletadaAsync(creferencia, usuario, eventId: activityEventId);
                     }
                     if (req.EsFinal && completionState.PuedeEnviarCorreo)
                     {

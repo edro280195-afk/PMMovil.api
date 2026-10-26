@@ -94,6 +94,8 @@ public class AutoFinalizerService : BackgroundService
         using IServiceScope scope = _services.CreateScope();
         BaseRepository db = scope.ServiceProvider.GetRequiredService<BaseRepository>();
         IHubContext<WarehouseHub> hub = scope.ServiceProvider.GetRequiredService<IHubContext<WarehouseHub>>();
+        MonitorTvRealtimePublisher monitorTvPublisher = scope.ServiceProvider.GetRequiredService<MonitorTvRealtimePublisher>();
+        RevisionActivityService activityService = scope.ServiceProvider.GetRequiredService<RevisionActivityService>();
         RevisionNormalCompletionService completionService =
             scope.ServiceProvider.GetRequiredService<RevisionNormalCompletionService>();
         IRevisionReportService reportService =
@@ -155,7 +157,7 @@ public class AutoFinalizerService : BackgroundService
                 {
                     totalCerrados += rows;
 
-                    await hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+                    await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
                     {
                         creferencia = cref,
                         usuario = "AUTO-17H",
@@ -163,7 +165,21 @@ public class AutoFinalizerService : BackgroundService
                         fecha = DateTime.Now.ToString("o"),
                         estatusFinal = 1
                     }, stoppingToken);
-                    await hub.Clients.All.SendAsync("onRevisionCompletada", cref, "AUTO-17H", stoppingToken);
+                    await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync(
+                        "onRevisionCompletada",
+                        new WarehouseHub.RevisionCompletadaEvent
+                        {
+                            Creferencia = cref,
+                            Usuario = "AUTO-17H"
+                        },
+                        stoppingToken);
+                    long? activityEventId = await activityService.RegistrarAsync(
+                        cref,
+                        "AUTO-17H",
+                        RevisionActivityTypes.Finalizada,
+                        detalle: "Revisión finalizada automáticamente al cierre del turno.",
+                        origen: "SISTEMA");
+                    await monitorTvPublisher.RevisionCompletadaAsync(cref, "AUTO-17H", stoppingToken, activityEventId);
                     _ = await reportService.EnviarReporteRevisionNormalAsync(cref, _publicApiBaseUrl);
                     _logger.LogInformation(
                         "AutoFinalizer: cerrada {Cref} ({Rows} sesiones, {Assignments} asignaciones).",

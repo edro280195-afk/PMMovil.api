@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 
 using PMMovil.Api.Data;
+using PMMovil.Api.Attributes;
 using PMMovil.Api.Models;
 using PMMovil.Api.Services;
 
@@ -21,6 +22,7 @@ public class WarehouseHub : Hub
 {
     public const string SupervisoresBloqueoGroup = "SUPERVISORES_BLOQUEO";
     public const string RevisionGroup = "REVISION_OPERADORES";
+    public const string PreregistroOperationsGroup = "PREREGISTRO_OPERACIONES";
 
     public static class RevisionEstados
     {
@@ -39,6 +41,12 @@ public class WarehouseHub : Hub
         public int EstatusFinal { get; init; }
     }
 
+    public sealed class RevisionCompletadaEvent
+    {
+        public string Creferencia { get; init; } = string.Empty;
+        public string Usuario { get; init; } = string.Empty;
+    }
+
     /// <summary>
     /// Snapshot del dato ya persistido. Se manda por una sola forma para que
     /// Angular y Android apliquen el mismo cambio sin una segunda consulta.
@@ -55,20 +63,26 @@ public class WarehouseHub : Hub
         public FacturaRevision? Factura { get; init; }
         public PartidaRevision? Partida { get; init; }
         public string? ObservacionRevision { get; init; }
+        public string? OficinaOrigen { get; init; }
     }
 
     private readonly BaseRepository _db;
 
     private readonly RevisionActivityService _activityService;
+    private readonly IModulePermissionService _permissionService;
 
     private static readonly ConcurrentDictionary<string, PresenceState> _registry = new ConcurrentDictionary<string, PresenceState>();
 
     private static readonly ConcurrentDictionary<string, string> _connections = new ConcurrentDictionary<string, string>();
 
-    public WarehouseHub(BaseRepository db, RevisionActivityService activityService)
+    public WarehouseHub(
+        BaseRepository db,
+        RevisionActivityService activityService,
+        IModulePermissionService permissionService)
     {
         _db = db;
         _activityService = activityService;
+        _permissionService = permissionService;
     }
 
     private static void PurgeStaleEntries()
@@ -168,6 +182,62 @@ public class WarehouseHub : Hub
         }
     }
 
+    /// <summary>Suscribe la conexión a cambios de revisión si tiene permiso de lectura.</summary>
+    public async Task UnirseARevision()
+    {
+        string? usuario = Context.User?.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(usuario))
+            throw new HubException("No se pudo identificar al usuario.");
+
+        bool permitido = await _permissionService.HasPermissionAsync(
+            usuario,
+            MobileModuleIds.Review,
+            "Lectura",
+            Context.ConnectionAborted)
+            || await _permissionService.HasPermissionAsync(
+                usuario,
+                MobileModuleIds.SystemsMonitor,
+                "Lectura",
+                Context.ConnectionAborted);
+
+        if (!permitido)
+            throw new HubException("No tienes permiso para recibir cambios de revisión.");
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, RevisionGroup, Context.ConnectionAborted);
+    }
+
+    /// <summary>
+    /// Suscribe la conexion a eventos de pre-registro solo si el usuario tiene
+    /// permiso de lectura de caseta o del modulo administrativo de
+    /// pre-registros. El grupo evita enviar coordenadas y alertas operativas a
+    /// cualquier otra conexion autenticada del hub.
+    /// </summary>
+    public async Task UnirseAPreregistro()
+    {
+        string? usuario = Context.User?.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(usuario))
+            throw new HubException("No se pudo identificar al usuario.");
+
+        bool permitido = await _permissionService.HasPermissionAsync(
+            usuario,
+            MobileModuleIds.Gate,
+            "Lectura",
+            Context.ConnectionAborted)
+            || await _permissionService.HasPermissionAsync(
+                usuario,
+                MobileModuleIds.TransporterPreRegistration,
+                "Lectura",
+                Context.ConnectionAborted);
+
+        if (!permitido)
+            throw new HubException("No tienes permiso para recibir eventos de pre-registro.");
+
+        await Groups.AddToGroupAsync(
+            Context.ConnectionId,
+            PreregistroOperationsGroup,
+            Context.ConnectionAborted);
+    }
+
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         if (_connections.TryRemove(base.Context.ConnectionId, out string usuario))
@@ -204,7 +274,7 @@ public class WarehouseHub : Hub
                             usuario,
                             RevisionActivityTypes.Pausada,
                             detalle: "Sesión cerrada por desconexión");
-                        await base.Clients.All.SendAsync(
+                        await base.Clients.Group(RevisionGroup).SendAsync(
                             "onRevisionEstadoCambiado",
                             new RevisionEstadoEvent
                             {
@@ -233,17 +303,21 @@ public class WarehouseHub : Hub
     public async Task NuevaSolicitud(string cnofact, string usuario, string motivo, int idDesbloqueo)
     {
         string usuarioReal = base.Context.User?.Identity?.Name ?? usuario;
-        await base.Clients.All.SendAsync("onNuevaSolicitud", cnofact, usuarioReal, motivo, idDesbloqueo);
+        await base.Clients.Group(SupervisoresBloqueoGroup).SendAsync("onNuevaSolicitud", cnofact, usuarioReal, motivo, idDesbloqueo);
     }
 
     public async Task FacturaAutorizada(string cnofact, string supervisor)
     {
-        await base.Clients.All.SendAsync("onFacturaAutorizada", cnofact, supervisor);
+        await base.Clients.Group(RevisionGroup).SendAsync(
+            "onDesbloqueoAprobado",
+            new { cnofact, supervisor });
     }
 
     public async Task FacturaRechazada(string usuarioSolicita, string cnofact, string supervisor)
     {
-        await base.Clients.Group("USER_" + usuarioSolicita).SendAsync("onFacturaRechazada", cnofact, supervisor);
+        await base.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+            "onDesbloqueoRechazado",
+            new { cnofact, supervisor });
     }
 
     public async Task NotificarObservacion(string creferencia, string supervisor, string revisorUsuario)

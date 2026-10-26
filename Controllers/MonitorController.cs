@@ -83,7 +83,60 @@ public class MonitorController : ControllerBase
             User.Identity?.Name ?? "sistema",
             cancellationToken);
 
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers["Referrer-Policy"] = "no-referrer";
         return Ok(new { success = true, item = result });
+    }
+
+    [HttpGet("tv-links/{id:long}/token")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor, "Modificar")]
+    public async Task<IActionResult> GetTvLinkToken(long id, CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return BadRequest(new { success = false, message = "Identificador inválido." });
+        }
+
+        string? token = await _monitorTvLinkService.GetTokenAsync(id, cancellationToken);
+        if (token == null)
+        {
+            return Conflict(new
+            {
+                success = false,
+                message = "Este acceso no se puede copiar. Si es un enlace anterior, renuévalo para obtener una nueva dirección."
+            });
+        }
+
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers["Referrer-Policy"] = "no-referrer";
+        return Ok(new { success = true, token });
+    }
+
+    [HttpPost("tv-links/{id:long}/renovar")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor, "Modificar")]
+    public async Task<IActionResult> RenewTvLinkToken(long id, CancellationToken cancellationToken)
+    {
+        if (id <= 0)
+        {
+            return BadRequest(new { success = false, message = "Identificador inválido." });
+        }
+
+        MonitorTvLinkToken? token = await _monitorTvLinkService.RenewLegacyTokenAsync(id, cancellationToken);
+        if (token == null)
+        {
+            return Conflict(new
+            {
+                success = false,
+                message = "El acceso ya no está disponible o ya cuenta con un enlace recuperable."
+            });
+        }
+
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers["Referrer-Policy"] = "no-referrer";
+        return Ok(new { success = true, item = token });
     }
 
     [HttpDelete("tv-links/{id:long}")]
@@ -378,11 +431,9 @@ public class MonitorController : ControllerBase
                 });
             }
 
-            await _hub.Clients.All.SendAsync("onFacturaAutorizada", cnofact, supervisor);
-            // App Android escucha "onDesbloqueoAprobado" con un objeto {cnofact, supervisor}
-            // (no 2 argumentos sueltos) -- antes nunca le llegaba en vivo, solo por el
-            // polling de respaldo cada 8s. El panel web ya escuchaba ambos nombres.
-            await _hub.Clients.All.SendAsync("onDesbloqueoAprobado", new { cnofact, supervisor });
+            await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+                "onDesbloqueoAprobado",
+                new { cnofact, supervisor });
 
             string refAutorizada = cnofact.StartsWith("ENTRY_", StringComparison.OrdinalIgnoreCase) ? cnofact[6..] : cnofact;
             string? crefParaAbrir = await ResolveCrefAgrupadaAsync(conn, cnofact);
@@ -458,8 +509,9 @@ public class MonitorController : ControllerBase
                 });
             }
 
-            await _hub.Clients.All.SendAsync("onFacturaRechazada", cnofact, supervisor);
-            await _hub.Clients.All.SendAsync("onDesbloqueoRechazado", new { cnofact, supervisor });
+            await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+                "onDesbloqueoRechazado",
+                new { cnofact, supervisor });
 
             string refRechazada = cnofact.StartsWith("ENTRY_", StringComparison.OrdinalIgnoreCase) ? cnofact[6..] : cnofact;
             string? crefRechazada = await ResolveCrefAgrupadaAsync(conn, cnofact);
@@ -538,7 +590,7 @@ public class MonitorController : ControllerBase
                     usuario,
                     RevisionActivityTypes.Pausada,
                     detalle: $"Sesión cerrada por {supervisor}. Motivo: {motivo}");
-                await _hub.Clients.All.SendAsync("onRevisionEstadoCambiado", new
+                await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
                 {
                     creferencia = referencia,
                     usuario,
@@ -656,8 +708,9 @@ public class MonitorController : ControllerBase
             // web ya reaccionan completo (cierran el modo edición, avisan al
             // revisor). Un evento nuevo exigiría cablear ambos clientes de
             // cero para lograr exactamente el mismo efecto.
-            await _hub.Clients.All.SendAsync("onFacturaRechazada", cnofact, supervisor);
-            await _hub.Clients.All.SendAsync("onDesbloqueoRechazado", new { cnofact, supervisor });
+            await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+                "onDesbloqueoRechazado",
+                new { cnofact, supervisor });
 
             _ = _notifications.SendToUserAsync(
                 usuarioSolicita,
