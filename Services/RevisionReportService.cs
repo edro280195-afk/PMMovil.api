@@ -216,7 +216,7 @@ public class RevisionReportService : IRevisionReportService
                 // quedarnos sin avisar a nadie.
                 destinatarios = CorreosFallbackRevisionNormal.ToList();
                 _logger.LogInformation(
-                    "Revisión normal {Cref}: cliente {Cliente} sin contactos en correoscl con not_revision_fisica activo (o ninguno con usuario activo en lugar 09) y sin correo de revisor; se usa respaldo ({Destino}).",
+                    "Revisión normal {Cref}: cliente {Cliente} sin contactos en correoscl con not_revision_fisica activo (o ninguno con usuario activo en Nuevo Laredo, lugar 09) y sin correo de revisor; se usa respaldo ({Destino}).",
                     creferencia,
                     clienteId,
                     string.Join(", ", destinatarios));
@@ -268,7 +268,7 @@ public class RevisionReportService : IRevisionReportService
     // (cuentas internas de PMM) -- el cruce es por correo electrónico, y
     // sirve de candado de seguridad: un contacto de correoscl solo cuenta si
     // ese mismo correo pertenece además a una cuenta de PMM activa en
-    // Culiacán (lugar '09'). Verificado contra datos reales (14/sept): de 9
+    // Nuevo Laredo (lugar '09'). Verificado contra datos reales (14/sept): de 9
     // contactos con not_revision_fisica=1 en toda la tabla (todos del grupo
     // ExxonMobil), 8 pasan este candado; el que no pasa
     // (sergio.miranda@grupopmm.com) sigue registrado como contacto pero su
@@ -410,8 +410,6 @@ public class RevisionReportService : IRevisionReportService
             usuario = Convert.ToString(data.usuarioRevisorClave)?.Trim() ?? string.Empty;
         }
         string observacionGeneral = Convert.ToString(data.observacionRevision)?.Trim() ?? string.Empty;
-        long segundos = (long)(data.segundosTotales ?? 0L);
-        string tiempo = TimeSpan.FromSeconds(segundos).ToString(@"hh\:mm\:ss");
         int totalFisicos = (int)(data.bultosFisicos ?? 0);
         int totalDoc = (int)(data.bultosDocumento ?? 0);
 
@@ -482,16 +480,17 @@ public class RevisionReportService : IRevisionReportService
 
         sb.Append("<table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" style=\"border-collapse:collapse; margin-bottom:24px;\">");
 
-        string[] infoLabels = { "Referencia", "Cliente", "Proveedor", "Revisador", "Tiempo" };
+        // Reunión 1-oct-2026: el tiempo de revisión NO va en el correo (le llega al
+        // revisador y a los contactos del cliente); solo los monitores lo ven en el panel.
+        string[] infoLabels = { "Referencia", "Cliente", "Proveedor", "Revisador" };
         string[] infoValues =
         {
    WebUtility.HtmlEncode(cref),
    WebUtility.HtmlEncode(cliente),
    WebUtility.HtmlEncode(proveedor),
-   WebUtility.HtmlEncode(usuario),
-   tiempo
+   WebUtility.HtmlEncode(usuario)
     };
-        bool[] infoBold = { true, true, false, false, false };
+        bool[] infoBold = { true, true, false, false };
 
         for (int i = 0; i < infoLabels.Length; i++)
         {
