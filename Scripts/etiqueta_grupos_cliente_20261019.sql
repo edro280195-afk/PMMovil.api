@@ -112,15 +112,18 @@ WHERE NOT EXISTS (
     SELECT 1 FROM etiqueta_grupo_cliente WHERE clave = 'FREUDENBERG'
 );
 
+-- Los literales llevan `_latin1`: `cidcte` es latin1_swedish_ci y la tabla derivada, sin
+-- introductor, hereda la colación de la conexión (utf8). En MySQL 5.7 esa mezcla da el
+-- error 1267 «Illegal mix of collations» en el NOT EXISTS. Verificado en el 30.
 INSERT INTO etiqueta_grupo_cliente_miembro (id_grupo, cidcte, usucrea, fcrea)
 SELECT g.id_grupo, c.cidcte, 'sistemas', NOW()
 FROM etiqueta_grupo_cliente g
 JOIN (
-    SELECT 'CL7481' AS cidcte UNION ALL
-    SELECT 'CL7480' UNION ALL
-    SELECT 'CL8400' UNION ALL
-    SELECT 'CL8292' UNION ALL
-    SELECT 'CL7482'
+    SELECT _latin1'CL7481' AS cidcte UNION ALL
+    SELECT _latin1'CL7480' UNION ALL
+    SELECT _latin1'CL8400' UNION ALL
+    SELECT _latin1'CL8292' UNION ALL
+    SELECT _latin1'CL7482'
 ) c
 WHERE g.clave = 'FREUDENBERG'
   AND NOT EXISTS (
