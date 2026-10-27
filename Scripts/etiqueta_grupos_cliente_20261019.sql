@@ -23,6 +23,11 @@
 --  están pmmtraf.clientes.cidcte y pmmtraf.revdet.cclienteid. Con utf8mb4
 --  cualquier JOIN entre bases moriría con "Illegal mix of collations". Las
 --  demás columnas sí van en utf8mb4 para que los nombres lleven acentos.
+--
+--  Compatible con MySQL 5.7 (servidor 30): las tablas usan utf8mb4_general_ci y
+--  NO utf8mb4_0900_ai_ci, que solo existe desde MySQL 8 y en el 30 da el error
+--  1273 «Unknown collation». Es la misma que usan las demás tablas que se
+--  replicaron al 30 (ver 20260907_api_schema_audit_30_mysql57.sql).
 -- ============================================================================
 
 USE pmmutileria;
@@ -49,7 +54,7 @@ CREATE TABLE IF NOT EXISTS etiqueta_grupo_cliente (
     UNIQUE KEY uq_etiqueta_grupo_clave (clave)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci;
+  COLLATE = utf8mb4_general_ci;
 
 
 -- ---------------------------------------------------------------------------
@@ -81,7 +86,7 @@ CREATE TABLE IF NOT EXISTS etiqueta_grupo_cliente_miembro (
         ON DELETE CASCADE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci;
+  COLLATE = utf8mb4_general_ci;
 
 
 -- ---------------------------------------------------------------------------
