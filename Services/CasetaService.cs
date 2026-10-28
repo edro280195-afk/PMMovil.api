@@ -995,13 +995,13 @@ SELECT
     cant_guia AS Guias,
     combustible AS Combustible,
     planta AS Planta,
-    COALESCE(usumodi, usucrea, @usuario) AS Usucrea,
+    COALESCE(caseta.usumodi, caseta.usucrea, @usuario) AS Usucrea, -- con prefijo: `usuarios` tambien tiene usumodi/usucrea y sin el la subconsulta de abajo compara contra esas
     COALESCE(
         (SELECT CONCAT(TRIM(u.nombre), ' ', TRIM(u.apaterno))
          FROM usuarios u
-         WHERE u.claveusuario = COALESCE(usumodi, usucrea, @usuario)
+         WHERE u.claveusuario = COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
          LIMIT 1),
-        COALESCE(usumodi, usucrea, @usuario)
+        COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
     ) AS NombreUsuario,
     fcrea AS Fcrea,
     COALESCE(fmodi, fcrea) AS Fmodi
@@ -2724,13 +2724,13 @@ SELECT
     cant_guia AS Guias,
     combustible AS Combustible,
     planta AS Planta,
-    COALESCE(usumodi, usucrea, @usuario) AS Usucrea,
+    COALESCE(caseta.usumodi, caseta.usucrea, @usuario) AS Usucrea, -- con prefijo: `usuarios` tambien tiene usumodi/usucrea y sin el la subconsulta de abajo compara contra esas
     COALESCE(
         (SELECT CONCAT(TRIM(u.nombre), ' ', TRIM(u.apaterno))
          FROM usuarios u
-         WHERE u.claveusuario = COALESCE(usumodi, usucrea, @usuario)
+         WHERE u.claveusuario = COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
          LIMIT 1),
-        COALESCE(usumodi, usucrea, @usuario)
+        COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
     ) AS NombreUsuario,
     fcrea AS Fcrea,
     COALESCE(fmodi, fcrea) AS Fmodi
