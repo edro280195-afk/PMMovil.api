@@ -101,6 +101,11 @@ public class SalidaPatioItem
     public DateTime? SalidaCaseta { get; set; }
     public int BultosCargados { get; set; }
     public int BultosTotal { get; set; }
+    /// <summary>
+    /// La relación está autorizada pero no hay ninguna caja suya en el patio de caseta (en ninguna planta). La caja
+    /// que trae <see cref="Cajas"/> es la que dice la relación y no tiene registro de caseta (CasetaId vacío).
+    /// </summary>
+    public bool SinCajaEnCaseta { get; set; }
 }
 
 public class SalidaPatioHoy

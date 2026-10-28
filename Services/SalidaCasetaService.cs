@@ -237,6 +237,39 @@ public class SalidaCasetaService
               AND (@planta = '' OR c.planta = @planta)",
             new { planta })).ToList();
 
+        // Relaciones autorizadas que no tienen NINGUNA caja en el patio de caseta, de ninguna planta. El sistema de
+        // escritorio las lista porque parte de `relacion`; sin esto aquí no habría forma de verlas ni de darles salida.
+        // Las que tienen su caja en el patio de otra planta no entran: le tocan al guardia de esa planta.
+        // La caja que se muestra es la que dice la propia relación; no existe un registro de caseta que la respalde.
+        var sinCaja = await conn.QueryAsync<RelacionSinCajaRow>(@"
+            SELECT r.relno AS Relno, IFNULL(r.caja, '') AS Caja
+            FROM relacion r
+            WHERE r.tipop = 'I' AND r.estatus_carga = 'AUTORIZADA'
+              AND (r.fcruce IS NULL OR YEAR(r.fcruce) < 2000)
+              AND NOT EXISTS (SELECT 1 FROM caseta c WHERE TRIM(c.relacion) = r.relno
+                                AND (c.fsalida IS NULL OR c.fsalida < '2000-01-01')
+                                AND c.estatus NOT IN ('CANCELADO', 'CANCELADA'))
+            UNION ALL
+            SELECT r.relno AS Relno, IFNULL(r.caja, '') AS Caja
+            FROM relacion_imex r
+            WHERE r.tipop = 'C' AND r.estatus_carga = 'AUTORIZADA'
+              AND (r.fcruce IS NULL OR YEAR(r.fcruce) < 2000)
+              AND NOT EXISTS (SELECT 1 FROM caseta c WHERE TRIM(c.relacion) = r.relno
+                                AND (c.fsalida IS NULL OR c.fsalida < '2000-01-01')
+                                AND c.estatus NOT IN ('CANCELADO', 'CANCELADA'))");
+        foreach (var r in sinCaja)
+        {
+            if (!TieneRelacion(r.Relno)) continue;
+            cajas.Add(new PatioCajaRow
+            {
+                CasetaId = string.Empty,
+                NumCaja = r.Caja.Trim(),
+                TipoRegistro = "CAJA",
+                EstatusCaseta = "SIN REGISTRO EN CASETA",
+                Relacion = r.Relno.Trim()
+            });
+        }
+
         var relnos = cajas.Select(c => c.Relacion).Where(TieneRelacion).Distinct().ToList();
 
         var relaciones = new Dictionary<string, PatioRelacionRow>(StringComparer.OrdinalIgnoreCase);
@@ -353,6 +386,7 @@ public class SalidaCasetaService
                 TipoMovimiento = primera.TipoMovimiento,
                 EsTractocamion = string.Equals(primera.TipoRegistro, "TRACTOCAMION", StringComparison.OrdinalIgnoreCase),
                 Planta = primera.Planta,
+                SinCajaEnCaseta = grupo.All(c => c.CasetaId.Length == 0),
                 FechaArribo = arribo,
                 Cajas = grupo.Select(c => new SalidaPatioCaja
                 {
@@ -550,6 +584,12 @@ public class SalidaCasetaService
     {
         public string EstatusCarga { get; set; } = string.Empty;
         public DateTime? SalidaCaseta { get; set; }
+    }
+
+    private sealed class RelacionSinCajaRow
+    {
+        public string Relno { get; set; } = string.Empty;
+        public string Caja { get; set; } = string.Empty;
     }
 
     private sealed class PatioCajaRow
