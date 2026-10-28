@@ -15,8 +15,8 @@ using PMMovil.Api.Services;
 namespace PMMovil.Api.Controllers;
 
 /// <summary>
-/// Endpoints deliberadamente públicos, sin sesión de PMMovil -- "Seguimiento
-/// de entrada" (EntradaShareService) y "Ver reporte" (ReportShareService).
+/// Endpoints deliberadamente públicos, sin sesión de PMMovil -- seguimiento
+/// de entrada, seguimiento de revisión, evidencia de caseta y reportes.
 /// Cualquier cosa nueva aquí debe pasar por su propio token, nunca reusar el
 /// JWT interno.
 /// </summary>
@@ -27,6 +27,7 @@ public class PublicoController : ControllerBase
 {
     private readonly IEntradaShareService _shareService;
     private readonly IRevisionShareService _revisionShareService;
+    private readonly ICasetaShareService _casetaShareService;
     private readonly IReportShareService _reportShareService;
     private readonly RevisionReportPdfService _reportPdfService;
     private readonly BaseRepository _db;
@@ -36,6 +37,7 @@ public class PublicoController : ControllerBase
     public PublicoController(
         IEntradaShareService shareService,
         IRevisionShareService revisionShareService,
+        ICasetaShareService casetaShareService,
         IReportShareService reportShareService,
         RevisionReportPdfService reportPdfService,
         BaseRepository db,
@@ -44,6 +46,7 @@ public class PublicoController : ControllerBase
     {
         _shareService = shareService;
         _revisionShareService = revisionShareService;
+        _casetaShareService = casetaShareService;
         _reportShareService = reportShareService;
         _reportPdfService = reportPdfService;
         _db = db;
@@ -183,6 +186,76 @@ public class PublicoController : ControllerBase
 
         ms.Position = 0;
         return File(ms, "application/zip", $"evidencia-{datos.Value.CrefAgrupada}.zip");
+    }
+
+    [HttpGet("caseta/{token}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<ContentResult> VerCaseta(string token)
+    {
+        SetPublicShareHeaders();
+        CasetaShareResumen? resumen = await _casetaShareService.ObtenerResumenAsync(token);
+        string html = resumen == null
+            ? CasetaShareHtmlRenderer.RenderExpirado()
+            : CasetaShareHtmlRenderer.RenderResumen(
+                resumen,
+                $"/api/publico/caseta/{token}/foto",
+                $"/api/publico/caseta/{token}/zip",
+                // Operador, tractor y sellos ya van en el correo; la página los muestra salvo que se apague aquí.
+                _config.GetValue("PublicLinks:MostrarDatosOperadorCaseta", true));
+
+        return new ContentResult
+        {
+            Content = html,
+            ContentType = "text/html; charset=utf-8",
+            StatusCode = resumen == null ? 410 : 200
+        };
+    }
+
+    [HttpGet("caseta/{token}/foto/{idFotos:int}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<IActionResult> VerFotoCaseta(string token, int idFotos)
+    {
+        SetPublicShareHeaders();
+        (string FilePath, string Extension)? foto = await _casetaShareService.ObtenerFotoAsync(token, idFotos);
+        if (foto == null)
+        {
+            return NotFound();
+        }
+
+        string contentType = foto.Value.Extension switch
+        {
+            "png" => "image/png",
+            "webp" => "image/webp",
+            _ => "image/jpeg"
+        };
+        return PhysicalFile(foto.Value.FilePath, contentType);
+    }
+
+    [HttpGet("caseta/{token}/zip")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<IActionResult> DescargarZipCaseta(string token)
+    {
+        SetPublicShareHeaders();
+        List<(string FilePath, string FileName)>? archivos = await _casetaShareService.ObtenerArchivosParaZipAsync(token);
+        if (archivos == null || archivos.Count == 0)
+        {
+            return NotFound(new { success = false, message = "No hay fotos disponibles para descargar." });
+        }
+
+        var ms = new MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach ((string filePath, string fileName) in archivos)
+            {
+                var entry = zip.CreateEntry(fileName, System.IO.Compression.CompressionLevel.Optimal);
+                using Stream entryStream = entry.Open();
+                using FileStream sourceStream = System.IO.File.OpenRead(filePath);
+                await sourceStream.CopyToAsync(entryStream);
+            }
+        }
+
+        ms.Position = 0;
+        return File(ms, "application/zip", "evidencia-caseta.zip");
     }
 
     /// <summary>

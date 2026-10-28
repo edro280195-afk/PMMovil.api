@@ -38,6 +38,7 @@ public partial class CasetaService
     private readonly ILogger<CasetaService> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly CasetaPhotoStorage _photoStorage;
+    private readonly ICasetaShareService _casetaShareService;
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly IHostEnvironment _env;
 
@@ -48,6 +49,7 @@ public partial class CasetaService
         ILogger<CasetaService> logger,
         IHttpClientFactory httpClientFactory,
         CasetaPhotoStorage photoStorage,
+        ICasetaShareService casetaShareService,
         IHubContext<WarehouseHub> hub,
         IHostEnvironment env)
     {
@@ -57,6 +59,7 @@ public partial class CasetaService
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _photoStorage = photoStorage;
+        _casetaShareService = casetaShareService;
         _hub = hub;
         _env = env;
     }
@@ -332,10 +335,70 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
     }
 
 
-    private async Task NotiSalidaCasetaAsync(IDbConnection conn, string relno, string sufijo, string usuario, string timeStr, string observaciones)
+    /// <summary>
+    /// Correos fijos que reciben toda salida de caseta, igual que el sistema de escritorio (Relacion.NotiSalidaCaseta).
+    /// desarrollo3, que alla iba en "Para", aqui llega por la copia oculta automatica de SmtpService.
+    /// </summary>
+    private static readonly string[] CorreosFijosSalidaCaseta =
     {
+        "tatis.guevara@grupopmm.com",
+        "despacho.nld@grupopmm.com",
+        "notificacionespmmlaredotx@imexnotify.com"
+    };
+
+    private const string ClienteSinIdNotificacion = "SIN_CLIENTE";
+
+    /// <summary>
+    /// A quien le toca la notificacion de salida de un cliente: sus contactos activos que piden aviso de salida de caja
+    /// (`correoscl.not_salida_caja = 1`, con el tipo de operacion vacio o con C) mas los correos fijos. Es la misma regla
+    /// de Relacion.GetCorreosPorTrafico del sistema de escritorio.
+    /// </summary>
+    private async Task<List<string>> ObtenerDestinatariosSalidaAsync(IDbConnection conn, string clienteId)
+    {
+        var destinatarios = new List<string>();
+
+        void Agregar(string? correo)
+        {
+            string limpio = (correo ?? string.Empty).Trim();
+            if (limpio.Length > 0 && !destinatarios.Contains(limpio, StringComparer.OrdinalIgnoreCase))
+                destinatarios.Add(limpio);
+        }
+
+        if (!string.IsNullOrWhiteSpace(clienteId) && clienteId != ClienteSinIdNotificacion)
+        {
+            var contactos = await conn.QueryAsync<string>(
+                @"SELECT cemail
+                  FROM correoscl
+                  WHERE inactivo = 0
+                    AND not_salida_caja = 1 AND (tipoop = '' OR tipoop LIKE '%C%')
+                    AND cidcte = @clienteId",
+                new { clienteId });
+            foreach (string contacto in contactos) Agregar(contacto);
+        }
+
+        foreach (string fijo in CorreosFijosSalidaCaseta) Agregar(fijo);
+        return destinatarios;
+    }
+
+    /// <summary>
+    /// Manda la notificacion de salida: un correo por cliente de la relacion, con los contactos de ese cliente mas los
+    /// fijos, como el sistema de escritorio. Cada cliente recibe solo sus pedimentos. Con <paramref name="destinatariosOverride"/>
+    /// el correo va unicamente ahi (prueba), sin las copias ocultas automaticas; los destinatarios reales se calculan
+    /// igual y se devuelven para poder validarlos.
+    /// </summary>
+    private async Task<List<SalidaNotificacionEnviada>> NotiSalidaCasetaAsync(
+        IDbConnection conn,
+        string relno,
+        string sufijo,
+        string usuario,
+        string timeStr,
+        string observaciones,
+        IEnumerable<string>? destinatariosOverride = null,
+        bool incluirEnlaceFotos = true)
+    {
+        var enviados = new List<SalidaNotificacionEnviada>();
         var rel = await GetDetalleRawAsync(conn, relno, sufijo);
-        if (rel == null) return;
+        if (rel == null) return enviados;
 
         string caja = rel.Caja ?? "";
         string transfer = rel.Cnombre ?? "";
@@ -352,26 +415,107 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
   WHERE nrelacion=@relno",
      new { relno })).ToList();
 
-        if (traficos.Count == 0) return;
+        if (traficos.Count == 0) return enviados;
 
         var grupos = traficos
      .Where(t => t.Cidmanejo != "PIPA")
-     .GroupBy(t => t.Cclienteidtraf ?? "SIN_CLIENTE")
+     .GroupBy(t => t.Cclienteidtraf ?? ClienteSinIdNotificacion)
      .ToList();
 
-        if (grupos.Count == 0) return;
+        if (grupos.Count == 0) return enviados;
 
-        string subject = $"Salida de Caseta - Caja: {caja} - Relacion: {relno}";
+        // Mismo asunto que la plantilla SALIDACASETA del sistema de escritorio (reportes.config_correo): "Salida bodega Imex, caja: [caja]".
+        string subject = $"Salida bodega Imex, caja: {caja}";
 
-        string body = BuildSalidaCasetaEmailBody(relno, caja, transfer, operador, tractor, gafete, fecha, observaciones, grupos);
+        // El enlace de fotos es uno por relacion: se crea una vez y va en el correo de cada cliente.
+        string bloqueFotos = string.Empty;
+        if (incluirEnlaceFotos)
+        {
+            var enlaceFotos = await _casetaShareService.GenerarLinkSalidaAsync(relno, usuario);
+            if (enlaceFotos.HasValue)
+            {
+                string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
+                if (baseUrl.Length == 0)
+                {
+                    throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de salida.");
+                }
 
-        // 2026-08-20: mientras se termina de validar el envío en el servidor nuevo,
-        // este correo se manda únicamente a desarrollo3 (antes: tatisg/susana/
-        // despacho.nld/notificacionespmmlaredotx + correos del cliente). Avisar
-        // cuando haya que regresarlo a la lista de personal real.
-        var recipients = new List<string> { CorreoPruebasDesarrollo };
+                string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
+                bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoSalida, enlaceFotos.Value.Expira);
+            }
+        }
 
-        await _smtp.EnviarAsync(recipients, subject, body);
+        foreach (var grupo in grupos)
+        {
+            string nombreCliente = grupo.First().Cnombre ?? grupo.Key;
+            List<string> reales = await ObtenerDestinatariosSalidaAsync(conn, grupo.Key);
+            List<string> aQuien = destinatariosOverride?.ToList() ?? reales;
+            bool exito = false;
+
+            try
+            {
+                string body = BuildSalidaCasetaEmailBody(relno, caja, transfer, operador, tractor, gafete, fecha, observaciones,
+                    new List<IGrouping<string, TraficoNotiRow>> { grupo });
+                if (bloqueFotos.Length > 0) body = CasetaShareHtmlRenderer.InsertarEnCorreo(body, bloqueFotos);
+
+                exito = await _smtp.EnviarAsync(aQuien, subject, body,
+                    incluirCopiasOcultasAutomaticas: destinatariosOverride == null);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "No se pudo enviar la notificacion de salida de {Relno} para el cliente {Cliente}", relno, grupo.Key);
+            }
+
+            if (!exito)
+                _logger.LogWarning("La notificacion de salida de {Relno} para el cliente {Cliente} no se envio", relno, grupo.Key);
+
+            enviados.Add(new SalidaNotificacionEnviada(nombreCliente, grupo.Key, reales, aQuien, exito));
+        }
+
+        return enviados;
+    }
+
+    /// <summary>
+    /// Vuelve a mandar la notificacion de SALIDA de una relacion que ya salio (caso "no les llego a los contactos").
+    /// Con <paramref name="soloValidacion"/> la manda unicamente a desarrollo3, sin copias ocultas, y devuelve a quien le
+    /// tocaria; sin ella va a los contactos reales de cada cliente. No cambia ningun dato de la relacion.
+    /// </summary>
+    public async Task<(bool Success, string Mensaje)> ReenviarNotificacionSalidaAsync(
+        string relno, bool soloValidacion, bool incluirEnlaceFotos, CancellationToken ct = default)
+    {
+        string limpio = (relno ?? string.Empty).Trim();
+        if (limpio.Length == 0) return (false, "La relación es obligatoria.");
+
+        var (tabla, sufijo) = ResolverTabla(limpio);
+        using IDbConnection conn = _db.CreateConnection();
+
+        var registro = await conn.QueryFirstOrDefaultAsync<RelacionSalidaRow>(new CommandDefinition(
+            $@"SELECT estatus_carga AS Estatus,
+                      CASE WHEN YEAR(salida_caseta) >= 2000 THEN salida_caseta END AS SalidaCaseta,
+                      IFNULL(usumodi, '') AS Usuario
+               FROM {tabla}
+               WHERE relno = @relno", new { relno = limpio }, cancellationToken: ct));
+
+        if (registro == null) return (false, $"No existe la relación {limpio}.");
+        if (!string.Equals(registro.Estatus?.Trim(), "SALIDA", StringComparison.OrdinalIgnoreCase) || registro.SalidaCaseta == null)
+            return (false, $"La relación {limpio} no está en SALIDA (estatus '{registro.Estatus}'); no hay salida que notificar.");
+
+        string observaciones = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT obs_salida FROM caseta WHERE relacion = @relno AND TRIM(IFNULL(obs_salida, '')) <> '' LIMIT 1",
+            new { relno = limpio }, cancellationToken: ct)) ?? string.Empty;
+
+        var enviados = await NotiSalidaCasetaAsync(
+            conn, limpio, sufijo, registro.Usuario, registro.SalidaCaseta.Value.ToString("yyyy-MM-dd HH:mm:ss"),
+            observaciones.Trim(), soloValidacion ? new[] { CorreoPruebasDesarrollo } : null, incluirEnlaceFotos);
+
+        if (enviados.Count == 0)
+            return (false, "No hay a quién notificar: la relación no tiene tráficos (o todos son PIPA).");
+
+        string detalle = string.Join(" | ", enviados.Select(e =>
+            $"{e.Cliente} ({e.ClienteId}): {(e.Exito ? "enviado" : "FALLÓ")} a {string.Join(", ", e.EnviadoA)}"
+            + (soloValidacion ? $" · le tocaría a: {string.Join(", ", e.Reales)}" : string.Empty)));
+
+        return (enviados.All(e => e.Exito), (soloValidacion ? "VALIDACIÓN (solo desarrollo3). " : string.Empty) + detalle);
     }
 
     private async Task<CasetaDetalleDbRow?> GetDetalleRawAsync(IDbConnection conn, string relno, string sufijo)
@@ -2509,31 +2653,28 @@ ORDER BY nlineno", new { casetaId }))
                 ? $"{prefix}Entrada Caseta: {bodegaMail} | Tractocamión: {datos.NumUnidad} | {datos.TipoOp} | {datos.TipoMov} | Operador: {datos.Operador} "
                 : $"{prefix}Entrada Caseta: {bodegaMail} | Caja: {datos.Nequipo} | {datos.TipoOp} | {datos.TipoMov} | {datos.NombreCliente} ";
 
-            var builder = new BodyBuilder
+            string htmlBody = esTractocamion
+                ? BuildEntradaCasetaTractocamionEmailBody(datos, bodegaMail)
+                : BuildEntradaCasetaEmailBody(datos, bodegaMail);
+            var enlaceFotos = await _casetaShareService.GenerarLinkEntradaAsync(datos.CasetaId, datos.Usucrea);
+            if (enlaceFotos.HasValue)
             {
-                HtmlBody = esTractocamion
-                    ? BuildEntradaCasetaTractocamionEmailBody(datos, bodegaMail)
-                    : BuildEntradaCasetaEmailBody(datos, bodegaMail)
-            };
-
-            foreach (CasetaEntradaFoto foto in fotos)
-            {
-                byte[] bytes = foto.BytesFoto;
-                if (bytes.Length == 0 && !string.IsNullOrWhiteSpace(datos.CasetaId) && foto.Indice > 0)
+                string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
+                if (baseUrl.Length == 0)
                 {
-                    string? path = _photoStorage.FindReadablePhotoPath(datos.CasetaId, foto.Indice);
-                    if (path != null && File.Exists(path))
-                    {
-                        try { bytes = File.ReadAllBytes(path); } catch { }
-                    }
+                    throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de entrada.");
                 }
 
-                if (bytes.Length == 0)
-                    continue;
-
-                string nombre = string.IsNullOrWhiteSpace(foto.NombreArchivo) ? $"foto-{foto.Indice:D4}.jpg" : foto.NombreArchivo;
-                builder.Attachments.Add(nombre, bytes, ContentType.Parse("image/jpeg"));
+                string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
+                string bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoEntrada, enlaceFotos.Value.Expira);
+                htmlBody = CasetaShareHtmlRenderer.InsertarEnCorreo(htmlBody, bloqueFotos);
             }
+            else if (fotos.Count > 0)
+            {
+                throw new InvalidOperationException("No se pudo crear el enlace de las fotos de entrada.");
+            }
+
+            var builder = new BodyBuilder { HtmlBody = htmlBody };
 
             msg.Body = builder.ToMessageBody();
 
@@ -2560,11 +2701,11 @@ ORDER BY nlineno", new { casetaId }))
             await client.SendAsync(msg, ct);
             await client.DisconnectAsync(true, ct);
             _logger.LogInformation(
-                "Correo de entrada de caseta enviado. CasetaId={CasetaId}, Para={To}, Cc={Cc}, Adjuntos={Attachments}",
+                "Correo de entrada de caseta enviado. CasetaId={CasetaId}, Para={To}, Cc={Cc}, Fotos={Fotos}",
                 datos.CasetaId,
                 string.Join(", ", msg.To.Mailboxes.Select(x => x.Address)),
                 string.Join(", ", msg.Cc.Mailboxes.Select(x => x.Address)),
-                builder.Attachments.Count);
+                fotos.Count);
             return true;
         }
         catch (Exception ex)
@@ -3355,6 +3496,15 @@ internal class CasetaDetalleDbRow
     public string Num_tractor { get; set; } = string.Empty;
     public string Gafete_op { get; set; } = string.Empty;
     public string Usuedit { get; set; } = string.Empty;
+}
+
+internal sealed record SalidaNotificacionEnviada(string Cliente, string ClienteId, List<string> Reales, List<string> EnviadoA, bool Exito);
+
+internal sealed class RelacionSalidaRow
+{
+    public string Estatus { get; set; } = string.Empty;
+    public DateTime? SalidaCaseta { get; set; }
+    public string Usuario { get; set; } = string.Empty;
 }
 
 internal class TraficoNotiRow

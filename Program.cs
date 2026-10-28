@@ -124,6 +124,7 @@ try
     builder.Services.AddScoped<EntradaService>();
     builder.Services.AddScoped<IEntradaShareService, EntradaShareService>();
     builder.Services.AddScoped<IRevisionShareService, RevisionShareService>();
+    builder.Services.AddScoped<ICasetaShareService, CasetaShareService>();
     builder.Services.AddScoped<IReportShareService, ReportShareService>();
     builder.Services.AddScoped<IMonitorTvLinkService, MonitorTvLinkService>();
     builder.Services.AddSingleton<MonitorTvRealtimePublisher>();
@@ -394,6 +395,26 @@ try
         var casetaService = scope.ServiceProvider.GetRequiredService<CasetaService>();
         (bool success, string mensaje) = await casetaService.ReenviarCorreoEntradaAsync(
             casetaIdArg, soloValidacionArg, "sistema (reenvio manual)", CancellationToken.None);
+
+        Console.WriteLine(success ? $"OK: {mensaje}" : $"ERROR: {mensaje}");
+        return;
+    }
+
+    // Modo admin: reenviar la notificacion de SALIDA de caseta de una relacion que ya salio (caso "la salida no les
+    // llego a los contactos"). soloValidacion=true la manda unicamente a desarrollo3 y muestra a quien le tocaria; con
+    // false va a los contactos reales de cada cliente. El correo lleva SIEMPRE el enlace de fotos, como la salida
+    // normal; solo se omite si se pide explicitamente con sinEnlace=true (por omision es false).
+    //   dotnet run -- --reenviar-notificacion-salida <relno> <soloValidacion:true|false> [sinEnlace:true|false]
+    if (args.Length >= 1 && args[0] == "--reenviar-notificacion-salida")
+    {
+        string relnoArg = args.Length > 1 ? args[1] : "";
+        bool soloValidacionArg = args.Length <= 2 || !bool.TryParse(args[2], out bool parsedSoloValidacion) || parsedSoloValidacion;
+        bool sinEnlaceArg = args.Length > 3 && bool.TryParse(args[3], out bool parsedSinEnlace) && parsedSinEnlace;
+
+        using IServiceScope scope = app.Services.CreateScope();
+        var casetaService = scope.ServiceProvider.GetRequiredService<CasetaService>();
+        (bool success, string mensaje) = await casetaService.ReenviarNotificacionSalidaAsync(
+            relnoArg, soloValidacionArg, !sinEnlaceArg, CancellationToken.None);
 
         Console.WriteLine(success ? $"OK: {mensaje}" : $"ERROR: {mensaje}");
         return;
