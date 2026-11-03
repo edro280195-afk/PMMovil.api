@@ -130,6 +130,7 @@ try
     builder.Services.AddSingleton<MonitorTvRealtimePublisher>();
     builder.Services.AddScoped<SalidaService>();
     builder.Services.AddScoped<CasetaService>();
+    builder.Services.AddScoped<CatalogosService>();
     builder.Services.AddScoped<SalidaCasetaService>();
     builder.Services.AddScoped<CartaPorteService>();
     builder.Services.AddScoped<PrevioService>();

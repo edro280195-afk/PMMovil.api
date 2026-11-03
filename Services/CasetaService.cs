@@ -1996,7 +1996,7 @@ ORDER BY Nombre
 {limitSql}", new { filtro = filtroLimpio, like, limite });
     }
 
-    private static List<CasetaEntradaCatalogItem> ObtenerPaisesEntrada()
+    internal static List<CasetaEntradaCatalogItem> ObtenerPaisesEntrada()
     {
         return
         [
