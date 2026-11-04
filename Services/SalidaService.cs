@@ -436,30 +436,41 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
 
         string estatusCargaOriginal = dbRel.EstatusCarga;
 
-        var estadosCerrados = new[] { "CARGADA", "AUTORIZADA", "SALIDA", "DEMASIADO RAPIDO", "BLOQUEO", "BLOQUEO REIMPRESION" };
-        bool puedeTomarRelacion =
-        (dbRel.Estatus == "COMPLETA" || dbRel.Estatus == "PRECARGA") &&
-        !estadosCerrados.Contains(estatusCargaOriginal);
-
-        if (puedeTomarRelacion)
-        {
-            string fechaStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            await conn.ExecuteAsync(
-            $"UPDATE {tabla} SET ESTATUS_CARGA='CARGANDO', usucargamcia=@usuario, fechacruce=@fecha WHERE RELNO=@relno",
-            new { usuario, fecha = fechaStr, relno = relnoBase });
-
-            dbRel.Usucargamcia = usuario;
-        }
-
         var etiquetas = await GetEtiqEntradasAsync(conn, relnoBase, sufijo);
-
         var (totBultos, manejo) = await GetTotBultosAsync(conn, relnoBase, sufijo);
         var (cliente, idCliente) = await GetClienteRelacionAsync(conn, relnoBase);
         string estatusCarga = estatusCargaOriginal;
 
         string estatusMercancia = ComputeEstatusMercancia(dbRel.Estatus, estatusCargaOriginal, etiquetas, totBultos, manejo);
 
+        // Se toma la relación (candado CARGANDO) solo si el cargador puede trabajar con ella. El legacy la tomaba
+        // siempre y la dejaba pegada hasta que alguien cancelaba; aquí un estado como "INFORMACION INCORRECTA…"
+        // se muestra sin dejar a la relación ocupada.
+        var estadosCerrados = new[] { "CARGADA", "AUTORIZADA", "SALIDA", "DEMASIADO RAPIDO", "BLOQUEO", "BLOQUEO REIMPRESION" };
+        bool puedeTomarRelacion =
+        (dbRel.Estatus == "COMPLETA" || dbRel.Estatus == "PRECARGA") &&
+        !estadosCerrados.Contains(estatusCargaOriginal) &&
+        SalidaReglas.EstadoPermiteCaptura(estatusMercancia);
+
+        if (puedeTomarRelacion)
+        {
+            string ahora = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            await conn.ExecuteAsync(
+            $@"UPDATE {tabla}
+               SET ESTATUS_CARGA='CARGANDO', usucargamcia=@usuario, fechacruce=@fecha,
+                   inicio_carga = CASE WHEN inicio_carga IS NULL OR YEAR(inicio_carga) < 2000 THEN @ahora ELSE inicio_carga END
+               WHERE RELNO=@relno",
+            new { usuario, fecha = DateTime.Now.ToString("yyyy-MM-dd"), ahora, relno = relnoBase });
+
+            dbRel.Usucargamcia = usuario;
+        }
+
         result.Success = true;
+        if (!SalidaReglas.EstadoPermiteCaptura(estatusMercancia) && !SalidaReglas.EsEstadoCargaCerrada(estatusCargaOriginal)
+            && !SalidaReglas.EsEstadoBloqueo(estatusCargaOriginal))
+        {
+            result.Message = estatusMercancia;
+        }
         result.Relacion = new RelacionInfo
         {
             Relno = relnoBase,
@@ -520,14 +531,25 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
         }
 
         var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
+        // Bultos asignados a esta relación que ya no le pertenecen (posible descargo): el legacy los lista con ERROR
+        // y pide retornar la relación para que el cargador los baje (GetEtiqenRelacion, Relacion.cs:1400).
+        var ajenas = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
+        foreach (var ajena in ajenas)
+        {
+            ajena.Estatus = "ERROR";
+            ajena.Escaneado = true;
+            etiquetas.Add(ajena);
+        }
         var (totBultos, manejo) = await GetTotBultosAsync(conn, relno, sufijo);
         var (cliente, idCliente) = await GetClienteRelacionAsync(conn, relno);
 
         string estatus = dbRel.Estatus;
         if (!string.IsNullOrWhiteSpace(dbRel.Usuedit))
             estatus = "RELACION OCUPADA";
-        if (etiquetas.Any(e => string.Equals(e.Estatus, "ERROR", StringComparison.OrdinalIgnoreCase)))
+        if (ajenas.Count > 0)
             estatus = "ERROR, retorne relacion, posible descargo";
+        else if (etiquetas.Any(e => string.Equals(e.Estatus, "ERROR", StringComparison.OrdinalIgnoreCase)))
+            estatus = "INFORMACION INCORRECTA EN RELACION, NOTIFICAR A ENCARGADO, ENTRADA DE OTRA RELACION AGRUPADA";
 
         result.Success = true;
         result.Relacion = new RelacionInfo
@@ -642,7 +664,8 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
     }
 
 
-    private async Task<List<EtiquetaInfo>> GetEtiqEntradasAsync(IDbConnection conn, string relno, string sufijo)
+    /// <summary>Etiquetas que le tocan a la relación según tráfico/agrupa (la unión es distinta para relación normal e IMEX).</summary>
+    private async Task<List<EtiquetaDbRow>> QueryEtiquetasDeRelacionAsync(IDbConnection conn, string relno, string sufijo)
     {
         string sql;
         if (sufijo == "C")
@@ -657,7 +680,8 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
  e.usucarga AS Usucarga,
  e.relacion AS Relacion,
   ANY_VALUE(c.cidmanejo) AS Cidmanejo,
-  e.historial AS Historial
+  e.historial AS Historial,
+  IF(COALESCE(e.reimpresa, 0) = 1, 1, 0) AS Reimpresa
   FROM traf2
   LEFT JOIN agrupa ON traf2.creferencia = agrupa.cref_agrupada
   LEFT JOIN traf c ON c.creferencia = agrupa.cref_agrupada
@@ -677,7 +701,8 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
  e.usucarga AS Usucarga,
  e.relacion AS Relacion,
  ANY_VALUE(c.cidmanejo) AS Cidmanejo,
- e.historial AS Historial
+ e.historial AS Historial,
+ IF(COALESCE(e.reimpresa, 0) = 1, 1, 0) AS Reimpresa
   FROM traf2
   LEFT JOIN agrupa ON traf2.creferencia = agrupa.creferencia
    LEFT JOIN traf c ON c.creferencia = agrupa.cref_agrupada
@@ -686,9 +711,50 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
    GROUP BY e.id_etiqueta_mcia";
         }
 
-        var rows = (await conn.QueryAsync<EtiquetaDbRow>(sql, new { relno })).ToList();
+        return (await conn.QueryAsync<EtiquetaDbRow>(sql, new { relno })).ToList();
+    }
 
-        string checkSql = @"SELECT e.id_etiqueta_mcia AS IdEtiquetaMcia,
+    /// <summary>
+    /// Etiquetas de la relación. Igual que el legacy (<c>GetEtiqEntradas</c>): la lista son las que le tocan por tráfico;
+    /// está escaneada si ya tiene hora de escaneo y está asignada a esta relación; si está asignada a otra, es ERROR.
+    /// Los bultos asignados a esta relación que ya no le pertenecen NO van aquí: ver <see cref="GetEtiquetasAjenasAsync"/>.
+    /// </summary>
+    private async Task<List<EtiquetaInfo>> GetEtiqEntradasAsync(IDbConnection conn, string relno, string sufijo)
+    {
+        var rows = await QueryEtiquetasDeRelacionAsync(conn, relno, sufijo);
+
+        var result = new List<EtiquetaInfo>();
+        var seenTextos = new HashSet<string>();
+
+        foreach (var row in rows)
+        {
+            if (!seenTextos.Add(row.Textoetiqueta)) continue;
+
+            bool propia = row.Relacion == relno;
+            bool ajena = !propia && !string.IsNullOrEmpty(row.Relacion);
+            bool escaneada = propia && row.TimeScan.HasValue;
+
+            var info = MapEtiqueta(row, escaneada);
+            info.Estatus = ajena ? "ERROR" : (propia ? row.Estatus : "");
+            result.Add(info);
+        }
+
+        result.Sort((a, b) => string.Compare(a.TextoPagina, b.TextoPagina, StringComparison.Ordinal));
+        return result;
+    }
+
+    /// <summary>
+    /// Bultos asignados a la relación (<c>etiqueta_mcia.relacion</c>) que ya no le pertenecen según tráfico/agrupa: los que
+    /// hay que bajar del camión tras un descargo (legacy <c>GetEtiqADescargar</c>, <c>Relacion.cs:1579-1617</c>).
+    /// </summary>
+    private async Task<List<EtiquetaInfo>> GetEtiquetasAjenasAsync(IDbConnection conn, string relno, string sufijo)
+    {
+        var propias = (await QueryEtiquetasDeRelacionAsync(conn, relno, sufijo))
+            .Select(r => r.Textoetiqueta)
+            .ToHashSet();
+
+        var asignadas = (await conn.QueryAsync<EtiquetaDbRow>(
+            @"SELECT e.id_etiqueta_mcia AS IdEtiquetaMcia,
   e.textoetiqueta AS Textoetiqueta,
   e.creferencia AS Creferencia,
   e.nlineno AS Nlineno,
@@ -697,49 +763,39 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
   e.estatus AS Estatus,
   e.usucarga AS Usucarga,
   e.relacion AS Relacion,
-   ANY_VALUE(t.cidmanejo) AS Cidmanejo,
-   e.historial AS Historial
-   FROM etiqueta_mcia AS e
-   LEFT JOIN traf AS t ON e.creferencia = t.creferencia
-   WHERE e.relacion = @relno AND textoetiqueta <> ''
-   GROUP BY e.id_etiqueta_mcia";
+  ANY_VALUE(t.cidmanejo) AS Cidmanejo,
+  e.historial AS Historial,
+  IF(COALESCE(e.reimpresa, 0) = 1, 1, 0) AS Reimpresa
+  FROM etiqueta_mcia AS e
+  LEFT JOIN traf AS t ON e.creferencia = t.creferencia
+  WHERE e.relacion = @relno AND e.textoetiqueta <> ''
+  GROUP BY e.id_etiqueta_mcia",
+            new { relno })).ToList();
 
-        var scannedRows = (await conn.QueryAsync<EtiquetaDbRow>(checkSql, new { relno })).ToList();
+        var vistas = new HashSet<string>();
+        return asignadas
+            .Where(r => !propias.Contains(r.Textoetiqueta) && vistas.Add(r.Textoetiqueta))
+            .Select(r => MapEtiqueta(r, false))
+            .OrderBy(e => e.TextoPagina, StringComparer.Ordinal)
+            .ToList();
+    }
 
-        var result = new List<EtiquetaInfo>();
-        var seenTextos = new HashSet<string>();
+    /// <summary>Ids de cliente de la relación separados por coma (los usan las reglas de clientes exentos).</summary>
+    private static async Task<string> ObtenerIdsClienteAsync(IDbConnection conn, string relno, string sufijo)
+    {
+        string tabla = sufijo == "C" ? "relacion_imex" : "relacion";
+        string union = sufijo == "C"
+            ? "agrupa ON agrupa.creferencia = traf2.creferencia LEFT JOIN traf ON agrupa.cref_agrupada = traf.creferencia"
+            : "traf ON traf2.creferencia = traf.creferencia";
 
-        foreach (var row in scannedRows)
-        {
-            if (seenTextos.Contains(row.Textoetiqueta)) continue;
-            seenTextos.Add(row.Textoetiqueta);
-            result.Add(MapEtiqueta(row, true));
-        }
-
-        foreach (var row in rows)
-        {
-            if (seenTextos.Contains(row.Textoetiqueta)) continue;
-            seenTextos.Add(row.Textoetiqueta);
-            string estatus = row.Relacion == relno ? "CARGADO" :
-            string.IsNullOrEmpty(row.Relacion) ? "" : "ERROR";
-            result.Add(new EtiquetaInfo
-            {
-                TextoEtiqueta = row.Textoetiqueta,
-                TextoPagina = ConvShort(row.Textoetiqueta),
-                Creferencia = row.Creferencia,
-                Nlineno = row.Nlineno,
-                Total = row.Total,
-                Escaneado = row.Relacion == relno,
-                Estatus = estatus,
-                Usucarga = row.Usucarga,
-                TimeScan = row.TimeScan,
-                Manejo = row.Cidmanejo,
-                Historial = row.Historial
-            });
-        }
-
-        result.Sort((a, b) => string.Compare(a.TextoPagina, b.TextoPagina, StringComparison.Ordinal));
-        return result;
+        return await conn.QueryFirstOrDefaultAsync<string>(
+            $@"SELECT GROUP_CONCAT(DISTINCT cclienteidtraf,'') AS cidcte
+ FROM {tabla}
+ LEFT JOIN traf2 ON {tabla}.relno = traf2.nrelacion
+ LEFT JOIN {union}
+ LEFT JOIN clientes ON traf.cclienteidtraf = clientes.cidcte
+ WHERE {tabla}.relno = @relno",
+            new { relno }) ?? "";
     }
 
     private static EtiquetaInfo MapEtiqueta(EtiquetaDbRow row, bool escaneado)
@@ -756,7 +812,8 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
             Usucarga = row.Usucarga,
             TimeScan = row.TimeScan,
             Manejo = row.Cidmanejo,
-            Historial = row.Historial
+            Historial = row.Historial,
+            Reimpresa = row.Reimpresa
         };
     }
 
@@ -862,7 +919,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 new { relno = request.Relno },
                 transaction) ?? "";
 
-            if (estatusCargaActual == "BLOQUEO" || estatusCargaActual == "BLOQUEO REIMPRESION")
+            if (SalidaReglas.EsEstadoBloqueo(estatusCargaActual))
             {
                 result.Message = "RELACION BLOQUEADA";
                 result.Tipo = "BLOQUEADO";
@@ -870,6 +927,16 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 result.BloqueoMotivo = estatusCargaActual == "BLOQUEO REIMPRESION"
                     ? "La relacion esta bloqueada por reimpresion."
                     : "La relacion esta bloqueada por escaneo rapido.";
+                transaction.Commit();
+                return result;
+            }
+
+            // Una relación ya cargada/autorizada/fuera no admite más escaneos (el legacy solo lo impedía en la pantalla).
+            if (SalidaReglas.EsEstadoCargaCerrada(estatusCargaActual))
+            {
+                result.Message = "RELACION YA CARGADA";
+                result.Tipo = "RELACION_CERRADA";
+                result.EstatusCarga = estatusCargaActual;
                 transaction.Commit();
                 return result;
             }
@@ -899,6 +966,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
     e.usucarga AS Usucarga,
     e.relacion AS Relacion,
     e.historial AS Historial,
+    IF(COALESCE(e.reimpresa, 0) = 1, 1, 0) AS Reimpresa,
     c.cidmanejo
    FROM etiqueta_mcia e
    LEFT JOIN traf c ON e.creferencia = c.creferencia
@@ -983,6 +1051,28 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
             throw;
         }
 
+        // Etiqueta reimpresa: el bulto se registra y la relación queda bloqueada hasta que un supervisor la desbloquee
+        // (legacy SalidaBodega.aspx.cs:233-279). OJO: en el legacy esta rama nunca se cumple (la consulta del escaneo no
+        // lee `reimpresa`) y hay muchas reimpresas (158 en jun-ago 2026; una relación con 8 de 14), así que se enciende
+        // con Salida:BloqueoPorReimpresion = true cuando el negocio lo decida. Apagado = mismo comportamiento que hoy.
+        if (etiqueta != null && etiqueta.Reimpresa && _config.GetValue("Salida:BloqueoPorReimpresion", false))
+        {
+            await conn.ExecuteAsync(
+                $"UPDATE {tabla} SET estatus_carga='BLOQUEO REIMPRESION' WHERE RELNO=@relno",
+                new { relno = request.Relno });
+
+            await NotificarBloqueoSalidaAsync(conn, request.Relno, request.Usuario, sufijo, 1,
+                "Etiqueta reimpresa: la relacion queda bloqueada hasta que un supervisor la desbloquee.");
+
+            result.Message = "RELACION BLOQUEADA";
+            result.Tipo = "BLOQUEADO";
+            result.EstatusCarga = "BLOQUEO REIMPRESION";
+            result.BloqueoMotivo = "La relacion esta bloqueada por reimpresion.";
+            result.EtiquetasBloqueadas = 1;
+            result.EntradaCref = etiqueta.Creferencia;
+            return result;
+        }
+
         var review = await RevisaTiempoRealAsync(conn, request.Relno, request.Usuario, sufijo);
         if (review.Bloqueado)
         {
@@ -1011,10 +1101,18 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
         IDbTransaction? transaction = null)
     {
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        // Las columnas de log_etiquta_no_pertenecia miden 13 / 50 / 15: en modo estricto un código largo (por ejemplo el
+        // PDF417 de un proveedor) haría fallar el escaneo en vez de responder "NO PERTENECE". El legacy recortaba a 50.
         await conn.ExecuteAsync(
         @"INSERT INTO log_etiquta_no_pertenecia (RELACION, TEXTOETIQUETA, TIME_SCAN, USUARIO)
   VALUES (@relno, @texto, @time, @usuario)",
-        new { relno, texto = textoEtiqueta, time = timeStr, usuario },
+        new
+        {
+            relno = SalidaReglas.Recortar(relno, 13),
+            texto = SalidaReglas.Recortar(textoEtiqueta, 50),
+            time = timeStr,
+            usuario = SalidaReglas.Recortar(usuario, 15)
+        },
         transaction);
     }
 
@@ -1033,17 +1131,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
         if (transbordo > 0) return new ScanSpeedReview(false, 0, "");
 
-        var cliRow = await conn.QueryFirstOrDefaultAsync<string>(
-     $@"SELECT GROUP_CONCAT(DISTINCT cclienteidtraf,'') AS cidcte
- FROM {tabla}
-  LEFT JOIN traf2 ON {tabla}.relno = traf2.nrelacion
- LEFT JOIN {(sufijo == "C" ? "agrupa ON agrupa.creferencia = traf2.creferencia LEFT JOIN traf ON agrupa.cref_agrupada = traf.creferencia" : "traf ON traf2.creferencia = traf.creferencia")}
- LEFT JOIN clientes ON traf.cclienteidtraf = clientes.cidcte
- WHERE {tabla}.relno = @relno",
-     new { relno });
-
-        var clientesEspeciales = new[] { "2944", "CL7283", "CL7027", "CL7331", "CL7597", "CL7467" };
-        bool esClienteEspecial = clientesEspeciales.Any(c => cliRow?.Contains(c) == true);
+        string idsCliente = await ObtenerIdsClienteAsync(conn, relno, sufijo);
 
         var etiquetas = (await conn.QueryAsync<EtiquetaDbRow>(
 @"SELECT e.textoetiqueta AS Textoetiqueta,
@@ -1056,39 +1144,11 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
   ORDER BY e.time_scan ASC",
 new { relno })).ToList();
 
-        var enBloque = new List<EtiquetaDbRow>();
-        DateTime? inicioBloque = null; int count = 0;
-        bool bien = true;
+        var enBloque = SalidaReglas.DetectarRafaga(
+            etiquetas.Select(e => new EtiquetaRafaga(e.Textoetiqueta, e.Cidmanejo, e.TimeScan, e.Historial)),
+            idsCliente);
 
-        foreach (var et in etiquetas)
-        {
-            if (et.Cidmanejo == "T" && !string.IsNullOrEmpty(et.Historial)) continue;
-            if (et.Cidmanejo == "PAQ/M") continue;
-            if (!et.TimeScan.HasValue || et.TimeScan.Value.Year <= 2010) continue;
-
-            count++;
-            if (inicioBloque == null)
-            {
-                inicioBloque = et.TimeScan.Value; count = 1; enBloque.Clear();
-            }
-            else
-            {
-                double gap = (et.TimeScan.Value - inicioBloque.Value).TotalSeconds;
-                if (gap > 20) { inicioBloque = null; count = 1; enBloque.Clear(); }
-                else { inicioBloque = et.TimeScan.Value; }
-            }
-            enBloque.Add(et);
-
-            bool umbral = (count > 3 && esClienteEspecial)
-            || (count > 1 && !esClienteEspecial && inicioBloque != null);
-            if (umbral && enBloque.Any(e => RequiereBloqueoPorHistorial(e.Historial)))
-            {
-                bien = false;
-                break;
-            }
-        }
-
-        if (bien) return new ScanSpeedReview(false, 0, "");
+        if (enBloque == null) return new ScanSpeedReview(false, 0, "");
 
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         string hist = $"BLOQUEO {usuario} {timeStr} , ";
@@ -1099,7 +1159,7 @@ new { relno })).ToList();
     SET relacion=@relno, fmodi=@time, usumodi=@usuario,
    historial=CONCAT(IFNULL(historial,''), @hist)
     WHERE textoetiqueta=@texto",
-           new { relno, time = timeStr, usuario, hist, texto = scan.Textoetiqueta });
+           new { relno, time = timeStr, usuario, hist, texto = scan.Texto });
         }
 
         await conn.ExecuteAsync(
@@ -1107,10 +1167,20 @@ new { relno })).ToList();
         new { relno });
 
         _logger.LogWarning("BLOQUEO detected for relation {Relno} by user {Usuario}", relno, usuario);
-        await NotificarBloqueoSalidaAsync(conn, relno, usuario, sufijo, enBloque.Count,
-        "Escaneo rapido detectado. La relacion requiere revision de supervisor.");
-        return new ScanSpeedReview(true, enBloque.Count, "Escaneo rapido detectado. La relacion requiere revision de supervisor.");
+        const string motivo = "Escaneo rapido detectado. La relacion requiere revision de supervisor.";
+        await NotificarBloqueoSalidaAsync(conn, relno, usuario, sufijo, enBloque.Count, motivo);
 
+        // Correo CARGA_BLOQUEO del legacy (Relacion.cs:681-755): a los encargados de bodega y sistemas.
+        await EnviarAlertaCargaAsync(
+            conn, relno, sufijo,
+            "ALERTA: CAJA: [caja] CARGA DEMASIADO RAPIDO.",
+            "Relación bloqueada por escaneo rápido",
+            ("Relación", relno),
+            ("Usuario", usuario),
+            ("Bultos en la ráfaga", enBloque.Count.ToString()),
+            ("Fecha", timeStr));
+
+        return new ScanSpeedReview(true, enBloque.Count, motivo);
     }
 
     private async Task NotificarBloqueoSalidaAsync(
@@ -1152,26 +1222,47 @@ new { relno })).ToList();
         }
     }
 
-    private async Task EnviarCorreoBloqueoAsync(IDbConnection conn, string relno, string usuario, string sufijo)
+    /// <summary>
+    /// Manda un correo de alerta de carga a los encargados (misma lista que el legacy). Nunca lanza: un fallo de correo
+    /// no debe impedir el escaneo ni el cierre de la carga. Va a la cola durable para no esperar al SMTP.
+    /// </summary>
+    private async Task EnviarAlertaCargaAsync(
+        IDbConnection conn,
+        string relno,
+        string sufijo,
+        string asunto,
+        string titulo,
+        params (string Campo, string Valor)[] datos)
     {
-        var recipients = ObtenerCorreosNotificacion();
-        var caja = await conn.QueryFirstOrDefaultAsync<string>(
-        $"SELECT caja FROM {(sufijo == "C" ? "relacion_imex" : "relacion")} WHERE relno=@relno", new { relno });
+        try
+        {
+            var recipients = ObtenerCorreosNotificacion();
+            string tabla = sufijo == "C" ? "relacion_imex" : "relacion";
+            string caja = await conn.QueryFirstOrDefaultAsync<string>(
+                $"SELECT caja FROM {tabla} WHERE relno=@relno", new { relno }) ?? "";
 
-        string body = $"Relación: {relno}<br>Usuario: {usuario}<br>Caja: {caja}";
-        await _smtp.EnviarAsync(recipients, $"BLOQUEO - {relno}", body);
+            string filas = string.Concat(datos.Concat(new (string Campo, string Valor)[] { ("Caja", caja) }).Select(d =>
+                $"<tr><td style='padding:3px 14px 3px 0;color:#555'><b>{System.Net.WebUtility.HtmlEncode(d.Campo)}</b></td>" +
+                $"<td>{System.Net.WebUtility.HtmlEncode(d.Valor)}</td></tr>"));
+            string cuerpo =
+                "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px'>" +
+                $"<h3 style='color:#b00020;margin:0 0 8px'>{System.Net.WebUtility.HtmlEncode(titulo)}</h3>" +
+                $"<table>{filas}</table></div>";
+
+            await _smtp.EnviarAsync(recipients, asunto.Replace("[caja]", caja), cuerpo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "No se pudo enviar la alerta de carga {Relno}.", relno);
+        }
     }
 
-    private static bool RequiereBloqueoPorHistorial(string? historial)
-    {
-        if (string.IsNullOrWhiteSpace(historial)) return true;
-        if (!historial.Contains("DESBLOQUEO")) return true;
+    private static bool RequiereBloqueoPorHistorial(string? historial) => SalidaReglas.RequiereBloqueoPorHistorial(historial);
 
-        var partes = historial.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        string ultimo = partes.LastOrDefault() ?? historial;
-        return ultimo.Contains("ESCANEO");
-    }
-
+    /// <summary>
+    /// Destinatarios de las alertas de carga. Configurable en EmailNotifications:SalidaBloqueo; por omisión los mismos del
+    /// legacy (Relacion.cs:660-667).
+    /// </summary>
     private List<string> ObtenerCorreosNotificacion()
     {
         var recipients = _config.GetSection("EmailNotifications:SalidaBloqueo")
@@ -1180,10 +1271,12 @@ new { relno })).ToList();
         {
             recipients = new List<string>
    {
-  "sergio@imexfwd.com", "javier@imexfwd.com",
-  "manuel.ortegon@imexfwd.com", "amontoya@imexfwd.com",
-  "atencion.sistemas@imexfwd.com", "humberto.sanchez@imexfwd.com",
-  "maru@imexfwd.com", "desarrollo@imexfwd.com"
+  "sergio.miranda@grupopmm.com",
+  "manuel.ortegon@grupopmm.com",
+  "argelia.montoya@grupopmm.com",
+  "atencion.sistemas@grupopmm.com",
+  "humberto.sanchez@grupopmm.com",
+  "desarrollo@grupopmm.com"
    };
         }
         return recipients;
@@ -1197,6 +1290,27 @@ new { relno })).ToList();
 
         using IDbConnection conn = _db.CreateConnection();
 
+        var dbRel = await conn.QueryFirstOrDefaultAsync<SalidaDbRelation>(
+     $"SELECT {RelacionSelectFields} FROM {tabla} WHERE relno=@relno", new { relno });
+
+        if (dbRel == null)
+        {
+            result.Message = "RELACION NO ENCONTRADA";
+            return result;
+        }
+
+        if (SalidaReglas.EsEstadoBloqueo(dbRel.EstatusCarga))
+        {
+            result.Message = "RELACION BLOQUEADA";
+            return result;
+        }
+
+        if (SalidaReglas.EsEstadoCargaCerrada(dbRel.EstatusCarga))
+        {
+            result.Message = "RELACION YA CARGADA";
+            return result;
+        }
+
         var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
         int scannedCount = etiquetas.Count(e => e.Escaneado);
         int totalCount = etiquetas.Count;
@@ -1204,15 +1318,6 @@ new { relno })).ToList();
         if (scannedCount < totalCount)
         {
             result.Message = "FALTAN BULTOS";
-            return result;
-        }
-
-        var dbRel = await conn.QueryFirstOrDefaultAsync<SalidaDbRelation>(
-     $"SELECT {RelacionSelectFields} FROM {tabla} WHERE relno=@relno", new { relno });
-
-        if (dbRel == null)
-        {
-            result.Message = "RELACION NO ENCONTRADA";
             return result;
         }
 
@@ -1228,90 +1333,57 @@ new { relno })).ToList();
             return result;
         }
 
-        foreach (var et in etiquetas.Where(e => e.Escaneado && !string.IsNullOrWhiteSpace(e.TextoEtiqueta)))
+        // Revisión de tiempo con las horas REALES de escaneo (el legacy conservaba la hora de cada etiqueta).
+        string idsCliente = await ObtenerIdsClienteAsync(conn, relno, sufijo);
+        bool rapida = SalidaReglas.EsCargaDemasiadoRapida(
+            etiquetas.Select(e => new EtiquetaTiempo(e.Manejo, e.TimeScan)).ToList(),
+            idsCliente,
+            out DateTime inicioEscaneo,
+            out DateTime finEscaneo,
+            out int cantidadRevisada);
+        string estatusFinal = rapida ? "DEMASIADO RAPIDO" : "CARGADA";
+
+        var textos = etiquetas
+            .Where(e => e.Escaneado && !string.IsNullOrWhiteSpace(e.TextoEtiqueta))
+            .Select(e => e.TextoEtiqueta)
+            .ToList();
+        if (textos.Count > 0)
         {
+            // No se toca time_scan ni usucarga: son el registro real de quién y cuándo escaneó cada bulto.
             await conn.ExecuteAsync(
            @"UPDATE etiqueta_mcia
-    SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario,
-   time_scan=@time, usucarga=@usuario
-    WHERE textoetiqueta=@texto",
-           new { relno, time = timeStr, usuario, texto = et.TextoEtiqueta });
+    SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario
+    WHERE textoetiqueta IN @textos",
+           new { relno, time = timeStr, usuario, textos });
         }
 
-        string estatusFinal = await RevisaTiempoAsync(conn, relno, sufijo, usuario);
-
+        // inicio_carga se conserva (se fijó al tomar la relación); fin_carga es el momento de finalizar.
         await conn.ExecuteAsync(
      $@"UPDATE {tabla}
  SET ESTATUS_CARGA=@estatus, usucargamcia=@usuario,
-     inicio_carga=@time, fin_carga=@time
+     inicio_carga = CASE WHEN inicio_carga IS NULL OR YEAR(inicio_carga) < 2000 THEN @time ELSE inicio_carga END,
+     fin_carga=@time
  WHERE RELNO=@relno",
      new { estatus = estatusFinal, usuario, time = timeStr, relno });
+
+        if (rapida)
+        {
+            // Correo CARGA_RAPIDA del legacy (Relacion.cs:604-679).
+            await EnviarAlertaCargaAsync(
+                conn, relno, sufijo,
+                "ALERTA: CAJA: [caja] TIEMPO FUERA DE ESTANDAR.",
+                "Carga fuera del tiempo estándar",
+                ("Relación", relno),
+                ("Usuario", usuario),
+                ("Inicio", inicioEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
+                ("Fin", finEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
+                ("Cantidad", cantidadRevisada.ToString()),
+                ("Tiempo", (finEscaneo - inicioEscaneo).ToString()));
+        }
 
         result.Success = true;
         result.Message = estatusFinal == "CARGADA" ? "FINALIZADO" : "DEMASIADO RAPIDO";
         return result;
-    }
-
-
-    private async Task<string> RevisaTiempoAsync(IDbConnection conn, string relno, string sufijo, string usuario)
-    {
-        var tabla = sufijo == "C" ? "relacion_imex" : "relacion";
-
-        var scannedLabels = (await conn.QueryAsync<EtiquetaDbRow>(
-     @"SELECT e.textoetiqueta, IF(YEAR(e.time_scan) > 0, e.time_scan, NULL) AS TimeScan, t.cidmanejo
-  FROM etiqueta_mcia e
-  LEFT JOIN traf t ON e.creferencia = t.creferencia
-  WHERE e.relacion = @relno AND e.estatus = 'CARGADO'
-  AND e.time_scan IS NOT NULL AND YEAR(e.time_scan) > 2000
-  ORDER BY e.time_scan ASC",
-     new { relno })).ToList();
-
-        if (scannedLabels.Count <= 1) return "CARGADA";
-
-        var validLabels = scannedLabels.Where(s => s.Cidmanejo != "PAQ/M").ToList();
-        if (validLabels.Count <= 1) return "CARGADA";
-
-        var cliRow = await conn.QueryFirstOrDefaultAsync<string>(
-     $@"SELECT GROUP_CONCAT(DISTINCT cclienteidtraf,'') AS cidcte
- FROM {tabla}
- LEFT JOIN traf2 ON {tabla}.relno = traf2.nrelacion
- LEFT JOIN {(sufijo == "C" ? "agrupa ON agrupa.creferencia = traf2.creferencia LEFT JOIN traf ON agrupa.cref_agrupada = traf.creferencia" : "traf ON traf2.creferencia = traf.creferencia")}
- LEFT JOIN clientes ON traf.cclienteidtraf = clientes.cidcte
- WHERE {tabla}.relno = @relno",
-     new { relno });
-
-        var clientesEspeciales = new[] { "2944", "CL7283", "CL7027", "CL7331", "CL7597", "CL7467" };
-        if (clientesEspeciales.Any(c => cliRow?.Contains(c) == true))
-            return "CARGADA";
-
-        var firstScan = validLabels.First().TimeScan!.Value;
-        var lastScan = validLabels.Last().TimeScan!.Value;
-        double totalSeconds = (lastScan - firstScan).TotalSeconds;
-        double avgSeconds = totalSeconds / validLabels.Count;
-
-        if (avgSeconds >= 45) return "CARGADA";
-
-        string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        await conn.ExecuteAsync(
-        $@"UPDATE {tabla}
- SET ESTATUS_CARGA='DEMASIADO RAPIDO', usucargamcia=@usuario,
-     inicio_carga=@time, fin_carga=@time
- WHERE RELNO=@relno",
-        new { usuario, time = timeStr, relno });
-
-        return "DEMASIADO RAPIDO";
-    }
-
-    private async Task EnviarCorreoCargaRapidaAsync(IDbConnection conn, string relno, string usuario, string sufijo,
-   int cantidad, double tiempoSegundos)
-    {
-        var recipients = ObtenerCorreosNotificacion();
-        var caja = await conn.QueryFirstOrDefaultAsync<string>(
-        $"SELECT caja FROM {(sufijo == "C" ? "relacion_imex" : "relacion")} WHERE relno=@relno", new { relno });
-
-        string body = $"Relación: {relno}<br>Usuario: {usuario}<br>Caja: {caja}<br>" +
-        $"Cantidad: {cantidad} bultos<br>Tiempo: {tiempoSegundos:F1} segundos ({tiempoSegundos / cantidad:F1}s promedio)";
-        await _smtp.EnviarAsync(recipients, $"CARGA RÁPIDA - {relno}", body);
     }
 
 
@@ -1324,19 +1396,24 @@ new { relno })).ToList();
         using IDbConnection conn = _db.CreateConnection();
 
         var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
-        foreach (var et in etiquetas.Where(e => e.Escaneado && !string.IsNullOrWhiteSpace(e.TextoEtiqueta)))
+        var textos = etiquetas
+            .Where(e => e.Escaneado && !string.IsNullOrWhiteSpace(e.TextoEtiqueta))
+            .Select(e => e.TextoEtiqueta)
+            .ToList();
+        if (textos.Count > 0)
         {
+            // Solo se confirma la asignación; time_scan y usucarga se respetan (así la revisión de ráfagas no se confunde al reanudar).
             await conn.ExecuteAsync(
            @"UPDATE etiqueta_mcia
-    SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario,
-   time_scan=@time, usucarga=@usuario
-    WHERE textoetiqueta=@texto",
-           new { relno, time = timeStr, usuario, texto = et.TextoEtiqueta });
+    SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario
+    WHERE textoetiqueta IN @textos",
+           new { relno, time = timeStr, usuario, textos });
         }
 
         await conn.ExecuteAsync(
         $@"UPDATE {tabla}
- SET ESTATUS_CARGA='EN ESPERA', usucargamcia=@usuario, inicio_carga=@time
+ SET ESTATUS_CARGA='EN ESPERA', usucargamcia=@usuario,
+     inicio_carga = CASE WHEN inicio_carga IS NULL OR YEAR(inicio_carga) < 2000 THEN @time ELSE inicio_carga END
  WHERE RELNO=@relno",
         new { usuario, time = timeStr, relno });
 
@@ -1346,7 +1423,11 @@ new { relno })).ToList();
     }
 
 
-    public async Task<ResultadoOperacion> CancelarAsync(string relno, string usuario)
+    /// <param name="restaurar">
+    /// Estado con el que llegó la relación antes de tomarla. El legacy lo guardaba en memoria y lo restauraba al cancelar
+    /// (<c>liberar</c>, Relacion.cs:847): una relación que estaba EN ESPERA vuelve a EN ESPERA y no se pierde la pausa.
+    /// </param>
+    public async Task<ResultadoOperacion> CancelarAsync(string relno, string usuario, string? restaurar = null)
     {
         var result = new ResultadoOperacion();
         var (tabla, _) = ResolverTabla(relno);
@@ -1358,7 +1439,9 @@ new { relno })).ToList();
 
         if (actual != null && string.IsNullOrWhiteSpace(actual.Usuedit))
         {
-            string nuevoEstatus = actual.EstatusCarga == "CARGANDO" ? "" : actual.EstatusCarga;
+            string nuevoEstatus = actual.EstatusCarga == "CARGANDO"
+                ? (string.Equals(restaurar?.Trim(), "EN ESPERA", StringComparison.OrdinalIgnoreCase) ? "EN ESPERA" : "")
+                : actual.EstatusCarga;
             await conn.ExecuteAsync(
            $@"UPDATE {tabla}
      SET ESTATUS_CARGA=@estatus, usucargamcia=''
@@ -1388,30 +1471,35 @@ new { relno })).ToList();
         string estatusFinal = ComputeEstatusMercancia(dbRel?.Estatus ?? "", dbRel?.EstatusCarga ?? "", etiquetas, totBultos, manejo);
         if (estatusFinal == "COMPLETA") estatusFinal = "INCOMPLETA";
 
-        foreach (var et in etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta)))
+        // Las etiquetas asignadas a otra relación (ERROR) no se tocan: no son de esta carga.
+        var propias = etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta) && e.Estatus != "ERROR").ToList();
+        var escaneadas = propias.Where(e => e.Escaneado).Select(e => e.TextoEtiqueta).ToList();
+        var faltantes = propias.Where(e => !e.Escaneado).Select(e => e.TextoEtiqueta).ToList();
+
+        // Igual que el legacy (PedirAutorizacion): lo escaneado queda CARGADO conservando su hora y quién lo escaneó;
+        // lo que falta queda FALTA, sin hora.
+        if (escaneadas.Count > 0)
         {
-            string etEstatus = et.Escaneado ? "CARGADO" : "FALTA";
-            string etTimeScan = et.Escaneado ? timeStr : "0000-00-00 00:00:00";
             await conn.ExecuteAsync(
            @"UPDATE etiqueta_mcia
-    SET relacion=@relno, estatus=@estatus, fmodi=@time, usumodi=@usuario,
-   time_scan=@timescan, usucarga=@usuario
-    WHERE textoetiqueta=@texto",
-           new
-           {
-               relno,
-               estatus = etEstatus,
-               time = timeStr,
-               usuario,
-               timescan = etTimeScan,
-               texto = et.TextoEtiqueta
-           });
+    SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario
+    WHERE textoetiqueta IN @textos",
+           new { relno, time = timeStr, usuario, textos = escaneadas });
+        }
+        if (faltantes.Count > 0)
+        {
+            await conn.ExecuteAsync(
+           @"UPDATE etiqueta_mcia
+    SET relacion=@relno, estatus='FALTA', fmodi=@time, usumodi=@usuario
+    WHERE textoetiqueta IN @textos",
+           new { relno, time = timeStr, usuario, textos = faltantes });
         }
 
         await conn.ExecuteAsync(
         $@"UPDATE {tabla}
  SET ESTATUS_CARGA=@estatus, usucargamcia=@usuario,
-     inicio_carga=@time, fin_carga=@time
+     inicio_carga = CASE WHEN inicio_carga IS NULL OR YEAR(inicio_carga) < 2000 THEN @time ELSE inicio_carga END,
+     fin_carga=@time
  WHERE RELNO=@relno",
         new { estatus = estatusFinal, usuario, time = timeStr, relno });
 
@@ -1425,22 +1513,13 @@ new { relno })).ToList();
     {
         var result = new ResultadoOperacion();
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        var (_, sufijo) = ResolverTabla(request.Relno);
 
         using IDbConnection conn = _db.CreateConnection();
 
-        var etiqueta = await conn.QueryFirstOrDefaultAsync<EtiquetaDbRow>(
-        @"SELECT id_etiqueta_mcia AS IdEtiquetaMcia,
-  textoetiqueta AS Textoetiqueta,
-  creferencia AS Creferencia,
-  nlineno AS Nlineno,
-  total AS Total,
-  NULLIF(CAST(time_scan AS CHAR), '0000-00-00 00:00:00') AS TimeScan,
-  estatus AS Estatus,
-  usucarga AS Usucarga,
-  relacion AS Relacion,
-  historial AS Historial
-  FROM etiqueta_mcia WHERE textoetiqueta=@texto AND relacion=@relno",
-        new { texto = request.TextoEtiqueta, relno = request.Relno });
+        // Solo se pueden bajar los bultos que ya no pertenecen a la relación (en el legacy, la lista de descarga).
+        var ajenas = await GetEtiquetasAjenasAsync(conn, request.Relno, sufijo);
+        var etiqueta = ajenas.FirstOrDefault(e => e.TextoEtiqueta == request.TextoEtiqueta);
 
         if (etiqueta == null)
         {
@@ -1472,16 +1551,17 @@ new { relno })).ToList();
     public async Task<ResultadoOperacion> FinalizarDescargaAsync(string relno, string usuario)
     {
         var result = new ResultadoOperacion();
-        var (tabla, _) = ResolverTabla(relno);
-        string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        var (_, sufijo) = ResolverTabla(relno);
 
         using IDbConnection conn = _db.CreateConnection();
 
-        await conn.ExecuteAsync(
-        $@"UPDATE {tabla}
- SET ESTATUS_CARGA='', usucargamcia=''
- WHERE RELNO=@relno",
-        new { relno });
+        // Igual que el legacy (Descargar): no se toca el estado de la relación, que sigue CARGANDO por quien la tomó.
+        var pendientes = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
+        if (pendientes.Count > 0)
+        {
+            result.Message = $"FALTAN {pendientes.Count} BULTOS POR DESCARGAR";
+            return result;
+        }
 
         result.Success = true;
         result.Message = "DESCARGA COMPLETA";
@@ -1491,34 +1571,11 @@ new { relno })).ToList();
 
     public async Task<List<EtiquetaInfo>> GetEtiquetasDescargaAsync(string relno)
     {
+        var (_, sufijo) = ResolverTabla(relno);
         using IDbConnection conn = _db.CreateConnection();
 
-        var rows = (await conn.QueryAsync<EtiquetaDbRow>(
-        @"SELECT e.id_etiqueta_mcia AS IdEtiquetaMcia,
-  e.textoetiqueta AS Textoetiqueta,
-  e.creferencia AS Creferencia,
-  e.nlineno AS Nlineno,
-  e.total AS Total,
-  IF(YEAR(e.time_scan) > 0, e.time_scan, NULL) AS TimeScan,
-  e.estatus AS Estatus,
-  e.usucarga AS Usucarga,
-  e.relacion AS Relacion,
-  e.historial AS Historial
-  FROM etiqueta_mcia e WHERE e.relacion=@relno AND textoetiqueta<>''",
-        new { relno })).ToList();
-
-        return rows.Select(r => new EtiquetaInfo
-        {
-            TextoEtiqueta = r.Textoetiqueta,
-            TextoPagina = ConvShort(r.Textoetiqueta),
-            Creferencia = r.Creferencia,
-            Nlineno = r.Nlineno,
-            Total = r.Total,
-            Escaneado = true,
-            Estatus = r.Estatus,
-            Manejo = r.Cidmanejo,
-            Historial = r.Historial
-        }).ToList();
+        // Solo los bultos que ya no pertenecen a la relación y siguen asignados a ella; ninguno viene como ya descargado.
+        return await GetEtiquetasAjenasAsync(conn, relno, sufijo);
     }
 
 
@@ -1557,6 +1614,10 @@ new { relno })).ToList();
             return result;
         }
 
+        string usuedit = ((IDictionary<string, object>)traf).TryGetValue("usuedit", out var valorUsuedit)
+            ? valorUsuedit?.ToString() ?? ""
+            : "";
+
         var etiquetas = await conn.QueryAsync<EtiquetaDbRow>(
      @"SELECT e.id_etiqueta_mcia AS IdEtiquetaMcia,
   e.textoetiqueta AS Textoetiqueta,
@@ -1575,6 +1636,7 @@ new { relno })).ToList();
   GROUP BY e.id_etiqueta_mcia",
      new { entrada });
 
+        // Igual que el legacy (GetEtiqEntradas_SR): está cargada si ya tiene hora de escaneo.
         var etiquetaList = etiquetas.Select(r => new EtiquetaInfo
         {
             TextoEtiqueta = r.Textoetiqueta,
@@ -1582,7 +1644,7 @@ new { relno })).ToList();
             Creferencia = r.Creferencia,
             Nlineno = r.Nlineno,
             Total = r.Total,
-            Escaneado = r.Relacion == entrada,
+            Escaneado = r.TimeScan.HasValue && r.Estatus == "CARGADO",
             Estatus = r.Estatus,
             Usucarga = r.Usucarga,
             TimeScan = r.TimeScan,
@@ -1609,6 +1671,8 @@ new { relno })).ToList();
             estatusEntrada = "ENTRADA NO SE HA ETIQUETADO POR COMPLETO";
         if (etiquetaList.Count == 0)
             estatusEntrada = "NO DISP ETIQUETAS EN MCIA";
+        if (!string.IsNullOrWhiteSpace(usuedit))
+            estatusEntrada = "ENTRADA OCUPADA";
 
         result.Success = true;
         result.Etiquetas = etiquetaList;
@@ -1690,18 +1754,39 @@ new { relno })).ToList();
                 return result;
             }
 
+            // Un bulto de una entrada directa/transbordo no debe estar asignado a una relación.
+            if (!string.IsNullOrEmpty(etiqueta.Relacion) && etiqueta.Relacion != request.Entrada)
+            {
+                await ConsumeCasetaQrAuthorizationAsync(
+                    conn,
+                    transaction,
+                    authorization.Id,
+                    "RECHAZADO",
+                    "ETIQUETA_OTRA_RELACION",
+                    request.TextoEtiqueta);
+                result.Message = "ETIQUETA DE OTRA RELACION";
+                result.Tipo = "ETIQUETA_OTRA_RELACION";
+                transaction.Commit();
+                return result;
+            }
+
+            // Igual que el legacy (SaveScanParticular("", …)): el bulto queda CARGADO con relacion vacía y la huella
+            // completa en el historial (hora e IP). Antes se guardaba la entrada en `relacion`, que el legacy leería
+            // como "entrada de otra relación agrupada".
             string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            string ipSuffix = string.IsNullOrWhiteSpace(request.IpAddress) ? "" : $" {request.IpAddress}";
+            string historialScan = $"ESCANEO {timeStr}{ipSuffix} , ";
             await conn.ExecuteAsync(
         @"UPDATE etiqueta_mcia
-  SET relacion=@relno, estatus='CARGADO', fmodi=@time, usumodi=@usuario,
+  SET relacion='', estatus='CARGADO', fmodi=@time, usumodi=@usuario,
     time_scan=@time, usucarga=@usuario,
-    historial=CONCAT(IFNULL(historial,''), 'ESCANEO')
+    historial=CONCAT(IFNULL(historial,''), @historial)
   WHERE id_etiqueta_mcia=@idEtiqueta",
             new
             {
-                relno = request.Entrada,
                 time = timeStr,
                 usuario = request.Usuario,
+                historial = historialScan,
                 idEtiqueta = etiqueta.IdEtiquetaMcia
             },
             transaction);
@@ -1728,6 +1813,39 @@ new { relno })).ToList();
         return result;
     }
 
+    /// <summary>
+    /// Cierra una carga sin relación (entrada directa/transbordo). Los bultos ya quedaron guardados al escanear; aquí solo se
+    /// verifica que no falte ninguno. (Antes la app mandaba la entrada a "finalizar" de relaciones y respondía RELACION NO ENCONTRADA.)
+    /// </summary>
+    public async Task<ResultadoOperacion> FinalizarSinRelacionAsync(string entrada, string usuario)
+    {
+        var result = new ResultadoOperacion();
+
+        var carga = await CargarSinRelacionAsync(entrada, usuario);
+        if (!carga.Success)
+        {
+            result.Message = carga.Message;
+            return result;
+        }
+
+        if (carga.Relacion?.Estatus != "COMPLETA")
+        {
+            result.Message = carga.Relacion?.Estatus ?? "ENTRADA NO DISPONIBLE";
+            return result;
+        }
+
+        int faltan = carga.Etiquetas.Count(e => !e.Escaneado);
+        if (faltan > 0)
+        {
+            result.Message = "FALTAN BULTOS";
+            return result;
+        }
+
+        result.Success = true;
+        result.Message = "FINALIZADO";
+        return result;
+    }
+
 
     public async Task<ResultadoOperacion> RegistrarErrorEvitadoAsync(ErrorEvitadoRequest request)
     {
@@ -1750,20 +1868,53 @@ new { relno })).ToList();
 
         using IDbConnection conn = _db.CreateConnection();
 
+        var dbRel = await conn.QueryFirstOrDefaultAsync<SalidaDbRelation>(
+            $"SELECT {RelacionSelectFields} FROM {tabla} WHERE relno=@relno", new { relno });
+        if (dbRel == null)
+        {
+            result.Message = "RELACION NO ENCONTRADA";
+            return result;
+        }
+
         var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
-        foreach (var etiqueta in etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta)))
+        var ajenas = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
+
+        // Mismas condiciones con las que el legacy deshabilita el botón AUTORIZAR (RelacionBodega.aspx.cs:189-247),
+        // ahora también del lado del servidor.
+        string? motivo = SalidaReglas.MotivoNoSePuedeAutorizar(
+            dbRel.Estatus,
+            dbRel.EstatusCarga,
+            dbRel.Usucargamcia,
+            usuario,
+            !string.IsNullOrWhiteSpace(dbRel.Usuedit),
+            ajenas.Count > 0,
+            etiquetas.Any(e => e.Estatus == "ERROR"));
+        if (motivo != null)
+        {
+            result.Message = motivo;
+            return result;
+        }
+
+        var textos = etiquetas
+            .Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta))
+            .Select(e => e.TextoEtiqueta)
+            .ToList();
+        if (textos.Count > 0)
         {
             await conn.ExecuteAsync(
            @"UPDATE etiqueta_mcia
     SET relacion=@relno, estatus='SALIDA', fmodi=@time, usumodi=@usuario
-    WHERE textoetiqueta=@texto",
-           new { relno, time = timeStr, usuario, texto = etiqueta.TextoEtiqueta });
+    WHERE textoetiqueta IN @textos",
+           new { relno, time = timeStr, usuario, textos });
         }
 
+        // Inicio y fin de la carga solo se escriben si nunca se cerró (legacy Autorizar, Relacion.cs:911-914);
+        // antes se pisaban siempre con la hora de la autorización.
         await conn.ExecuteAsync(
      $@"UPDATE {tabla}
  SET ESTATUS_CARGA='AUTORIZADA', autoriza_carga=@time, usuautoriza=@usuario,
-     inicio_carga=@time, fin_carga=@time
+     inicio_carga = CASE WHEN fin_carga IS NULL OR YEAR(fin_carga) < 2000 THEN @time ELSE inicio_carga END,
+     fin_carga = CASE WHEN fin_carga IS NULL OR YEAR(fin_carga) < 2000 THEN @time ELSE fin_carga END
  WHERE RELNO=@relno",
      new { relno, time = timeStr, usuario });
 
@@ -1820,24 +1971,40 @@ new { relno })).ToList();
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         using IDbConnection conn = _db.CreateConnection();
-        string usuarioCarga = await conn.ExecuteScalarAsync<string>(
-        $"SELECT usucargamcia FROM {tabla} WHERE RELNO=@relno",
-        new { relno }) ?? "";
+        var actual = await conn.QueryFirstOrDefaultAsync<SalidaDbRelation>(
+            $"SELECT {RelacionSelectFields} FROM {tabla} WHERE RELNO=@relno", new { relno });
+        string usuarioCarga = actual?.Usucargamcia ?? "";
 
         if (accion == "DESBLOQUEO")
         {
+            if (!SalidaReglas.EsEstadoBloqueo(actual?.EstatusCarga))
+            {
+                result.Message = "LA RELACION NO ESTA BLOQUEADA";
+                return result;
+            }
+
+            // Bloqueo por reimpresión: el supervisor libera las etiquetas reimpresas (legacy DesbloquearReimpresion,
+            // Relacion.cs:1023-1035) para que no vuelvan a bloquear la relación.
+            if (actual!.EstatusCarga == "BLOQUEO REIMPRESION")
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE etiqueta_mcia SET reimpresa=0, desblq_etiq=@usuario WHERE relacion=@relno AND reimpresa=1",
+                    new { relno, usuario = SalidaReglas.Recortar(usuario, 15) });
+            }
+
             var etiquetas = (await conn.QueryAsync<EtiquetaDbRow>(
            @"SELECT textoetiqueta AS Textoetiqueta, historial AS Historial
     FROM etiqueta_mcia
     WHERE relacion=@relno AND historial LIKE '%BLOQUEO%'",
            new { relno })).ToList();
 
+            // Se conserva la hora de escaneo de cada etiqueta (el legacy no la cambia al desbloquear).
             string hist = $"DESBLOQUEO {usuario} {timeStr} , ";
             foreach (var etiqueta in etiquetas.Where(e => EsHistorialBloqueado(e.Historial)))
             {
                 await conn.ExecuteAsync(
                @"UPDATE etiqueta_mcia
-   SET relacion=@relno, fmodi=@time, usumodi=@usuario, time_scan=@time,
+   SET relacion=@relno, fmodi=@time, usumodi=@usuario,
    historial=CONCAT(IFNULL(historial,''), @hist)
    WHERE textoetiqueta=@texto",
                new { relno, time = timeStr, usuario, hist, texto = etiqueta.Textoetiqueta });
@@ -1890,24 +2057,27 @@ new { relno })).ToList();
     public async Task<ResultadoOperacion> RetornarAEsperaAsync(string relno, string usuario)
     {
         var result = new ResultadoOperacion();
-        var (tabla, sufijo) = ResolverTabla(relno);
+        var (tabla, _) = ResolverTabla(relno);
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         using IDbConnection conn = _db.CreateConnection();
 
-        var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
-        foreach (var etiqueta in etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta)))
+        string estatusCarga = await conn.ExecuteScalarAsync<string>(
+            $"SELECT estatus_carga FROM {tabla} WHERE RELNO=@relno", new { relno }) ?? "";
+        string? motivo = SalidaReglas.MotivoNoSePuedeRetornar(estatusCarga);
+        if (motivo != null)
         {
-            string estatus = etiqueta.Estatus;
-            if (estatus == "SALIDA" || estatus == "ERROR")
-                estatus = "CARGADO";
-
-            await conn.ExecuteAsync(
-           @"UPDATE etiqueta_mcia
-    SET relacion=@relno, fmodi=@time, usumodi=@usuario, estatus=@estatus
-    WHERE textoetiqueta=@texto",
-           new { relno, time = timeStr, usuario, estatus, texto = etiqueta.TextoEtiqueta });
+            result.Message = motivo;
+            return result;
         }
+
+        // Todo lo asignado a la relación que quedó SALIDA/ERROR vuelve a CARGADO (legacy RetornaraEspera,
+        // Relacion.cs:926-955). Las etiquetas de otra relación no se tocan.
+        await conn.ExecuteAsync(
+        @"UPDATE etiqueta_mcia
+    SET estatus='CARGADO', fmodi=@time, usumodi=@usuario
+    WHERE relacion=@relno AND estatus IN ('SALIDA','ERROR')",
+        new { relno, time = timeStr, usuario });
 
         await conn.ExecuteAsync(
         $"UPDATE {tabla} SET ESTATUS_CARGA='EN ESPERA' WHERE RELNO=@relno",

@@ -185,11 +185,11 @@ public class SalidaController : ControllerBase
 
     [HttpPost("{relno}/cancelar")]
     [RequiereModulo(MobileModuleIds.WarehouseExit, "Modificar")]
-    public async Task<IActionResult> Cancelar(string relno)
+    public async Task<IActionResult> Cancelar(string relno, [FromQuery] string? restaurar = null)
     {
         try
         {
-            var result = await _salidaService.CancelarAsync(relno, ObtenerUsuario());
+            var result = await _salidaService.CancelarAsync(relno, ObtenerUsuario(), restaurar);
             return Ok(result);
         }
         catch (Exception ex)
@@ -216,7 +216,7 @@ public class SalidaController : ControllerBase
     }
 
     [HttpPost("descargar")]
-    [RequiereModulo(MobileModuleIds.WarehouseExit, "Borrar")]
+    [RequiereModulo(MobileModuleIds.WarehouseExit, "Modificar")]
     public async Task<IActionResult> Descargar([FromBody] DescargarRequest request)
     {
         try
@@ -270,6 +270,7 @@ public class SalidaController : ControllerBase
         try
         {
             request.Usuario = ObtenerUsuario();
+            request.IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
             var result = await _salidaService.ScanSinRelacionAsync(request);
             return Ok(result);
         }
@@ -277,6 +278,22 @@ public class SalidaController : ControllerBase
         {
             _logger.LogError(ex, "Error al escanear SR");
             return Ok(new ScanLabelResult { Success = false, Message = "Error: " + ex.Message });
+        }
+    }
+
+    [HttpPost("sin-relacion/{entrada}/finalizar")]
+    [RequiereModulo(MobileModuleIds.WarehouseExit, "Modificar")]
+    public async Task<IActionResult> FinalizarSinRelacion(string entrada)
+    {
+        try
+        {
+            var result = await _salidaService.FinalizarSinRelacionAsync(entrada, ObtenerUsuario());
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al finalizar SR {Entrada}", entrada);
+            return Ok(new ResultadoOperacion { Success = false, Message = "Error: " + ex.Message });
         }
     }
 

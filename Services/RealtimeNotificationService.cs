@@ -374,7 +374,7 @@ WHERE active = 1
         {
             type = notification.Type,
             title = $"Relacion bloqueada {notification.Relno}",
-            body = $"{notification.Usuario} activo bloqueo por escaneo rapido. Caja {EmptyToNd(notification.Caja)}.",
+            body = $"{notification.Usuario}: {notification.Motivo} Caja {EmptyToNd(notification.Caja)}.",
             relno = notification.Relno,
             caja = notification.Caja,
             usuario = notification.Usuario,

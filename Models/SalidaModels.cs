@@ -45,6 +45,8 @@ public class EtiquetaInfo
     public DateTime? TimeScan { get; set; }
     public string Manejo { get; set; } = string.Empty;
     public string Historial { get; set; } = string.Empty;
+    /// <summary>La etiqueta es una reimpresión (etiqueta_mcia.reimpresa = 1): al escanearla la relación se bloquea.</summary>
+    public bool Reimpresa { get; set; }
 }
 
 public class ScanLabelRequest
@@ -132,6 +134,7 @@ public class SinRelacionRequest
     public string TextoEtiqueta { get; set; } = string.Empty;
     public string AutorizacionToken { get; set; } = string.Empty;
     public string Usuario { get; set; } = string.Empty;
+    public string IpAddress { get; set; } = string.Empty;
     public string Accion { get; set; } = "cargar";
 }
 
@@ -194,6 +197,7 @@ public class EtiquetaDbRow
     public string Relacion { get; set; } = string.Empty;
     public string Cidmanejo { get; set; } = string.Empty;
     public string Historial { get; set; } = string.Empty;
+    public bool Reimpresa { get; set; }
 }
 
 public class TotBultosDbRow
