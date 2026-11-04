@@ -106,4 +106,28 @@ Equal(50, SalidaReglas.Recortar(new string('X', 120), 50).Length, "Un código la
 Equal("ABC", SalidaReglas.Recortar("ABC", 50), "Un código corto no cambia");
 Equal("", SalidaReglas.Recortar(null, 13), "Nulo queda vacío");
 
+// ── Totales ilegibles: el legacy deja «ERROR EN INFORMACION» y el supervisor no autoriza ─────────────────
+
+Equal("ERROR EN INFORMACION (revisar si esta agrupado)", SalidaReglas.EstatusInformacionIncorrecta, "Texto del estado, igual que el legacy");
+Equal(SalidaReglas.EstatusInformacionIncorrecta,
+    SalidaReglas.MotivoNoSePuedeAutorizar("COMPLETA", "CARGADA", "operador", "supervisor", false, false, false, informacionIncorrecta: true),
+    "Con los totales ilegibles no se autoriza");
+Check(SalidaReglas.MotivoNoSePuedeAutorizar("COMPLETA", "CARGADA", "operador", "supervisor", false, false, false, informacionIncorrecta: false) is null,
+    "Con los totales bien sí se autoriza");
+Check(SalidaReglas.EstatusInformacionIncorrecta.Contains("ERROR"), "Contiene ERROR: la app ya bloquea ese texto (RelacionRules.canAuthorize)");
+
+// ── Plantillas de correo de reportes.config_correo ─────────────────────────────────────────────────────
+
+var valoresCorreo = new Dictionary<string, string> { ["relacion"] = "01I26104539", ["usuario"] = "a<b", ["caja"] = "ABC 123" };
+Equal("Caja ABC 123, relación 01I26104539", SalidaReglas.AplicarPlantilla("Caja [caja], relación [relacion]", valoresCorreo, html: false), "Los marcadores se llenan");
+Equal("<b>a&lt;b</b>", SalidaReglas.AplicarPlantilla("<b>[usuario]</b>", valoresCorreo, html: true), "En el cuerpo HTML los valores se codifican");
+Equal("a<b", SalidaReglas.AplicarPlantilla("[usuario]", valoresCorreo, html: false), "En el asunto no se codifican");
+Equal("01I26104539", SalidaReglas.AplicarPlantilla("[RELACION]", valoresCorreo, html: false), "El marcador no distingue mayúsculas");
+Equal("[inicio]", SalidaReglas.AplicarPlantilla("[inicio]", valoresCorreo, html: false), "Un marcador sin valor se deja como está");
+
+// ── Búsqueda: lo que teclea el usuario no se vuelve comodín ──────────────────────────────────────────
+
+Equal(@"100\%\_x\\", SalidaReglas.EscaparLike(@"100%_x\"), "Se escapan %, _ y la diagonal");
+Equal("01I2610", SalidaReglas.EscaparLike("01I2610"), "Un número normal no cambia");
+
 Console.WriteLine($"SalidaReglas.Regression: {checks} comprobaciones correctas.");

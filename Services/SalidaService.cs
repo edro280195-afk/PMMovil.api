@@ -540,7 +540,7 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
             ajena.Escaneado = true;
             etiquetas.Add(ajena);
         }
-        var (totBultos, manejo) = await GetTotBultosAsync(conn, relno, sufijo);
+        var (totBultos, manejo, totalesIncorrectos) = await GetTotBultosDetalleAsync(conn, relno, sufijo);
         var (cliente, idCliente) = await GetClienteRelacionAsync(conn, relno);
 
         string estatus = dbRel.Estatus;
@@ -550,6 +550,9 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
             estatus = "ERROR, retorne relacion, posible descargo";
         else if (etiquetas.Any(e => string.Equals(e.Estatus, "ERROR", StringComparison.OrdinalIgnoreCase)))
             estatus = "INFORMACION INCORRECTA EN RELACION, NOTIFICAR A ENCARGADO, ENTRADA DE OTRA RELACION AGRUPADA";
+        // Igual que el legacy, GetTotBultos corre al final y su aviso prevalece.
+        if (totalesIncorrectos)
+            estatus = SalidaReglas.EstatusInformacionIncorrecta;
 
         result.Success = true;
         result.Relacion = new RelacionInfo
@@ -629,10 +632,21 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
     private async Task<(int Bultos, string Manejo)> GetTotBultosAsync(IDbConnection conn, string relno, string sufijo)
     {
+        var (bultos, manejo, _) = await GetTotBultosDetalleAsync(conn, relno, sufijo);
+        return (bultos, manejo);
+    }
+
+    /// <summary>
+    /// Bultos y manejo de la relación. <c>InformacionIncorrecta</c> es el caso del legacy (GetTotBultos) en que la suma no se
+    /// puede leer porque la relación no tiene partidas o no está agrupada: queda en 0 bultos, sin manejo, y el supervisor ve
+    /// "ERROR EN INFORMACION (revisar si esta agrupado)" y no puede autorizarla.
+    /// </summary>
+    private async Task<(int Bultos, string Manejo, bool InformacionIncorrecta)> GetTotBultosDetalleAsync(IDbConnection conn, string relno, string sufijo)
+    {
         string sql;
         if (sufijo == "C")
         {
-            sql = @"SELECT FORMAT(SUM(bultos),0) AS bultos, ANY_VALUE(manejo) AS manejo FROM (
+            sql = @"SELECT COALESCE(FORMAT(SUM(bultos),0), '') AS bultos, ANY_VALUE(manejo) AS manejo FROM (
   SELECT relno AS rel1, trafdet.ncantidad AS bultos, ANY_VALUE(cdescmanejo) AS manejo
   FROM relacion_imex
   LEFT JOIN traf2 ON nrelacion=relno
@@ -645,7 +659,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
         }
         else
         {
-            sql = @"SELECT FORMAT(SUM(bultos),0) AS bultos, ANY_VALUE(manejo) AS manejo FROM (
+            sql = @"SELECT COALESCE(FORMAT(SUM(bultos),0), '') AS bultos, ANY_VALUE(manejo) AS manejo FROM (
   SELECT relno AS rel1, trafdet.ncantidad AS bultos, ANY_VALUE(cdescmanejo) AS manejo
   FROM relacion
   LEFT JOIN traf2 ON nrelacion=relno
@@ -658,9 +672,9 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
         }
 
         var row = await conn.QueryFirstOrDefaultAsync<TotBultosDbRow>(sql, new { relno });
-        if (row == null || string.IsNullOrEmpty(row.Bultos)) return (0, row?.Manejo ?? "");
-        int n = int.TryParse(row.Bultos.Replace(",", ""), out int parsed) ? parsed : 0;
-        return (n, row.Manejo ?? "");
+        if (row == null) return (0, "", false);
+        if (!int.TryParse((row.Bultos ?? "").Replace(",", ""), out int n)) return (0, "", true);
+        return (n, row.Manejo ?? "", false);
     }
 
 
@@ -1173,12 +1187,13 @@ new { relno })).ToList();
         // Correo CARGA_BLOQUEO del legacy (Relacion.cs:681-755): a los encargados de bodega y sistemas.
         await EnviarAlertaCargaAsync(
             conn, relno, sufijo,
+            "CARGA_BLOQUEO",
             "ALERTA: CAJA: [caja] CARGA DEMASIADO RAPIDO.",
             "Relación bloqueada por escaneo rápido",
-            ("Relación", relno),
-            ("Usuario", usuario),
-            ("Bultos en la ráfaga", enBloque.Count.ToString()),
-            ("Fecha", timeStr));
+            ("Relación", "relacion", relno),
+            ("Usuario", "usuario", usuario),
+            ("Bultos en la ráfaga", "bultos", enBloque.Count.ToString()),
+            ("Fecha", "fecha", timeStr));
 
         return new ScanSpeedReview(true, enBloque.Count, motivo);
     }
@@ -1222,17 +1237,27 @@ new { relno })).ToList();
         }
     }
 
+    private sealed class PlantillaCorreoRow
+    {
+        public string Subject { get; set; } = string.Empty;
+        public string Body { get; set; } = string.Empty;
+    }
+
     /// <summary>
-    /// Manda un correo de alerta de carga a los encargados (misma lista que el legacy). Nunca lanza: un fallo de correo
-    /// no debe impedir el escaneo ni el cierre de la carga. Va a la cola durable para no esperar al SMTP.
+    /// Manda un correo de alerta de carga a los encargados (misma lista que el legacy). El asunto y el cuerpo salen de la
+    /// plantilla de <c>reportes.config_correo</c> (<paramref name="idPlantilla"/>: CARGA_BLOQUEO / CARGA_RAPIDA), con los
+    /// mismos [marcadores] del legacy, para que se sigan editando en la base; si la plantilla no está o falla la lectura se
+    /// usa un cuerpo propio. Nunca lanza: un fallo de correo no debe impedir el escaneo ni el cierre de la carga. Va a la
+    /// cola durable para no esperar al SMTP.
     /// </summary>
     private async Task EnviarAlertaCargaAsync(
         IDbConnection conn,
         string relno,
         string sufijo,
-        string asunto,
-        string titulo,
-        params (string Campo, string Valor)[] datos)
+        string idPlantilla,
+        string asuntoRespaldo,
+        string tituloRespaldo,
+        params (string Campo, string Clave, string Valor)[] datos)
     {
         try
         {
@@ -1241,15 +1266,41 @@ new { relno })).ToList();
             string caja = await conn.QueryFirstOrDefaultAsync<string>(
                 $"SELECT caja FROM {tabla} WHERE relno=@relno", new { relno }) ?? "";
 
-            string filas = string.Concat(datos.Concat(new (string Campo, string Valor)[] { ("Caja", caja) }).Select(d =>
-                $"<tr><td style='padding:3px 14px 3px 0;color:#555'><b>{System.Net.WebUtility.HtmlEncode(d.Campo)}</b></td>" +
-                $"<td>{System.Net.WebUtility.HtmlEncode(d.Valor)}</td></tr>"));
-            string cuerpo =
-                "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px'>" +
-                $"<h3 style='color:#b00020;margin:0 0 8px'>{System.Net.WebUtility.HtmlEncode(titulo)}</h3>" +
-                $"<table>{filas}</table></div>";
+            var valores = datos.ToDictionary(d => d.Clave, d => d.Valor);
+            valores["caja"] = caja;
 
-            await _smtp.EnviarAsync(recipients, asunto.Replace("[caja]", caja), cuerpo, preferirCola: true);
+            string asunto = asuntoRespaldo.Replace("[caja]", caja);
+            string? cuerpo = null;
+            try
+            {
+                using IDbConnection reportes = _db.CreateReportesConnection();
+                var plantilla = await reportes.QueryFirstOrDefaultAsync<PlantillaCorreoRow>(
+                    "SELECT subject AS Subject, body AS Body FROM config_correo WHERE id_Reporte = @idPlantilla LIMIT 1",
+                    new { idPlantilla });
+                if (plantilla != null && !string.IsNullOrWhiteSpace(plantilla.Body))
+                {
+                    cuerpo = SalidaReglas.AplicarPlantilla(plantilla.Body, valores, html: true);
+                    if (!string.IsNullOrWhiteSpace(plantilla.Subject))
+                        asunto = SalidaReglas.AplicarPlantilla(plantilla.Subject, valores, html: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "No se pudo leer la plantilla de correo {Plantilla}; se usa el cuerpo de respaldo.", idPlantilla);
+            }
+
+            if (cuerpo == null)
+            {
+                string filas = string.Concat(datos.Select(d => (d.Campo, d.Valor)).Append(("Caja", caja)).Select(d =>
+                    $"<tr><td style='padding:3px 14px 3px 0;color:#555'><b>{System.Net.WebUtility.HtmlEncode(d.Item1)}</b></td>" +
+                    $"<td>{System.Net.WebUtility.HtmlEncode(d.Item2)}</td></tr>"));
+                cuerpo =
+                    "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px'>" +
+                    $"<h3 style='color:#b00020;margin:0 0 8px'>{System.Net.WebUtility.HtmlEncode(tituloRespaldo)}</h3>" +
+                    $"<table>{filas}</table></div>";
+            }
+
+            await _smtp.EnviarAsync(recipients, asunto, cuerpo, preferirCola: true);
         }
         catch (Exception ex)
         {
@@ -1371,14 +1422,15 @@ new { relno })).ToList();
             // Correo CARGA_RAPIDA del legacy (Relacion.cs:604-679).
             await EnviarAlertaCargaAsync(
                 conn, relno, sufijo,
+                "CARGA_RAPIDA",
                 "ALERTA: CAJA: [caja] TIEMPO FUERA DE ESTANDAR.",
                 "Carga fuera del tiempo estándar",
-                ("Relación", relno),
-                ("Usuario", usuario),
-                ("Inicio", inicioEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
-                ("Fin", finEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
-                ("Cantidad", cantidadRevisada.ToString()),
-                ("Tiempo", (finEscaneo - inicioEscaneo).ToString()));
+                ("Relación", "relacion", relno),
+                ("Usuario", "usuario", usuario),
+                ("Inicio", "inicio", inicioEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
+                ("Fin", "fin", finEscaneo.ToString("yyyy-MM-dd HH:mm:ss")),
+                ("Cantidad", "cantidad", cantidadRevisada.ToString()),
+                ("Tiempo", "tiempo", (finEscaneo - inicioEscaneo).ToString()));
         }
 
         result.Success = true;
@@ -1878,6 +1930,7 @@ new { relno })).ToList();
 
         var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
         var ajenas = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
+        var (_, _, totalesIncorrectos) = await GetTotBultosDetalleAsync(conn, relno, sufijo);
 
         // Mismas condiciones con las que el legacy deshabilita el botón AUTORIZAR (RelacionBodega.aspx.cs:189-247),
         // ahora también del lado del servidor.
@@ -1888,7 +1941,8 @@ new { relno })).ToList();
             usuario,
             !string.IsNullOrWhiteSpace(dbRel.Usuedit),
             ajenas.Count > 0,
-            etiquetas.Any(e => e.Estatus == "ERROR"));
+            etiquetas.Any(e => e.Estatus == "ERROR"),
+            totalesIncorrectos);
         if (motivo != null)
         {
             result.Message = motivo;
@@ -2166,15 +2220,70 @@ new { relno })).ToList();
             catch { }
         }
 
-        if (!string.IsNullOrWhiteSpace(busqueda))
+        if (string.IsNullOrWhiteSpace(busqueda)) return rows;
+
+        // Con texto se hace lo que el legacy (BuscarRelaciones, Relacion.cs:1350): buscar en TODAS las relaciones por número
+        // (aquí también por caja) y no solo entre las pendientes, para poder abrir una que ya se autorizó o salió. Se
+        // conserva lo que ya había: también salen las pendientes cuyo cliente coincide.
+        string texto = busqueda.Trim();
+        string patron = "%" + SalidaReglas.EscaparLike(texto) + "%";
+        var encontradas = (await conn.QueryAsync<PendienteAutorizarItem>(@"
+   SELECT
+  u.relno   AS Relno,
+  u.caja    AS Caja,
+  u.usucargamcia AS Usucargamcia,
+  u.estatus_carga AS EstatusCarga,
+  u.planta  AS Planta,
+  u.version_hoja AS VersionHoja,
+  '' AS Cliente,
+  0  AS TotBultos,
+  (SELECT COUNT(*) FROM etiqueta_mcia em
+   WHERE em.relacion = u.relno AND em.estatus = 'CARGADO') AS EtiquetasCount
+   FROM (
+  SELECT relno, caja, usucargamcia, estatus_carga, planta, version_hoja
+  FROM relacion
+  WHERE TIPOP = 'I' AND (relno LIKE @patron OR caja LIKE @patron)
+  UNION ALL
+  SELECT relno, caja, usucargamcia, estatus_carga, planta, version_hoja
+  FROM relacion_imex
+  WHERE TIPOP = 'C' AND (relno LIKE @patron OR caja LIKE @patron)
+   ) u
+   ORDER BY u.relno DESC
+   LIMIT 100", new { patron })).ToList();
+
+        // Cliente de las que no estaban pendientes: una sola consulta, como el legacy (GetCliente).
+        var pendientesPorRelno = rows.ToDictionary(r => r.Relno, r => r);
+        var sinCliente = encontradas.Where(e => !pendientesPorRelno.ContainsKey(e.Relno)).Select(e => e.Relno).ToList();
+        if (sinCliente.Count > 0)
         {
-            var b = busqueda.ToUpperInvariant();
-            rows = rows.Where(r =>
-           r.Relno.ToUpperInvariant().Contains(b) ||
-           r.Caja.ToUpperInvariant().Contains(b) ||
-           r.Cliente.ToUpperInvariant().Contains(b)).ToList();
+            try
+            {
+                var clientes = (await conn.QueryAsync<ClienteRelacionRow>(@"
+   SELECT t2.nrelacion AS Relno,
+          IF(COUNT(DISTINCT t.cclienteidtraf) > 1, 'varios', MAX(c.cnombre)) AS Cliente
+   FROM traf2 t2
+   LEFT JOIN traf t ON t.creferencia = t2.creferencia
+   LEFT JOIN clientes c ON c.cidcte = t.cclienteidtraf
+   WHERE t2.nrelacion IN @relnos
+   GROUP BY t2.nrelacion", new { relnos = sinCliente })).ToDictionary(c => c.Relno, c => c.Cliente ?? "");
+                foreach (var e in encontradas)
+                    if (clientes.TryGetValue(e.Relno, out string? nombre)) e.Cliente = nombre;
+            }
+            catch { }
         }
 
-        return rows;
+        var resultado = new Dictionary<string, PendienteAutorizarItem>();
+        foreach (var e in encontradas)
+            resultado[e.Relno] = pendientesPorRelno.TryGetValue(e.Relno, out var pendiente) ? pendiente : e;
+        foreach (var r in rows.Where(r => r.Cliente.Contains(texto, StringComparison.OrdinalIgnoreCase)))
+            resultado[r.Relno] = r;
+
+        return resultado.Values.OrderByDescending(r => r.Relno, StringComparer.Ordinal).Take(100).ToList();
+    }
+
+    private sealed class ClienteRelacionRow
+    {
+        public string Relno { get; set; } = string.Empty;
+        public string? Cliente { get; set; }
     }
 }

@@ -21,6 +21,12 @@ public static class SalidaReglas
 
     public const string ManejoPaqueteMultiple = "PAQ/M";
 
+    /// <summary>
+    /// Estado del legacy cuando no se pueden sumar los bultos de la relación (sin partidas o sin agrupar). El supervisor
+    /// no puede autorizar mientras exista (RelacionBodega.aspx.cs: Estatus.Contains("ERROR")).
+    /// </summary>
+    public const string EstatusInformacionIncorrecta = "ERROR EN INFORMACION (revisar si esta agrupado)";
+
     /// <summary>Clientes exentos de la revisión de ráfaga (legacy <c>RevisaTiempoReal</c>, ERV 2025-07-16). Con ellos el umbral sube de 1 a 3 bultos.</summary>
     public static readonly IReadOnlyList<string> ClientesExentosRafaga =
         new[] { "2944", "CL7283", "CL7027", "CL7331", "CL7597", "CL7467", "2901" };
@@ -164,7 +170,8 @@ public static class SalidaReglas
         string usuario,
         bool ocupada,
         bool hayEtiquetasAjenas,
-        bool hayEtiquetasConError)
+        bool hayEtiquetasConError,
+        bool informacionIncorrecta = false)
     {
         string st = (estatus ?? "").Trim().ToUpperInvariant();
         string carga = (estatusCarga ?? "").Trim().ToUpperInvariant();
@@ -175,6 +182,7 @@ public static class SalidaReglas
             return "NECESITA AUTORIZAR OTRO ENCARGADO";
         if (ocupada) return "RELACION OCUPADA";
         if (hayEtiquetasAjenas) return "ERROR, retorne relacion, posible descargo";
+        if (informacionIncorrecta) return EstatusInformacionIncorrecta;
         if (hayEtiquetasConError) return "INFORMACION INCORRECTA EN RELACION, NOTIFICAR A ENCARGADO, ENTRADA DE OTRA RELACION AGRUPADA";
         if (st == "EN PROCESO") return "EN PROCESO";
         if (carga is "EN ESPERA" or "CARGANDO") return carga;
@@ -187,6 +195,27 @@ public static class SalidaReglas
     /// <summary>Motivo por el que no se puede retornar a espera (el legacy deshabilita el botón con bloqueo).</summary>
     public static string? MotivoNoSePuedeRetornar(string? estatusCarga)
         => EsEstadoBloqueo(estatusCarga) ? "RELACION BLOQUEADA, DESBLOQUEALA PRIMERO" : null;
+
+    /// <summary>
+    /// Llena una plantilla de correo de la tabla <c>reportes.config_correo</c>: cada <c>[clave]</c> se cambia por su valor
+    /// (el legacy hacía lo mismo con [relacion], [usuario], [caja], [inicio], [fin], [cantidad] y [tiempo]).
+    /// En el cuerpo HTML los valores van codificados para que un usuario o una caja con símbolos no rompa el correo.
+    /// </summary>
+    public static string AplicarPlantilla(string plantilla, IReadOnlyDictionary<string, string> valores, bool html)
+    {
+        string resultado = plantilla ?? "";
+        foreach (var par in valores)
+        {
+            string valor = par.Value ?? "";
+            if (html) valor = System.Net.WebUtility.HtmlEncode(valor);
+            resultado = resultado.Replace("[" + par.Key + "]", valor, StringComparison.OrdinalIgnoreCase);
+        }
+        return resultado;
+    }
+
+    /// <summary>Escapa los comodines de LIKE (%, _ y \) de lo que teclea el usuario.</summary>
+    public static string EscaparLike(string? texto)
+        => (texto ?? "").Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     /// <summary>Recorta un texto al largo de su columna (el legacy recortaba a 50 antes de insertar).</summary>
     public static string Recortar(string? texto, int max)
