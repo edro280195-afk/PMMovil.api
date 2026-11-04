@@ -54,7 +54,8 @@ FotoMejoraMedicion Medicion(byte[] jpg)
     return FotoMejoraService.Medir(m);
 }
 
-var opciones = new FotoMejoraOptions();
+var opciones = new FotoMejoraOptions { Enabled = true };
+Check(!new FotoMejoraOptions().Enabled, "Por omisión la mejora de fotos está apagada (falta el Visual C++ en el servidor).");
 FotoMejoraService servicio = NuevoServicio(opciones);
 Check(servicio.IntentarIniciar(), "OpenCV debe cargar en esta máquina.");
 
@@ -97,9 +98,9 @@ Check(rNegra.Detalle.Contains("negra"), "El detalle explica por qué no se tocó
 // --- Tope de peso: la mejora no engorda la foto más de lo permitido ---
 // Con calidad alta el primer intento pesa mucho más que la original; el tope baja la calidad por pasos hasta cumplir o llegar
 // al piso. (En la prueba con el Pixel una foto de 1.0 MB pasó a 1.47 MB con calidad 85 antes de existir este tope.)
-FotoMejoraResultado rSinTope = NuevoServicio(new FotoMejoraOptions { JpegQuality = 98, MaxCrecimientoPeso = 100 }).Mejorar(oscura);
-FotoMejoraResultado rEnElPiso = NuevoServicio(new FotoMejoraOptions { JpegQuality = 75, MaxCrecimientoPeso = 100 }).Mejorar(oscura);
-FotoMejoraResultado rConTope = NuevoServicio(new FotoMejoraOptions { JpegQuality = 98 }).Mejorar(oscura);
+FotoMejoraResultado rSinTope = NuevoServicio(new FotoMejoraOptions { Enabled = true, JpegQuality = 98, MaxCrecimientoPeso = 100 }).Mejorar(oscura);
+FotoMejoraResultado rEnElPiso = NuevoServicio(new FotoMejoraOptions { Enabled = true, JpegQuality = 75, MaxCrecimientoPeso = 100 }).Mejorar(oscura);
+FotoMejoraResultado rConTope = NuevoServicio(new FotoMejoraOptions { Enabled = true, JpegQuality = 98 }).Mejorar(oscura);
 Check(rSinTope.Modificada && rEnElPiso.Modificada && rConTope.Modificada, "Las tres variantes mejoran la foto oscura.");
 Check(rSinTope.Bytes.Length > oscura.Length * 1.15, "Sin tope, la calidad 98 sí engorda la foto (si no, esta prueba no prueba nada).");
 Check(rConTope.Bytes.Length < rSinTope.Bytes.Length, "El tope de peso reduce el archivo.");
@@ -129,7 +130,7 @@ byte[] basura = new byte[4096];
 new Random(7).NextBytes(basura);
 FotoMejoraResultado rBasura = servicio.Mejorar(basura);
 Check(!rBasura.Modificada && ReferenceEquals(rBasura.Bytes, basura), "Bytes que no son imagen se devuelven tal cual.");
-FotoMejoraService chiquito = NuevoServicio(new FotoMejoraOptions { MaxPixels = 100 });
+FotoMejoraService chiquito = NuevoServicio(new FotoMejoraOptions { Enabled = true, MaxPixels = 100 });
 Check(!chiquito.Mejorar(oscura).Modificada, "Una imagen mayor al tope de píxeles no se toca.");
 
 // --- Cola ---
@@ -155,7 +156,7 @@ try
     apagada.Encolar(jpgOscuro, "prueba");
     Check(!apagada.Lector.TryRead(out _), "Con Enabled=false no se encola nada.");
 
-    var llena = new FotoMejoraCola(new FotoMejoraOptions { QueueCapacity = 10 }, NullLogger<FotoMejoraCola>.Instance);
+    var llena = new FotoMejoraCola(new FotoMejoraOptions { Enabled = true, QueueCapacity = 10 }, NullLogger<FotoMejoraCola>.Instance);
     for (int i = 0; i < 30; i++) llena.Encolar(jpgOscuro, "prueba");
     int dentro = 0;
     while (llena.Lector.TryRead(out _)) dentro++;
@@ -164,7 +165,7 @@ try
     // --- Trabajador ---
     IConfiguration config = new ConfigurationBuilder().AddInMemoryCollection(
         new Dictionary<string, string?> { ["PhotoSettings:BasePath"] = Path.Combine(raiz, "fotos") }).Build();
-    var opcionesTrabajador = new FotoMejoraOptions();
+    var opcionesTrabajador = new FotoMejoraOptions { Enabled = true };
     FotoMejoraWorker NuevoTrabajador(FotoMejoraOptions o) =>
         new(cola, NuevoServicio(o), o, config, NullLogger<FotoMejoraWorker>.Instance);
     FotoMejoraTrabajo Trabajo(string ruta)
@@ -212,14 +213,14 @@ try
     // Si el original no se puede respaldar, la foto NO se reemplaza.
     string raizImposible = Path.Combine(raiz, "bloqueada");
     File.WriteAllText(raizImposible, "esto es un archivo, no una carpeta");
-    FotoMejoraWorker sinRespaldo = NuevoTrabajador(new FotoMejoraOptions { OriginalesPath = raizImposible });
+    FotoMejoraWorker sinRespaldo = NuevoTrabajador(new FotoMejoraOptions { Enabled = true, OriginalesPath = raizImposible });
     string jpgSinRespaldo = Path.Combine(carpeta, "ref-1005.jpg");
     File.WriteAllBytes(jpgSinRespaldo, oscura);
     Check(sinRespaldo.Procesar(Trabajo(jpgSinRespaldo)).Estado == FotoMejoraEstado.Omitida, "Sin respaldo no se reemplaza.");
     Check(File.ReadAllBytes(jpgSinRespaldo).SequenceEqual(oscura), "Sin respaldo, la foto queda como llegó.");
 
     // GuardarOriginales=false: reemplaza sin respaldar.
-    FotoMejoraWorker sinGuardar = NuevoTrabajador(new FotoMejoraOptions { GuardarOriginales = false });
+    FotoMejoraWorker sinGuardar = NuevoTrabajador(new FotoMejoraOptions { Enabled = true, GuardarOriginales = false });
     string jpgSinGuardar = Path.Combine(carpeta, "ref-1006.jpg");
     File.WriteAllBytes(jpgSinGuardar, oscura);
     Check(sinGuardar.Procesar(Trabajo(jpgSinGuardar)).Estado == FotoMejoraEstado.Mejorada, "GuardarOriginales=false también mejora.");
@@ -236,6 +237,7 @@ try
         // Para afinar a ojo: FOTOMEJORA_QMIN (piso de calidad) y FOTOMEJORA_CRECIMIENTO (tope de peso, 1.15 = +15 %).
         var opcionesLab = new FotoMejoraOptions
         {
+            Enabled = true,
             JpegQualityMin = int.TryParse(Environment.GetEnvironmentVariable("FOTOMEJORA_QMIN"), out int qmin) ? qmin : opciones.JpegQualityMin,
             MaxCrecimientoPeso = double.TryParse(Environment.GetEnvironmentVariable("FOTOMEJORA_CRECIMIENTO"),
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double crec)

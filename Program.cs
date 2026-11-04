@@ -185,7 +185,8 @@ try
 
     // Mejora clásica de fotos de evidencia (luz, contraste, nitidez), en segundo plano y sin IA. Quien guarda una foto solo
     // la avisa a la cola; el trabajador (abajo, con los demás) la reemplaza si hacía falta. Sin sección "FotoMejora" rigen
-    // los valores por defecto (activa); se apaga con FotoMejora:Enabled=false. Ver FotoMejoraService.
+    // los valores por defecto (APAGADA, a la espera del Visual C++ en el servidor); se enciende con FotoMejora:Enabled=true.
+    // Ver FotoMejoraService.
     FotoMejoraOptions fotoMejoraOptions = builder.Configuration.GetSection("FotoMejora").Get<FotoMejoraOptions>() ?? new FotoMejoraOptions();
     builder.Services.AddSingleton(fotoMejoraOptions);
     builder.Services.AddSingleton<FotoMejoraService>();

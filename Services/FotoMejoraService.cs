@@ -5,15 +5,15 @@ namespace PMMovil.Api.Services;
 
 /// <summary>
 /// Opciones de la mejora automática de fotos (sección "FotoMejora" de appsettings). Si la sección no existe rigen estos
-/// valores, así que un servidor sin configuración también queda con la mejora activa; para apagarla basta
-/// <c>"FotoMejora": { "Enabled": false }</c>.
+/// valores, y por omisión la mejora está APAGADA: las DLL de OpenCV piden el Visual C++ 2015-2022 x64 en el servidor y
+/// todavía no está instalado. Cuando lo esté, se enciende con <c>"FotoMejora": { "Enabled": true }</c>.
 ///
 /// Los umbrales salen de medir 700 fotos reales de producción (septiembre-octubre 2026): con estos valores se toca cerca
 /// del 15 % de las fotos y el resto pasa intacto, byte por byte.
 /// </summary>
 public sealed class FotoMejoraOptions
 {
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; } = false;
 
     /// <summary>Fotos procesadas a la vez. Una sola alcanza y no le quita CPU al API.</summary>
     public int Parallelism { get; set; } = 1;
