@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Dapper;
@@ -30,12 +31,23 @@ public sealed class RevisionEnUsoException : InvalidOperationException
 
 public class RevisionService
 {
+    private const string Obsrev2DesdeAppSql = @"
+        obsrev2 = CASE
+            WHEN @observacionApp IS NULL OR @observacionApp = '' THEN obsrev2
+            WHEN LOCATE(
+                CONCAT(CHAR(10), @observacionApp, CHAR(10)),
+                CONCAT(CHAR(10), COALESCE(obsrev2, ''), CHAR(10))) > 0 THEN obsrev2
+            WHEN NULLIF(TRIM(COALESCE(obsrev2, '')), '') IS NULL THEN @observacionApp
+            ELSE CONCAT(obsrev2, CHAR(10), @observacionApp)
+        END";
+
     private readonly BaseRepository _db;
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly ILogger<RevisionService> _logger;
     private readonly RevisionActivityService _activityService;
     private readonly RevisionNormalCompletionService _normalCompletionService;
     private readonly MonitorTvRealtimePublisher _monitorTvRealtimePublisher;
+    private readonly EntrySearchIndex _searchIndex;
 
     public RevisionService(
         BaseRepository db,
@@ -43,7 +55,8 @@ public class RevisionService
         ILogger<RevisionService> logger,
         RevisionActivityService activityService,
         RevisionNormalCompletionService normalCompletionService,
-        MonitorTvRealtimePublisher monitorTvRealtimePublisher)
+        MonitorTvRealtimePublisher monitorTvRealtimePublisher,
+        EntrySearchIndex searchIndex)
     {
         _db = db;
         _hub = hub;
@@ -51,6 +64,137 @@ public class RevisionService
         _activityService = activityService;
         _normalCompletionService = normalCompletionService;
         _monitorTvRealtimePublisher = monitorTvRealtimePublisher;
+        _searchIndex = searchIndex;
+    }
+
+    /// <summary>
+    /// Búsqueda rápida para la pantalla de Revisión: las mejores coincidencias salen del índice en memoria y solo a esas
+    /// pocas (8 por omisión) se les consulta el estado real, en una sola pasada. No recorre la lista de pendientes.
+    /// </summary>
+    public async Task<BusquedaRapidaResultado> BuscarRapidoAsync(string? consulta, int limite, CancellationToken ct)
+    {
+        EntrySearchIndex.Snapshot snapshot = await _searchIndex.GetAsync(ct);
+        EntrySearchResult found = EntrySearchRules.Search(snapshot.Entries, consulta, limite);
+        if (found.Hits.Count == 0)
+        {
+            return new BusquedaRapidaResultado { Total = 0, Tolerante = found.Tolerant };
+        }
+
+        using IDbConnection conn = _db.CreateConnection();
+        Dictionary<string, EntradaPendiente> resumenes = await CargarResumenesAsync(
+            conn,
+            found.Hits.Select(h => h.Entry.Reference).ToList(),
+            ct);
+
+        var hits = new List<EntradaBusquedaHit>(found.Hits.Count);
+        foreach (EntrySearchHit hit in found.Hits)
+        {
+            // Una entrada del índice que ya no se puede resumir (se movió entre renovaciones) se omite en vez de mostrarla vacía.
+            if (resumenes.TryGetValue(hit.Entry.Reference, out EntradaPendiente? item))
+            {
+                hits.Add(new EntradaBusquedaHit { Item = item, Aproximada = hit.Approximate });
+            }
+        }
+
+        return new BusquedaRapidaResultado { Hits = hits, Total = found.Total, Tolerante = found.Tolerant };
+    }
+
+    /// <summary>
+    /// El estado real de unas pocas entradas: facturas y partidas, quién la revisa, si la relación ya cerró. Mismas
+    /// reglas que <see cref="GetEntradasPendientesAsync"/>, pero acotado a las referencias pedidas.
+    /// </summary>
+    private static async Task<Dictionary<string, EntradaPendiente>> CargarResumenesAsync(
+        IDbConnection conn,
+        IReadOnlyList<string> refs,
+        CancellationToken ct)
+    {
+        List<EntradaPendiente> baseData = (await conn.QueryAsync<EntradaPendiente>(new CommandDefinition(@"
+            SELECT
+                f.cref_agrupada AS CrefAgrupada,
+                MAX(f.cclienteid) AS ClienteId,
+                MAX(IF(f.dfecha < '2000-01-01', NULL, f.dfecha)) AS dFecha,
+                COUNT(DISTINCT f.cnofact) AS TotalFacturas,
+                COUNT(DISTINCT CASE WHEN f.status_rev = 1 THEN f.cnofact END) AS FacturasCompletas,
+                COUNT(DISTINCT rd.idrevdet) AS TotalPartidas,
+                COUNT(DISTINCT CASE WHEN rd.revisada = 1 THEN rd.idrevdet END) AS PartidasRevisadas,
+                MAX(cl.cnombre) AS NombreCliente
+            FROM fact f
+            LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid AND cl.inactivo = 0
+            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            WHERE f.cref_agrupada IN @refs
+            GROUP BY f.cref_agrupada", new { refs }, cancellationToken: ct))).ToList();
+
+        // Las que solo existen como código de barras no tienen facturas: salen de traf.
+        HashSet<string> conFacturas = baseData.Select(e => e.CrefAgrupada).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        List<string> soloBarras = refs.Where(r => !conFacturas.Contains(r)).ToList();
+        if (soloBarras.Count > 0)
+        {
+            baseData.AddRange(await conn.QueryAsync<EntradaPendiente>(new CommandDefinition(@"
+                SELECT
+                    t.creferencia AS CrefAgrupada,
+                    MAX(t.cclienteidtraf) AS ClienteId,
+                    MAX(IF(t.fcreatrafico < '2000-01-01', NULL, t.fcreatrafico)) AS dFecha,
+                    0 AS TotalFacturas,
+                    0 AS FacturasCompletas,
+                    0 AS TotalPartidas,
+                    0 AS PartidasRevisadas,
+                    MAX(cl.cnombre) AS NombreCliente
+                FROM traf t
+                LEFT JOIN clientes cl ON cl.cidcte = t.cclienteidtraf AND cl.inactivo = 0
+                WHERE t.creferencia IN @refs
+                GROUP BY t.creferencia", new { refs = soloBarras }, cancellationToken: ct)));
+        }
+
+        var sesiones = (await conn.QueryAsync(new CommandDefinition(@"
+            SELECT
+                t1.creferencia AS CrefAgrupada,
+                IF(t1.finiciorevision < '2000-01-01', NULL, t1.finiciorevision) AS finiciorevision,
+                IF(t1.ffinrevision < '2000-01-01', NULL, t1.ffinrevision) AS ffinrevision,
+                t1.usuario,
+                IF(t1.ftomadocumento < '2000-01-01', NULL, t1.ftomadocumento) AS ftomadocumento
+            FROM traftiemposrevision t1
+            INNER JOIN (
+                SELECT creferencia, MAX(idtiemposrevision) AS maxid
+                FROM traftiemposrevision
+                WHERE creferencia IN @refs
+                GROUP BY creferencia
+            ) t2 ON t1.idtiemposrevision = t2.maxid", new { refs }, cancellationToken: ct)))
+            .ToDictionary((dynamic x) => (string)x.CrefAgrupada, (dynamic x) => (object)x, StringComparer.OrdinalIgnoreCase);
+
+        var relaciones = (await conn.QueryAsync(new CommandDefinition(@"
+            SELECT tf2.CREF_ORIGEN AS CrefAgrupada,
+                   COUNT(*) AS Total,
+                   SUM(CASE WHEN COALESCE(r2.STATUS,'') != 'COMPLETA' THEN 1 ELSE 0 END) AS Pendientes
+            FROM traf2 tf2
+            LEFT JOIN relacion r2 ON tf2.nrelacion = r2.relno
+            WHERE tf2.CREF_ORIGEN IN @refs
+            GROUP BY tf2.CREF_ORIGEN", new { refs }, cancellationToken: ct)))
+            .ToDictionary((dynamic x) => (string)x.CrefAgrupada, (dynamic x) => ((long)x.Total, (long)x.Pendientes), StringComparer.OrdinalIgnoreCase);
+
+        foreach (EntradaPendiente item in baseData)
+        {
+            if (sesiones.TryGetValue(item.CrefAgrupada, out dynamic s))
+            {
+                DateTime? inicio = s.finiciorevision as DateTime?;
+                DateTime? fin = s.ffinrevision as DateTime?;
+                DateTime? toma = s.ftomadocumento as DateTime?;
+                item.InicioRevision = inicio?.ToString("yyyy/MM/dd HH:mm:ss");
+                item.FinRevision = fin?.ToString("yyyy/MM/dd HH:mm:ss");
+                item.UsuarioRevisando = (item.InicioRevision != null && item.FinRevision == null) ? (string)s.usuario : null;
+                // Igual que en Pendientes: el usuario de la toma solo cuenta mientras la sesión sigue abierta.
+                if (item.UsuarioRevisando == null && fin == null && toma.HasValue)
+                {
+                    item.UsuarioTomoDocumento = (string)s.usuario;
+                }
+            }
+            item.TodasRelacionCompleta = relaciones.TryGetValue(item.CrefAgrupada, out var rel)
+                && rel.Item1 > 0
+                && rel.Item2 == 0;
+        }
+
+        return baseData
+            .GroupBy(e => e.CrefAgrupada, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task<(List<EntradaPendiente> Items, bool Truncado)> GetEntradasPendientesAsync(string filtro, bool strict)
@@ -546,7 +690,7 @@ new { creferencia });
             WHERE (t1.ffinrevision IS NULL OR YEAR(t1.ffinrevision) < 2000)
                OR COALESCE(t1.estatus_final, 0) NOT IN (1, 2)
             ORDER BY t1.finiciorevision DESC
-            LIMIT 10";
+            LIMIT 40";
 
         List<object> sesiones = (await conn.QueryAsync(sqlRefs, new { username })).ToList();
         HashSet<string> timerRefs = sesiones.Select((dynamic val) => (string)val.creferencia).ToHashSet();
@@ -989,7 +1133,13 @@ new { creferencia });
         // Ambos cambios quedan en una sola sentencia atómica.
         object parameters;
         string sql;
-        if (columna.Equals("npesolbs", StringComparison.OrdinalIgnoreCase) &&
+        if (columna.Equals("obsrev", StringComparison.OrdinalIgnoreCase))
+        {
+            string? observacionApp = CrearObservacionApp(valor);
+            parameters = new { valor, observacionApp, usuario, cnofact };
+            sql = $"UPDATE fact SET obsrev = @valor, {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
+        }
+        else if (columna.Equals("npesolbs", StringComparison.OrdinalIgnoreCase) &&
             decimal.TryParse(valor, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal libras) &&
             libras != 0)
         {
@@ -1068,9 +1218,61 @@ new { creferencia });
     public async Task<bool> GuardarObservacionRevisionAsync(string crefAgrupada, string valor, string usuario)
     {
         using IDbConnection conn = _db.CreateConnection();
-        int rows = await conn.ExecuteAsync(
-            "UPDATE traf3 SET observacion_revision = @valor WHERE creferencia = @cref",
-            new { valor = NullIfEmpty(valor), cref = crefAgrupada });
+        if (conn.State != ConnectionState.Open)
+        {
+            conn.Open();
+        }
+
+        int rows;
+        using (IDbTransaction transaction = conn.BeginTransaction())
+        {
+            try
+            {
+                rows = await conn.ExecuteAsync(
+                    "UPDATE traf3 SET observacion_revision = @valor WHERE creferencia = @cref",
+                    new { valor = NullIfEmpty(valor), cref = crefAgrupada },
+                    transaction);
+
+                int existe = rows > 0
+                    ? 1
+                    : await conn.ExecuteScalarAsync<int>(
+                        "SELECT COUNT(1) FROM traf3 WHERE creferencia = @cref",
+                        new { cref = crefAgrupada },
+                        transaction);
+
+                if (existe == 0)
+                {
+                    transaction.Rollback();
+                    return false;
+                }
+
+                string? observacionApp = CrearObservacionApp(valor);
+                if (observacionApp != null)
+                {
+                    // Es una observación por entrada: se guarda en una sola factura
+                    // para que el GROUP_CONCAT del reporte no la repita por factura.
+                    string? cnofact = await conn.QueryFirstOrDefaultAsync<string>(
+                        "SELECT cnofact FROM fact WHERE cref_agrupada = @cref ORDER BY cnofact LIMIT 1",
+                        new { cref = crefAgrupada },
+                        transaction);
+
+                    if (!string.IsNullOrWhiteSpace(cnofact))
+                    {
+                        await conn.ExecuteAsync(
+                            $"UPDATE fact SET {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact",
+                            new { observacionApp, usuario, cnofact },
+                            transaction);
+                    }
+                }
+
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
 
         if (rows > 0)
         {
@@ -1094,16 +1296,14 @@ new { creferencia });
             return true;
         }
 
-        // rows == 0 no siempre significa error: con MySqlConnector (UseAffectedRows=true
-        // por default) un UPDATE que no cambia ningún valor -- ej. guardar el mismo texto
-        // que ya estaba, algo que pasa seguido porque este campo se guarda al perder foco,
-        // no solo al editar -- también reporta 0 filas afectadas aunque la referencia sí
-        // exista y el dato ya sea el correcto. Antes de reportar error al usuario,
-        // distinguimos ese caso de que la referencia realmente no exista en traf3.
-        int existe = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(1) FROM traf3 WHERE creferencia = @cref",
-            new { cref = crefAgrupada });
-        return existe > 0;
+        return true;
+    }
+
+    private static string? CrearObservacionApp(string valor)
+    {
+        return string.IsNullOrWhiteSpace(valor)
+            ? null
+            : $"Obs. desde App: {valor.Trim()}";
     }
 
     /// <summary>
@@ -1570,7 +1770,14 @@ new { creferencia });
             int nuevoId = await conn.ExecuteScalarAsync<int>(sqlIns, new { cnofact, usuario, motivo }, transaction);
 
             transaction.Commit();
-            await _hub.Clients.All.SendAsync("onNuevaSolicitud", cnofact, usuario, motivo, nuevoId);
+            try
+            {
+                await _hub.Clients.All.SendAsync("onNuevaSolicitud", cnofact, usuario, motivo, nuevoId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "La solicitud {Id} se guardó, pero no llegó el evento en vivo.", nuevoId);
+            }
             return (true, string.Empty, nuevoId);
         }
         catch

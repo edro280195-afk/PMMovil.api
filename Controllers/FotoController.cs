@@ -38,6 +38,7 @@ public class FotoController : ControllerBase
 
     private readonly IModulePermissionService _permissionService;
     private readonly IHubContext<WarehouseHub> _hub;
+    private readonly IFotoMejoraCola _mejora;
 
     public FotoController(
         BaseRepository db,
@@ -45,8 +46,10 @@ public class FotoController : ControllerBase
         ILogger<FotoController> logger,
         CasetaPhotoStorage casetaPhotoStorage,
         IModulePermissionService permissionService,
-        IHubContext<WarehouseHub> hub)
+        IHubContext<WarehouseHub> hub,
+        IFotoMejoraCola mejora)
     {
+        _mejora = mejora;
         _db = db;
         _config = config;
         _logger = logger;
@@ -348,6 +351,8 @@ public class FotoController : ControllerBase
                 string fullFilePath = Path.Combine(finalPath, fileName);
                 _logger.LogInformation("SubirFoto: Guardando en {path}", fullFilePath);
                 await System.IO.File.WriteAllBytesAsync(fullFilePath, imageBytes);
+                // La foto original ya quedó guardada y se responde de inmediato; la mejora corre después en segundo plano.
+                _mejora.Encolar(fullFilePath, payload.EsDiscrepancia ? "revision-discrepancia" : "revision");
                 await NotificarFotosActualizadasAsync(creferencia, usuario);
                 return Ok(new
                 {

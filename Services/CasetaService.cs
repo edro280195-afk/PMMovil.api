@@ -41,6 +41,9 @@ public partial class CasetaService
     private readonly ICasetaShareService _casetaShareService;
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly IHostEnvironment _env;
+    private readonly ITransporteCorreo _transporte;
+    private readonly ICorreoSalienteCola _cola;
+    private readonly ICorreoEntradaDiferido _diferido;
 
     public CasetaService(
        BaseRepository db,
@@ -51,7 +54,10 @@ public partial class CasetaService
         CasetaPhotoStorage photoStorage,
         ICasetaShareService casetaShareService,
         IHubContext<WarehouseHub> hub,
-        IHostEnvironment env)
+        IHostEnvironment env,
+        ITransporteCorreo transporte,
+        ICorreoSalienteCola cola,
+        ICorreoEntradaDiferido diferido)
     {
         _db = db;
         _smtp = smtp;
@@ -62,6 +68,9 @@ public partial class CasetaService
         _casetaShareService = casetaShareService;
         _hub = hub;
         _env = env;
+        _transporte = transporte;
+        _cola = cola;
+        _diferido = diferido;
     }
 
     /// <summary>
@@ -238,7 +247,100 @@ public partial class CasetaService
     }
 
 
-    public async Task<ConfirmarResult> ConfirmarSalidaAsync(string relno, string usuario, string observaciones = "", List<string>? fotos = null, CancellationToken ct = default)
+    /// <summary>Tope de fotos de una salida y de fotos por envío (la app manda lotes de 4, igual que Entrada).</summary>
+    private const int MaxFotosSalida = 40;
+    private const int MaxFotosPorLoteSalida = 6;
+
+    /// <summary>
+    /// Guarda un lote de fotos de salida antes de confirmar la salida. Solo se aceptan mientras la relación sigue
+    /// autorizada y sin salida; repetir un lote reemplaza las fotos de esas posiciones, así que reintentar es seguro.
+    /// </summary>
+    public async Task<ConfirmarResult> SubirFotosSalidaAsync(
+        string relno, int indiceInicial, List<string>? fotos, string usuario, CancellationToken ct = default)
+    {
+        string limpio = (relno ?? string.Empty).Trim();
+        if (limpio.Length == 0) return new ConfirmarResult { Success = false, Message = "La relación es obligatoria." };
+        if (fotos == null || fotos.Count == 0) return new ConfirmarResult { Success = false, Message = "No llegó ninguna foto." };
+        if (fotos.Count > MaxFotosPorLoteSalida)
+            return new ConfirmarResult { Success = false, Message = $"Máximo {MaxFotosPorLoteSalida} fotos por envío." };
+        if (indiceInicial < 1 || indiceInicial + fotos.Count - 1 > MaxFotosSalida)
+            return new ConfirmarResult { Success = false, Message = $"La salida admite hasta {MaxFotosSalida} fotos." };
+
+        // Se decodifica todo antes de abrir la transacción: una foto dañada no debe dejar el lote a medias.
+        var decodificadas = new List<(int Indice, byte[] Bytes)>();
+        for (int i = 0; i < fotos.Count; i++)
+        {
+            int indice = indiceInicial + i;
+            string f = fotos[i] ?? string.Empty;
+            string b64 = f.Contains(',') ? f.Split(',')[1] : f;
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(b64);
+            }
+            catch (FormatException)
+            {
+                return new ConfirmarResult { Success = false, Message = $"La foto {indice} no es válida." };
+            }
+
+            if (bytes.Length == 0) return new ConfirmarResult { Success = false, Message = $"La foto {indice} llegó vacía." };
+            decodificadas.Add((indice, bytes));
+        }
+
+        var (tabla, _) = ResolverTabla(limpio);
+        using IDbConnection conn = _db.CreateConnection();
+        conn.Open();
+
+        var registro = await conn.QueryFirstOrDefaultAsync<RelacionSalidaRow>(new CommandDefinition(
+            $@"SELECT estatus_carga AS Estatus,
+                      CASE WHEN YEAR(salida_caseta) >= 2000 THEN salida_caseta END AS SalidaCaseta,
+                      IFNULL(usumodi, '') AS Usuario
+               FROM {tabla}
+               WHERE relno = @relno", new { relno = limpio }, cancellationToken: ct));
+        if (registro == null) return new ConfirmarResult { Success = false, Message = $"No existe la relación {limpio}." };
+        if (!string.Equals(registro.Estatus?.Trim(), "AUTORIZADA", StringComparison.OrdinalIgnoreCase) || registro.SalidaCaseta != null)
+            return new ConfirmarResult { Success = false, Message = "La relación ya salió o no tiene carga autorizada. Actualiza la ficha." };
+
+        using var tx = conn.BeginTransaction();
+        var staged = new List<CasetaPhotoStage>();
+        try
+        {
+            var existentes = (await conn.QueryAsync<int>(new CommandDefinition(
+                "SELECT nlineno FROM fotos WHERE creferencia = @relno AND ntipodocto = 101",
+                new { relno = limpio }, tx, cancellationToken: ct))).ToHashSet();
+
+            foreach ((int indice, byte[] bytes) in decodificadas)
+            {
+                if (existentes.Contains(indice))
+                {
+                    await conn.ExecuteAsync(new CommandDefinition(
+                        "UPDATE fotos SET cextension = 'jpg', usucrea = @usuario, fcrea = @ahora WHERE creferencia = @relno AND ntipodocto = 101 AND nlineno = @indice",
+                        new { relno = limpio, indice, usuario, ahora = DateTime.Now }, tx, cancellationToken: ct));
+                }
+                else
+                {
+                    await conn.ExecuteAsync(new CommandDefinition(
+                        "INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea) VALUES (@indice, @relno, 101, 'jpg', @usuario, @ahora)",
+                        new { relno = limpio, indice, usuario, ahora = DateTime.Now }, tx, cancellationToken: ct));
+                    existentes.Add(indice);
+                }
+
+                staged.Add(await _photoStorage.StageAsync(bytes, _photoStorage.GetFileName(limpio, indice), ct));
+            }
+
+            tx.Commit();
+            _photoStorage.ActivateStagedPhotos(staged);
+            return new ConfirmarResult { Success = true, Message = $"{decodificadas.Count} foto(s) guardada(s)." };
+        }
+        catch
+        {
+            try { tx.Rollback(); } catch { }
+            _photoStorage.CleanupStagedPhotos(staged);
+            throw;
+        }
+    }
+
+    public async Task<ConfirmarResult> ConfirmarSalidaAsync(string relno, string usuario, string observaciones = "", List<string>? fotos = null, int? totalFotos = null, CancellationToken ct = default)
     {
         var result = new ConfirmarResult();
         var (tabla, sufijo) = ResolverTabla(relno);
@@ -248,6 +350,7 @@ public partial class CasetaService
         conn.Open();
         using var tx = conn.BeginTransaction();
         var fotosStaged = new List<CasetaPhotoStage>();
+        var fotosSobrantes = new List<int>();
         bool committed = false;
 
         try
@@ -302,10 +405,38 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
                     fotosStaged.Add(await _photoStorage.StageAsync(bytes, fileName, ct));
                 }
             }
+            else if (totalFotos.HasValue)
+            {
+                // Las fotos ya se subieron por lotes (SubirFotosSalidaAsync): aqui solo se comprueba que esten todas y se
+                // quitan las que sobren de un intento anterior con mas fotos.
+                int total = Math.Clamp(totalFotos.Value, 0, MaxFotosSalida);
+                int presentes = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(DISTINCT nlineno) FROM fotos WHERE creferencia = @relno AND ntipodocto = 101 AND nlineno BETWEEN 1 AND @total",
+                    new { relno, total }, tx);
+                if (presentes < total)
+                {
+                    tx.Rollback();
+                    return new ConfirmarResult { Success = false, Message = $"Faltan fotos por subir ({presentes} de {total}). Vuelve a intentar." };
+                }
+
+                fotosSobrantes = (await conn.QueryAsync<int>(
+                    "SELECT nlineno FROM fotos WHERE creferencia = @relno AND ntipodocto = 101 AND nlineno > @total",
+                    new { relno, total }, tx)).ToList();
+                if (fotosSobrantes.Count > 0)
+                {
+                    await conn.ExecuteAsync(
+                        "DELETE FROM fotos WHERE creferencia = @relno AND ntipodocto = 101 AND nlineno > @total",
+                        new { relno, total }, tx);
+                }
+            }
 
             tx.Commit();
             committed = true;
             _photoStorage.ActivateStagedPhotos(fotosStaged);
+            foreach (int sobrante in fotosSobrantes)
+            {
+                _photoStorage.QueueDelete(_photoStorage.GetFileName(relno, sobrante));
+            }
 
             try
             {
@@ -394,7 +525,8 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
         string timeStr,
         string observaciones,
         IEnumerable<string>? destinatariosOverride = null,
-        bool incluirEnlaceFotos = true)
+        bool incluirEnlaceFotos = true,
+        bool exigirEnlace = false)
     {
         var enviados = new List<SalidaNotificacionEnviada>();
         var rel = await GetDetalleRawAsync(conn, relno, sufijo);
@@ -431,17 +563,28 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
         string bloqueFotos = string.Empty;
         if (incluirEnlaceFotos)
         {
-            var enlaceFotos = await _casetaShareService.GenerarLinkSalidaAsync(relno, usuario);
-            if (enlaceFotos.HasValue)
+            // Si el enlace falla, las notificaciones salen sin el bloque de fotos: el error queda en el log, pero a los
+            // contactos del cliente les llega el aviso de la salida.
+            try
             {
-                string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
-                if (baseUrl.Length == 0)
+                var enlaceFotos = await _casetaShareService.GenerarLinkSalidaAsync(relno, usuario);
+                if (enlaceFotos.HasValue)
                 {
-                    throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de salida.");
-                }
+                    string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
+                    if (baseUrl.Length == 0)
+                    {
+                        throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de salida.");
+                    }
 
-                string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
-                bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoSalida, enlaceFotos.Value.Expira);
+                    string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
+                    bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoSalida, enlaceFotos.Value.Expira);
+                }
+            }
+            catch (Exception ex)
+            {
+                // El reenvio manual pide el enlace a proposito: ahi es mejor no mandar nada que mandarlo sin el.
+                if (exigirEnlace) throw;
+                _logger.LogError(ex, "Notificacion de salida de {Relno}: no se pudo crear el enlace de fotos; los correos salen sin el.", relno);
             }
         }
 
@@ -458,8 +601,12 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
                     new List<IGrouping<string, TraficoNotiRow>> { grupo });
                 if (bloqueFotos.Length > 0) body = CasetaShareHtmlRenderer.InsertarEnCorreo(body, bloqueFotos);
 
+                // preferirCola: el correo se guarda en la cola durable y la confirmacion de la salida no espera al SMTP
+                // (con varios clientes eran varios envios seguidos mientras el guardia miraba el spinner). Sin cola
+                // activa, como en el reenvio manual de linea de comandos, se manda directo como siempre.
                 exito = await _smtp.EnviarAsync(aQuien, subject, body,
-                    incluirCopiasOcultasAutomaticas: destinatariosOverride == null);
+                    incluirCopiasOcultasAutomaticas: destinatariosOverride == null,
+                    preferirCola: true);
             }
             catch (Exception ex)
             {
@@ -506,7 +653,8 @@ VALUES (@nlineno, @creferencia, 101, 'jpg', @usucrea, @fcrea)",
 
         var enviados = await NotiSalidaCasetaAsync(
             conn, limpio, sufijo, registro.Usuario, registro.SalidaCaseta.Value.ToString("yyyy-MM-dd HH:mm:ss"),
-            observaciones.Trim(), soloValidacion ? new[] { CorreoPruebasDesarrollo } : null, incluirEnlaceFotos);
+            observaciones.Trim(), soloValidacion ? new[] { CorreoPruebasDesarrollo } : null, incluirEnlaceFotos,
+            exigirEnlace: incluirEnlaceFotos);
 
         if (enviados.Count == 0)
             return (false, "No hay a quién notificar: la relación no tiene tráficos (o todos son PIPA).");
@@ -913,7 +1061,17 @@ LIMIT 1", new { casetaId });
 
         datos.Planta = FirstNonEmpty(await ObtenerPlantaUsuarioSeguroAsync(datos.Usucrea, ct), datos.Planta);
         if (!datos.EsPreRegistro)
+        {
             datos.EsPreRegistro = await TienePreregistroVigenteAsync(datosF, ct);
+            if (datos.EsPreRegistro)
+            {
+                // Es la razon mas comun de «el correo no llego»: queda escrita para poder contestar por que.
+                _logger.LogWarning(
+                    "Entrada de caseta (unidad={Unidad}, placas={Placas}, tipo={Tipo}): coincide con un pre-registro VIGENTE, " +
+                    "asi que su correo operativo se desvia a {Destino}.",
+                    datosF.NoCamion, datosF.Placas, datosF.TipoRegistro, CorreoPruebasDesarrollo);
+            }
+        }
 
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
@@ -980,7 +1138,13 @@ LIMIT 1", new { casetaId });
             // conservan el comportamiento anterior.
             if (!datosF.DiferirCorreo)
             {
-                EncolarCorreoEntradaCaseta(datos, listaFotos);
+                await EncolarCorreoEntradaCasetaAsync(datos, listaFotos);
+            }
+            else
+            {
+                // El aviso espera a las fotos, pero ya no depende solo de la tableta: sale cuando lleguen las anunciadas,
+                // cuando la tableta mande el ultimo lote, o por respaldo si la sincronizacion se queda a medias.
+                _diferido.Registrar(datos.CasetaId, datos.Actualizado, usuarioActual, datosF.IndicesFotosEsperadas);
             }
 
             await NotificarMovimientoCasetaAsync("ENTRADA", datos.CasetaId, usuarioActual, ct);
@@ -1109,49 +1273,7 @@ LIMIT 1", new { casetaId });
 
         try
         {
-            CasetaEntradaRegistro? caseta = await conn.QueryFirstOrDefaultAsync<CasetaEntradaRegistro>(new CommandDefinition(@"
-SELECT
-    idcaseta AS IdCaseta,
-    casetaid AS CasetaId,
-    idbodega AS IdBodega,
-    bodega AS Bodega,
-    tipoop AS TipoOp,
-    tipomov AS TipoMov,
-    tiporegistro AS TipoRegistro,
-    iduni AS IdUnidad,
-    tipouni AS Tipouni,
-    nunidad AS NumUnidad,
-    idtransporu AS IdTransporteTractor,
-    transporu AS Transpor,
-    nequipo AS Nequipo,
-    idtranspore AS IdTransporteCaja,
-    transpore AS Transporte,
-    idpais AS IdPais,
-    pais AS Pais,
-    placas AS Placas,
-    sellos AS Sellos,
-    operador AS Operador,
-    cclienteid AS IdCliente,
-    COALESCE((SELECT cnombre FROM clientes WHERE cclienteid = cidcte LIMIT 1), '') AS NombreCliente,
-    obs_entrada AS Observaciones,
-    temperatura AS Temperatura,
-    cpedimento AS Pedimento,
-    cant_guia AS Guias,
-    combustible AS Combustible,
-    planta AS Planta,
-    COALESCE(caseta.usumodi, caseta.usucrea, @usuario) AS Usucrea, -- con prefijo: `usuarios` tambien tiene usumodi/usucrea y sin el la subconsulta de abajo compara contra esas
-    COALESCE(
-        (SELECT CONCAT(TRIM(u.nombre), ' ', TRIM(u.apaterno))
-         FROM usuarios u
-         WHERE u.claveusuario = COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
-         LIMIT 1),
-        COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
-    ) AS NombreUsuario,
-    fcrea AS Fcrea,
-    COALESCE(fmodi, fcrea) AS Fmodi
-FROM caseta
-WHERE casetaid = @casetaId
-LIMIT 1", new { casetaId = cleanCasetaId, usuario = usuarioActual }, tx, cancellationToken: ct));
+            CasetaEntradaRegistro? caseta = await CargarRegistroEntradaAsync(conn, cleanCasetaId, usuarioActual, tx, ct);
 
             if (caseta == null)
             {
@@ -1206,26 +1328,53 @@ VALUES (@indice, @casetaId, 106, 'jpg', @usuario, @ahora)",
             tx.Commit();
             _photoStorage.ActivateStagedPhotos(staged);
 
-            if (request.Finalizar)
+            // La sincronizacion sigue avanzando: el respaldo espera un poco mas antes de avisar sin todas las fotos.
+            _diferido.RegistrarActividad(cleanCasetaId);
+
+            PendienteCorreoEntrada? pendiente = _diferido.Leer(cleanCasetaId);
+            bool completas = pendiente != null && CorreoEntradaDiferido.Completas(pendiente.IndicesEsperados, existingIndexes);
+            MotivoCorreoDiferido motivo = CorreoEntradaDiferido.Decidir(
+                hayPendiente: pendiente != null,
+                finalizar: request.Finalizar,
+                fotosCompletas: completas,
+                yaAvisado: _diferido.YaAvisado(cleanCasetaId));
+
+            bool correoEnProceso = false;
+            if (motivo != MotivoCorreoDiferido.Ninguno)
             {
-                caseta.Actualizado = request.Actualizado;
-                caseta.CasetaId = cleanCasetaId;
-                var photoInfo = await LeerFotosEntradaCasetaAsync(conn, cleanCasetaId, incluirBase64: false);
-                var emailPhotos = photoInfo.Info
-                    .Select(photo => new CasetaEntradaFoto
+                // Solo uno se queda con el derecho de avisar (este lote o el respaldo); el otro no manda nada.
+                PendienteCorreoEntrada? tomado = pendiente != null ? _diferido.Reclamar(cleanCasetaId) : null;
+                if (pendiente == null || tomado != null)
+                {
+                    // La verdad de si es una actualizacion la dejo anotada el guardado, no la bandera de este lote.
+                    caseta.Actualizado = tomado?.Actualizado ?? request.Actualizado;
+                    caseta.CasetaId = cleanCasetaId;
+                    var photoInfo = await LeerFotosEntradaCasetaAsync(conn, cleanCasetaId, incluirBase64: false);
+                    var emailPhotos = photoInfo.Info
+                        .Select(photo => new CasetaEntradaFoto
+                        {
+                            Indice = photo.Indice,
+                            NombreArchivo = photo.NombreArchivo,
+                            TipoEtiqueta = "normal"
+                        })
+                        .ToList();
+
+                    correoEnProceso = await EncolarCorreoEntradaCasetaAsync(caseta, emailPhotos);
+                    PendienteCorreoEntrada anotado = tomado ?? new PendienteCorreoEntrada
                     {
-                        Indice = photo.Indice,
-                        NombreArchivo = photo.NombreArchivo,
-                        TipoEtiqueta = "normal"
-                    })
-                    .ToList();
-                EncolarCorreoEntradaCaseta(caseta, emailPhotos);
+                        CasetaId = cleanCasetaId,
+                        Actualizado = caseta.Actualizado,
+                        Registrado = DateTime.Now
+                    };
+                    if (correoEnProceso) _diferido.MarcarAvisado(anotado, motivo);
+                    else if (tomado != null) _diferido.Devolver(tomado, "el correo no se pudo armar ni encolar al llegar las fotos");
+                }
             }
 
             return new CasetaEntradaFotosResult
             {
                 Success = true,
-                Message = request.Finalizar
+                Message = correoEnProceso
                     ? "Fotos guardadas y correo en proceso."
                     : "Fotos guardadas correctamente.",
                 FotosGuardadas = decoded.Count
@@ -1245,52 +1394,131 @@ VALUES (@indice, @casetaId, 106, 'jpg', @usuario, @ahora)",
         }
     }
 
-    private static string NormalizeCasetaId(string? casetaId)
-    {
-        string value = (casetaId ?? string.Empty).Trim();
-        if (value.Length == 0) return value;
+    // Puede venir doblemente codificado si el valor pasó por dos capas de URL antes de llegar al controlador.
+    private static string NormalizeCasetaId(string? casetaId) => CasetaFolio.Normalizar(casetaId);
 
-        // Puede venir doblemente codificado si el valor pasó por dos capas de
-        // URL antes de llegar al controlador. Se limita a dos vueltas para no
-        // alterar caracteres literales que formen parte del folio.
-        for (int i = 0; i < 2; i++)
+    /// <summary>
+    /// Deja el correo de la entrada guardado en la cola durable ANTES de responder a la tableta: desde ese momento el
+    /// envío ya no depende de que el API siga vivo ni de que el SMTP conteste a la primera. Nunca lanza: la entrada ya
+    /// está guardada y un fallo del correo no debe deshacerla.
+    /// </summary>
+    private async Task<bool> EncolarCorreoEntradaCasetaAsync(CasetaEntradaRegistro datos, List<CasetaEntradaFoto> fotos)
+    {
+        try
         {
-            string decoded = Uri.UnescapeDataString(value);
-            if (decoded == value) break;
-            value = decoded;
+            MimeMessage? mensaje = await ConstruirCorreoEntradaCasetaAsync(datos, fotos, CancellationToken.None);
+            if (mensaje == null)
+            {
+                _logger.LogError("Correo de entrada de caseta {CasetaId} NO se armó (sin destinatarios o error); la entrada sí quedó guardada.", datos.CasetaId);
+                return false;
+            }
+
+            if (_cola.Activa && await _cola.EncolarAsync(mensaje, "entrada-caseta", datos.CasetaId))
+            {
+                return true;
+            }
+
+            // Sin cola (o sin poder escribir en disco) se manda directo en segundo plano, como antes.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _transporte.EnviarAsync(mensaje, CancellationToken.None);
+                    _logger.LogInformation("Correo de entrada de caseta {CasetaId} enviado directo.", datos.CasetaId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Registro de entrada caseta {CasetaId} guardado, pero el correo no se pudo enviar ni encolar.", datos.CasetaId);
+                }
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error no controlado preparando el correo de entrada caseta {CasetaId}.", datos.CasetaId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Lo llama el respaldo cuando una entrada con fotos nuevas no terminó de sincronizar a tiempo: arma el aviso con las
+    /// fotos que SÍ llegaron (el enlace las muestra todas, también las que lleguen después) y lo deja en la cola de correo.
+    /// </summary>
+    public async Task<bool> EnviarCorreoEntradaDiferidoAsync(PendienteCorreoEntrada pendiente, CancellationToken ct)
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        CasetaEntradaRegistro? registro = await CargarRegistroEntradaAsync(conn, pendiente.CasetaId, pendiente.Usuario, null, ct);
+        if (registro == null)
+        {
+            // Se borró el folio antes del aviso: no hay nada que mandar y reintentar no lo va a cambiar.
+            _logger.LogWarning("Respaldo de correo: el folio {CasetaId} ya no existe; se descarta el aviso.", pendiente.CasetaId);
+            return true;
         }
 
-        return value.Trim();
+        var photoInfo = await LeerFotosEntradaCasetaAsync(conn, pendiente.CasetaId, incluirBase64: false);
+        var fotos = photoInfo.Info
+            .Select(photo => new CasetaEntradaFoto
+            {
+                Indice = photo.Indice,
+                NombreArchivo = photo.NombreArchivo,
+                TipoEtiqueta = "normal"
+            })
+            .ToList();
+
+        registro.CasetaId = pendiente.CasetaId;
+        registro.Actualizado = pendiente.Actualizado;
+        _logger.LogWarning(
+            "Respaldo de correo: la tableta no termino de subir las fotos de {CasetaId} ({Presentes} de {Esperadas} anunciadas); el aviso sale con las que hay.",
+            pendiente.CasetaId, fotos.Count, pendiente.IndicesEsperados.Count);
+        return await EncolarCorreoEntradaCasetaAsync(registro, fotos);
     }
 
-    private void EncolarCorreoEntradaCaseta(CasetaEntradaRegistro datos, List<CasetaEntradaFoto> fotos)
-    {
-        var fotosCorreo = fotos
-        .Select(f => new CasetaEntradaFoto
-        {
-            BytesFoto = f.BytesFoto.ToArray(),
-            NombreArchivo = f.NombreArchivo,
-            TipoEtiqueta = f.TipoEtiqueta,
-            Indice = f.Indice
-        })
-        .ToList();
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                bool correoEnviado = await EnviarCorreoEntradaCasetaAsync(datos, fotosCorreo, CancellationToken.None);
-                if (!correoEnviado)
-                {
-                    _logger.LogWarning("Registro de entrada caseta {CasetaId} guardado, pero el correo no se pudo enviar.", datos.CasetaId);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error no controlado enviando correo de entrada caseta {CasetaId} en segundo plano.", datos.CasetaId);
-            }
-        });
-    }
+    /// <summary>El registro de caseta con lo que necesita el correo de entrada. Un solo lugar para las tres vias que lo mandan.</summary>
+    private static Task<CasetaEntradaRegistro?> CargarRegistroEntradaAsync(
+        IDbConnection conn, string casetaId, string usuario, IDbTransaction? tx, CancellationToken ct) =>
+        conn.QueryFirstOrDefaultAsync<CasetaEntradaRegistro>(new CommandDefinition(@"
+SELECT
+    idcaseta AS IdCaseta,
+    casetaid AS CasetaId,
+    idbodega AS IdBodega,
+    bodega AS Bodega,
+    tipoop AS TipoOp,
+    tipomov AS TipoMov,
+    tiporegistro AS TipoRegistro,
+    iduni AS IdUnidad,
+    tipouni AS Tipouni,
+    nunidad AS NumUnidad,
+    idtransporu AS IdTransporteTractor,
+    transporu AS Transpor,
+    nequipo AS Nequipo,
+    idtranspore AS IdTransporteCaja,
+    transpore AS Transporte,
+    idpais AS IdPais,
+    pais AS Pais,
+    placas AS Placas,
+    sellos AS Sellos,
+    operador AS Operador,
+    cclienteid AS IdCliente,
+    COALESCE((SELECT cnombre FROM clientes WHERE cclienteid = cidcte LIMIT 1), '') AS NombreCliente,
+    obs_entrada AS Observaciones,
+    temperatura AS Temperatura,
+    cpedimento AS Pedimento,
+    cant_guia AS Guias,
+    combustible AS Combustible,
+    planta AS Planta,
+    COALESCE(caseta.usumodi, caseta.usucrea, @usuario) AS Usucrea, -- con prefijo: `usuarios` tambien tiene usumodi/usucrea y sin el la subconsulta de abajo compara contra esas
+    COALESCE(
+        (SELECT CONCAT(TRIM(u.nombre), ' ', TRIM(u.apaterno))
+         FROM usuarios u
+         WHERE u.claveusuario = COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
+         LIMIT 1),
+        COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
+    ) AS NombreUsuario,
+    fcrea AS Fcrea,
+    COALESCE(fmodi, fcrea) AS Fmodi
+FROM caseta
+WHERE casetaid = @casetaId
+LIMIT 1", new { casetaId, usuario }, tx, cancellationToken: ct))!;
 
     public async Task<List<CasetaEntradaBusquedaItem>> BuscarEntradasCasetaAsync(
  string termino,
@@ -2577,13 +2805,52 @@ ORDER BY nlineno", new { casetaId }))
         return match.Success && int.TryParse(match.Groups[1].Value, out int value) ? value : 0;
     }
 
+    /// <summary>
+    /// Envío DIRECTO del correo de entrada, sin cola: lo usan el reenvío manual y los modos admin de línea de comandos,
+    /// donde quien lo pide necesita ver en pantalla si salió o no.
+    /// </summary>
     private async Task<bool> EnviarCorreoEntradaCasetaAsync(
    CasetaEntradaRegistro datos,
    List<CasetaEntradaFoto> fotos,
    CancellationToken ct,
-   IEnumerable<string>? destinatariosOverride = null)
+   IEnumerable<string>? destinatariosOverride = null,
+   bool incluirCopias = true,
+   bool exigirEnlace = false)
     {
         try
+        {
+            MimeMessage? msg = await ConstruirCorreoEntradaCasetaAsync(datos, fotos, ct, destinatariosOverride, incluirCopias, exigirEnlace);
+            if (msg == null) return false;
+
+            await _transporte.EnviarAsync(msg, ct);
+            _logger.LogInformation(
+                "Correo de entrada de caseta enviado. CasetaId={CasetaId}, Para={To}, Cc={Cc}, Fotos={Fotos}",
+                datos.CasetaId,
+                string.Join(", ", msg.To.Mailboxes.Select(x => x.Address)),
+                string.Join(", ", msg.Cc.Mailboxes.Select(x => x.Address)),
+                fotos.Count);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error enviando correo de entrada caseta {CasetaId}", datos.CasetaId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Arma el mensaje completo del correo de entrada (destinatarios, asunto, cuerpo y enlace de fotos) sin mandarlo.
+    /// Devuelve null cuando no hay a quién mandárselo. [incluirCopias]=false deja fuera a Calidad y a Desarrollo: es lo
+    /// que usa la validación, que no debe copiar a nadie más que a la casilla de pruebas.
+    /// </summary>
+    private async Task<MimeMessage?> ConstruirCorreoEntradaCasetaAsync(
+   CasetaEntradaRegistro datos,
+   List<CasetaEntradaFoto> fotos,
+   CancellationToken ct,
+   IEnumerable<string>? destinatariosOverride = null,
+   bool incluirCopias = true,
+   bool exigirEnlace = false)
+    {
         {
             var msg = new MimeMessage();
             string from = _config["CasetaEntrada:SmtpFrom"] ?? _config["Smtp:User"] ?? "postmaster@mg.imexnotify.com";
@@ -2632,7 +2899,7 @@ ORDER BY nlineno", new { casetaId }))
             foreach (string destinatario in destinatarios)
                 AddMailbox(msg.To, destinatario);
 
-            if (!datos.EsPreRegistro)
+            if (!datos.EsPreRegistro && incluirCopias)
             {
                 AddMailbox(msg.Cc, CorreoCalidad);
                 AddMailbox(msg.Cc, CorreoPruebasDesarrollo);
@@ -2642,7 +2909,7 @@ ORDER BY nlineno", new { casetaId }))
             if (msg.To.Count == 0)
             {
                 _logger.LogWarning("Entrada caseta sin destinatarios");
-                return false;
+                return null;
             }
 
             string prefix = datos.Actualizado ? "[ACTUALIZACIÓN] " : "";
@@ -2656,62 +2923,39 @@ ORDER BY nlineno", new { casetaId }))
             string htmlBody = esTractocamion
                 ? BuildEntradaCasetaTractocamionEmailBody(datos, bodegaMail)
                 : BuildEntradaCasetaEmailBody(datos, bodegaMail);
-            var enlaceFotos = await _casetaShareService.GenerarLinkEntradaAsync(datos.CasetaId, datos.Usucrea);
-            if (enlaceFotos.HasValue)
+            // Un fallo con el enlace de fotos (tabla, URL base, etc.) NO puede tirar el aviso entero: el correo sale sin
+            // el bloque de fotos y el error queda en el log. Antes la excepción se tragaba la notificación completa.
+            try
             {
-                string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
-                if (baseUrl.Length == 0)
+                var enlaceFotos = await _casetaShareService.GenerarLinkEntradaAsync(datos.CasetaId, datos.Usucrea);
+                if (enlaceFotos.HasValue)
                 {
-                    throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de entrada.");
-                }
+                    string baseUrl = (_config["PublicLinks:ApiBaseUrl"] ?? string.Empty).TrimEnd('/');
+                    if (baseUrl.Length == 0)
+                    {
+                        throw new InvalidOperationException("Falta configurar PublicLinks:ApiBaseUrl para compartir las fotos de entrada.");
+                    }
 
-                string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
-                string bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoEntrada, enlaceFotos.Value.Expira);
-                htmlBody = CasetaShareHtmlRenderer.InsertarEnCorreo(htmlBody, bloqueFotos);
+                    string url = $"{baseUrl}/api/publico/caseta/{enlaceFotos.Value.Token}";
+                    string bloqueFotos = CasetaShareHtmlRenderer.RenderEmailLink(url, CasetaShareService.TipoEntrada, enlaceFotos.Value.Expira);
+                    htmlBody = CasetaShareHtmlRenderer.InsertarEnCorreo(htmlBody, bloqueFotos);
+                }
+                else if (fotos.Count > 0)
+                {
+                    throw new InvalidOperationException("No se pudo crear el enlace de las fotos de entrada.");
+                }
             }
-            else if (fotos.Count > 0)
+            catch (Exception ex)
             {
-                throw new InvalidOperationException("No se pudo crear el enlace de las fotos de entrada.");
+                // El reenvío manual pide el enlace a propósito: ahí es mejor no mandar nada que mandarlo sin él.
+                if (exigirEnlace) throw;
+                _logger.LogError(ex, "Correo de entrada de caseta {CasetaId}: no se pudo crear el enlace de fotos; el aviso sale sin él.", datos.CasetaId);
             }
 
             var builder = new BodyBuilder { HtmlBody = htmlBody };
 
             msg.Body = builder.ToMessageBody();
-
-            string host = _config["Smtp:Host"] ?? "smtp.mailgun.org";
-            string portStr = _config["Smtp:Port"] ?? "587";
-            string user = _config["Smtp:User"] ?? "";
-            string pass = _config["Smtp:Password"] ?? "";
-            int.TryParse(portStr, out int port);
-            if (port <= 0) port = 587;
-
-            using var client = new MailKit.Net.Smtp.SmtpClient();
-            client.Timeout = 10000;
-
-            SecureSocketOptions secureOption = SecureSocketOptions.Auto;
-            if (_config["Smtp:UseSsl"] == "true") secureOption = SecureSocketOptions.SslOnConnect;
-            else if (_config["Smtp:UseStartTls"] != "false") secureOption = SecureSocketOptions.StartTls;
-
-            await client.ConnectAsync(host, port, secureOption, ct);
-            if (!string.IsNullOrWhiteSpace(user))
-            {
-                await client.AuthenticateAsync(user, pass, ct);
-            }
-
-            await client.SendAsync(msg, ct);
-            await client.DisconnectAsync(true, ct);
-            _logger.LogInformation(
-                "Correo de entrada de caseta enviado. CasetaId={CasetaId}, Para={To}, Cc={Cc}, Fotos={Fotos}",
-                datos.CasetaId,
-                string.Join(", ", msg.To.Mailboxes.Select(x => x.Address)),
-                string.Join(", ", msg.Cc.Mailboxes.Select(x => x.Address)),
-                fotos.Count);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error enviando correo de entrada caseta {CasetaId}", datos.CasetaId);
-            return false;
+            return msg;
         }
     }
 
@@ -2744,6 +2988,10 @@ ORDER BY nlineno", new { casetaId }))
         CasetaEntradaGuardarRequest entrada,
         CancellationToken ct)
     {
+        // Una entrada con caja nunca es el arribo de un pre-registro (que es de tractocamion sin caja): ver ArriboPreregistro.
+        if (!ArriboPreregistro.PuedeCoincidirPorUnidad(entrada.TipoRegistro))
+            return false;
+
         string nunidad = (entrada.NoCamion ?? string.Empty).Trim();
         string placas = (entrada.Placas ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(nunidad) && string.IsNullOrWhiteSpace(placas))
@@ -2829,55 +3077,14 @@ LIMIT 5", new { nequipo = clean }, cancellationToken: ct));
     public async Task<(bool Success, string Mensaje)> ReenviarCorreoEntradaAsync(
         string casetaId, bool soloValidacion, string usuarioActual, CancellationToken ct)
     {
-        string cleanCasetaId = (casetaId ?? "").Trim();
+        // Por la ruta llega como "E-020485%2F26": se normaliza igual que en las fotos y la actualización.
+        string cleanCasetaId = NormalizeCasetaId(casetaId);
         if (string.IsNullOrWhiteSpace(cleanCasetaId))
             return (false, "CasetaId es obligatorio.");
 
         using IDbConnection conn = _db.CreateConnection();
 
-        CasetaEntradaRegistro? registro = await conn.QueryFirstOrDefaultAsync<CasetaEntradaRegistro>(new CommandDefinition(@"
-SELECT
-    idcaseta AS IdCaseta,
-    casetaid AS CasetaId,
-    idbodega AS IdBodega,
-    bodega AS Bodega,
-    tipoop AS TipoOp,
-    tipomov AS TipoMov,
-    tiporegistro AS TipoRegistro,
-    iduni AS IdUnidad,
-    tipouni AS Tipouni,
-    nunidad AS NumUnidad,
-    idtransporu AS IdTransporteTractor,
-    transporu AS Transpor,
-    nequipo AS Nequipo,
-    idtranspore AS IdTransporteCaja,
-    transpore AS Transporte,
-    idpais AS IdPais,
-    pais AS Pais,
-    placas AS Placas,
-    sellos AS Sellos,
-    operador AS Operador,
-    cclienteid AS IdCliente,
-    COALESCE((SELECT cnombre FROM clientes WHERE cclienteid = cidcte LIMIT 1), '') AS NombreCliente,
-    obs_entrada AS Observaciones,
-    temperatura AS Temperatura,
-    cpedimento AS Pedimento,
-    cant_guia AS Guias,
-    combustible AS Combustible,
-    planta AS Planta,
-    COALESCE(caseta.usumodi, caseta.usucrea, @usuario) AS Usucrea, -- con prefijo: `usuarios` tambien tiene usumodi/usucrea y sin el la subconsulta de abajo compara contra esas
-    COALESCE(
-        (SELECT CONCAT(TRIM(u.nombre), ' ', TRIM(u.apaterno))
-         FROM usuarios u
-         WHERE u.claveusuario = COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
-         LIMIT 1),
-        COALESCE(caseta.usumodi, caseta.usucrea, @usuario)
-    ) AS NombreUsuario,
-    fcrea AS Fcrea,
-    COALESCE(fmodi, fcrea) AS Fmodi
-FROM caseta
-WHERE casetaid = @casetaId
-LIMIT 1", new { casetaId = cleanCasetaId, usuario = usuarioActual }, cancellationToken: ct));
+        CasetaEntradaRegistro? registro = await CargarRegistroEntradaAsync(conn, cleanCasetaId, usuarioActual, null, ct);
 
         if (registro == null)
             return (false, $"No existe ningún registro de caseta con folio '{cleanCasetaId}'.");
@@ -2896,7 +3103,8 @@ LIMIT 1", new { casetaId = cleanCasetaId, usuario = usuarioActual }, cancellatio
             ? new[] { CorreoPruebasDesarrollo }
             : GetEntradaCasetaRecipients(registro);
 
-        bool enviado = await EnviarCorreoEntradaCasetaAsync(registro, fotos, ct, destinatarios);
+        // La validación va solo a la casilla de pruebas: sin la copia a Calidad y Desarrollo que lleva el envío real.
+        bool enviado = await EnviarCorreoEntradaCasetaAsync(registro, fotos, ct, destinatarios, incluirCopias: !soloValidacion, exigirEnlace: true);
 
         string resumenDestinatarios = string.Join(", ", destinatarios);
         return enviado

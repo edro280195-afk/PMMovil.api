@@ -111,7 +111,7 @@ public class NotificationsController : ControllerBase
     {
         try
         {
-            var result = await _notifications.RemoveFcmTokenAsync(request.Token);
+            var result = await _notifications.RemoveFcmTokenAsync(ObtenerUsuario(), request.Token);
             return Ok(result);
         }
         catch (Exception ex)

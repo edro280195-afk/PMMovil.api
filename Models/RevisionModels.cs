@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace PMMovil.Api.Models
@@ -21,6 +22,21 @@ namespace PMMovil.Api.Models
         public int? AsignPrioridad { get; set; }
         public bool? EsAsignada { get; set; }
         public int? IdAsignacion { get; set; }
+    }
+
+    /// <summary>Una coincidencia de la búsqueda rápida: la entrada con su estado real y si salió por tolerancia a un error de tecleo.</summary>
+    public class EntradaBusquedaHit
+    {
+        public EntradaPendiente Item { get; set; } = new();
+        public bool Aproximada { get; set; }
+    }
+
+    /// <summary>Respuesta de <c>GET Revision/buscar-rapido</c>: las mejores coincidencias y cuántas hubo en total.</summary>
+    public class BusquedaRapidaResultado
+    {
+        public List<EntradaBusquedaHit> Hits { get; set; } = new();
+        public int Total { get; set; }
+        public bool Tolerante { get; set; }
     }
 
     public class FacturaRevision

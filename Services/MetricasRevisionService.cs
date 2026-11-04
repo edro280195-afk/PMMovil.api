@@ -121,6 +121,7 @@ public class MetricasRevisionService
         bool requireInvoice = false,
         bool includeActiveReviews = false,
         CancellationToken cancellationToken = default)
+
     {
         string plantaWhere = planta switch
         {
@@ -129,9 +130,7 @@ public class MetricasRevisionService
             _ => ""
         };
         string clienteWhere = string.IsNullOrWhiteSpace(cliente) ? "" : " AND cl.cnombre LIKE @clienteLike";
-        // El nombre "canónico" (ver comentario junto al SELECT) es el mismo
-        // que se compara aquí, para que filtrar por revisor no dependa de si
-        // esa fila trae el usuario de traftiemposrevision o el de fact.
+
         string revisorWhere = string.IsNullOrWhiteSpace(revisor) ? "" : " AND COALESCE(NULLIF(TRIM(CONCAT(TRIM(ur.nombre), ' ', TRIM(ur.apaterno))), ''), tr.usuarioActivo, tr.usurevisa, fact.usurev) = @revisor";
         const string effectiveReviewStart = @"COALESCE(
                     CASE WHEN YEAR(tr.finiciorevision) >= 2000 THEN tr.finiciorevision END,
@@ -669,6 +668,7 @@ public class MetricasRevisionService
             FROM usuarios
             WHERE TRIM(claveusuario) IN @reviewers";
 
+
         IEnumerable<ImexReviewerDirectoryRow> rows = await conn.QueryAsync<ImexReviewerDirectoryRow>(
             new CommandDefinition(sql, new { reviewers = keys }, cancellationToken: cancellationToken));
 
@@ -946,18 +946,11 @@ public class MetricasRevisionService
     {
         using IDbConnection conn = _db.CreateConnection();
 
-        // Rango principal (el que el usuario eligió en el filtro de fecha).
         List<MetricaRevisionRow> filasRango = await ObtenerFilasAsync(conn, fechaInicio, fechaFin, planta, cliente, revisor);
         List<FilaDerivada> todasRango = filasRango.Select(Derivar).ToList();
         int pipaExcluidas = todasRango.Count(f => f.EsPipa);
         List<FilaDerivada> derivadasRango = AplicarOrigenYCrossFilter(SinPipa(todasRango), origen, crossFilter).ToList();
 
-        // Ventana rodante de 14 días para tendencia/adopción — independiente
-        // del rango elegido, pero con los MISMOS filtros de planta/cliente/
-        // revisor/origen/cross-filter, para que "seleccionar algo en un
-        // gráfico filtre a los demás" (pedido explícito de Eduardo, estilo
-        // Power BI) también alcance a estas dos gráficas.
-        // hoyReferencia solo lo usan las pruebas (BD local con datos viejos); el controller nunca lo manda.
         DateTime hoy = (hoyReferencia ?? DateTime.Today).Date;
         DateTime desde14 = hoy.AddDays(-13);
         List<MetricaRevisionRow> filas14 = await ObtenerFilasAsync(conn, desde14, hoy, planta, cliente, revisor);

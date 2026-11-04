@@ -13,7 +13,7 @@ public interface IRealtimeNotificationService
     // FCM -- un solo canal para Android nativo y navegador (Web Push vía Firebase).
     bool IsFcmConfigured { get; }
     Task<PushSubscriptionResult> SaveFcmTokenAsync(string usuario, FcmTokenRequest request);
-    Task<PushSubscriptionResult> RemoveFcmTokenAsync(string token);
+    Task<PushSubscriptionResult> RemoveFcmTokenAsync(string usuario, string token);
 
     /// <summary>
     /// Manda una notificación a TODOS los dispositivos/navegadores activos de
@@ -23,9 +23,8 @@ public interface IRealtimeNotificationService
     Task SendToUserAsync(string usuario, string title, string body, IDictionary<string, string>? data = null);
 
     /// <summary>
-    /// Entrega una notificación de asignación por push si el usuario tiene una
-    /// sesión activa en algún dispositivo; de lo contrario la conserva en la
-    /// bandeja persistente para mostrarla en el siguiente inicio de sesión.
+    /// Conserva cada aviso en la bandeja y además intenta enviarlo por push a
+    /// los dispositivos con sesión activa.
     /// </summary>
     Task<NotificationDeliveryResult> SendToUserOrInboxAsync(
         string usuario,

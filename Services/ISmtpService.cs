@@ -17,5 +17,6 @@ public interface ISmtpService
         IEnumerable<string>? copias = null,
         IEnumerable<string>? copiasOcultas = null,
         bool incluirCopiasOcultasAutomaticas = true,
-        CancellationToken ct = default(CancellationToken));
+        CancellationToken ct = default(CancellationToken),
+        bool preferirCola = false);
 }

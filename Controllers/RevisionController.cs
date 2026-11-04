@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
+
+using Dapper;
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -27,6 +30,7 @@ public class RevisionController : ControllerBase
     private readonly RevisionReportPdfService _reportPdfService;
     private readonly IReportShareService _reportShareService;
     private readonly IRevisionShareService _revisionShareService;
+    private readonly IRealtimeNotificationService _notifications;
 
     public RevisionController(
         RevisionService revisionService,
@@ -34,7 +38,8 @@ public class RevisionController : ControllerBase
         BaseRepository db,
         RevisionReportPdfService reportPdfService,
         IReportShareService reportShareService,
-        IRevisionShareService revisionShareService)
+        IRevisionShareService revisionShareService,
+        IRealtimeNotificationService notifications)
     {
         _revisionService = revisionService;
         _logger = logger;
@@ -42,6 +47,7 @@ public class RevisionController : ControllerBase
         _reportPdfService = reportPdfService;
         _reportShareService = reportShareService;
         _revisionShareService = revisionShareService;
+        _notifications = notifications;
     }
 
     [HttpGet("server-time")]
@@ -187,6 +193,49 @@ public class RevisionController : ControllerBase
         catch (Exception exception)
         {
             _logger.LogError(exception, "Error en BuscarPorCrefAgrupada({Cref})", crefAgrupada);
+            return StatusCode(500, new
+            {
+                success = false,
+                message = "Error interno del servidor"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Búsqueda para la pantalla de Revisión: escribe unos dígitos de la entrada o parte del cliente y devuelve las
+    /// mejores coincidencias (8 por omisión) con su estado real. Con menos de 3 caracteres útiles no busca.
+    /// </summary>
+    [HttpGet("buscar-rapido")]
+    public async Task<IActionResult> BuscarRapido(
+        [FromQuery(Name = "q")] string? consulta,
+        [FromQuery] int limit = EntrySearchRules.DefaultLimit,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            string texto = (consulta ?? string.Empty).Trim();
+            if (texto.Length > 60)
+            {
+                texto = texto.Substring(0, 60);
+            }
+
+            BusquedaRapidaResultado resultado = await _revisionService.BuscarRapidoAsync(texto, limit, ct);
+            return Ok(new
+            {
+                success = true,
+                hits = resultado.Hits,
+                total = resultado.Total,
+                tolerante = resultado.Tolerante
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // El equipo siguió escribiendo y abandonó la consulta anterior: no es un error del servidor.
+            return StatusCode(499);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en BuscarRapido({Consulta})", consulta);
             return StatusCode(500, new
             {
                 success = false,
@@ -665,6 +714,48 @@ public class RevisionController : ControllerBase
             {
                 return BadRequest(new { success = false, message });
             }
+
+            try
+            {
+                using var conn = _db.CreateConnection();
+                var supervisors = await conn.QueryAsync<string>(@"
+SELECT DISTINCT TRIM(claveusuario)
+FROM usuarios
+WHERE inactivo = 0
+  AND TRIM(COALESCE(claveusuario, '')) <> ''
+  AND (UPPER(TRIM(COALESCE(area, ''))) IN ('HARDWARE', 'SOFTWARE')
+       OR iddepto = @systemsDepartmentId)",
+                    new { systemsDepartmentId = ModulePermissionService.SystemsDepartmentId });
+
+                string? crefAgrupada = cnofact.StartsWith("ENTRY_", StringComparison.OrdinalIgnoreCase)
+                    ? cnofact[6..]
+                    : await conn.QueryFirstOrDefaultAsync<string>(
+                        "SELECT cref_agrupada FROM fact WHERE cnofact = @cnofact LIMIT 1",
+                        new { cnofact });
+                var data = new Dictionary<string, string>
+                {
+                    ["type"] = "solicitud_desbloqueo",
+                    ["cnofact"] = cnofact,
+                    ["solicitudId"] = id.ToString()
+                };
+                if (!string.IsNullOrWhiteSpace(crefAgrupada)) data["crefAgrupada"] = crefAgrupada;
+
+                foreach (string supervisor in supervisors.Where(name =>
+                    !name.Equals(usuario, StringComparison.OrdinalIgnoreCase)))
+                {
+                    await _notifications.SendToUserOrInboxAsync(
+                        supervisor,
+                        "Permiso de revisión solicitado",
+                        $"{usuario} solicita editar {cnofact}: {motivo}",
+                        data);
+                }
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception,
+                    "La solicitud {Id} quedó registrada, pero no se pudo avisar al centro de control.", id);
+            }
+
             return Ok(new
             {
                 success = true,

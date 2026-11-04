@@ -44,6 +44,22 @@ public class ConfirmarSalidaRequest
     public string Usuario { get; set; } = string.Empty;
     public string Observaciones { get; set; } = string.Empty;
     public List<string> FotosBase64 { get; set; } = new();
+
+    /// <summary>
+    /// Cuántas fotos de salida se subieron ANTES por lotes (<c>salida-fotos</c>). Con valor, la confirmación no recibe fotos:
+    /// comprueba que estén todas y quita las que sobren de un intento anterior. Sin valor (apps viejas) las fotos vienen
+    /// en <see cref="FotosBase64"/> como siempre.
+    /// </summary>
+    public int? TotalFotos { get; set; }
+}
+
+/// <summary>Un lote de fotos de salida (pocas por envío, para que una red lenta no deje la salida colgada).</summary>
+public class SubirFotosSalidaRequest
+{
+    /// <summary>Posición (desde 1) de la primera foto del lote dentro de las fotos de la salida.</summary>
+    public int IndiceInicial { get; set; } = 1;
+
+    public List<string> FotosBase64 { get; set; } = new();
 }
 
 public class CasetaResult
@@ -154,6 +170,13 @@ public class CasetaEntradaGuardarRequest
     /// segundo plano. En ese caso el correo se dispara al finalizar la cola.
     /// </summary>
     public bool DiferirCorreo { get; set; }
+
+    /// <summary>
+    /// Posiciones de las fotos nuevas que la app va a subir despues de guardar (con <see cref="DiferirCorreo"/>). Con
+    /// ellas el servidor sabe cuando ya llegaron todas y manda el aviso solo, sin depender de que la tableta marque el
+    /// ultimo lote. Vacio en apps anteriores: ahi decide el ultimo lote o el respaldo por tiempo.
+    /// </summary>
+    public List<int> IndicesFotosEsperadas { get; set; } = new();
     public bool RequiereImpo { get; set; }
     public string Casetaid { get; set; } = string.Empty;
     public string Idcaseta { get; set; } = string.Empty;

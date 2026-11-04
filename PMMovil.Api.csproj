@@ -19,6 +19,10 @@
     <PackageReference Include="MySqlConnector" Version="2.3.*" />
     <PackageReference Include="Dapper" Version="2.1.*" />
     <PackageReference Include="MailKit" Version="4.16.0" />
+    <!-- Mejora clásica de fotos (luz, contraste, nitidez). Las dos versiones deben ser idénticas: el runtime.win trae las
+         DLL nativas de OpenCV (~40 MB) y pide el Visual C++ 2015-2022 x64 en el servidor. -->
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
     <PackageReference Include="QuestPDF" Version="2024.10.*" />
     <PackageReference Include="Serilog.AspNetCore" Version="8.0.*" />
     <PackageReference Include="SharpCompress" Version="0.50.4" />

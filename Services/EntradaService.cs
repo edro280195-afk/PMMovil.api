@@ -26,13 +26,15 @@ public class EntradaService
     private readonly IConfiguration _config;
     private readonly IHostEnvironment _env;
     private readonly ILogger<EntradaService> _logger;
+    private readonly IFotoMejoraCola _mejora;
 
-    public EntradaService(BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger)
+    public EntradaService(BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger, IFotoMejoraCola mejora)
     {
         _db = db;
         _config = config;
         _env = env;
         _logger = logger;
+        _mejora = mejora;
     }
 
     public async Task<ConsecutivoResult> ObtenerConsecutivoAsync()
@@ -725,7 +727,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
                 for (int i = 0; i < datos.Fotos.Count; i++)
                 {
-                    string? extension = await SaveEntradaPhotoAsync(datos.Fotos[i], carpetaDoc, referencia, i + 1);
+                    string? extension = await SaveEntradaPhotoAsync(datos.Fotos[i], carpetaDoc, referencia, i + 1, mejora: _mejora);
                     if (string.IsNullOrWhiteSpace(extension)) continue;
 
                     await conn.ExecuteAsync(@"
@@ -756,7 +758,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
                 for (int i = 0; i < datos.FotosDanio.Count; i++)
                 {
-                    string? extension = await SaveEntradaPhotoAsync(datos.FotosDanio[i], carpetaDocDanio, referencia, i + 1, ntipodocto: 103);
+                    string? extension = await SaveEntradaPhotoAsync(datos.FotosDanio[i], carpetaDocDanio, referencia, i + 1, ntipodocto: 103, mejora: _mejora);
                     if (string.IsNullOrWhiteSpace(extension)) continue;
 
                     await conn.ExecuteAsync(@"
@@ -1026,7 +1028,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
             {
                 try
                 {
-                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine);
+                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine, mejora: _mejora);
                     if (string.IsNullOrWhiteSpace(ext))
                     {
                         errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
@@ -1107,7 +1109,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
             {
                 try
                 {
-                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine, ntipodocto: 103);
+                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine, ntipodocto: 103, mejora: _mejora);
                     if (string.IsNullOrWhiteSpace(ext))
                     {
                         errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
@@ -1197,7 +1199,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
         return digits.Length > 8 ? digits[4..^4] : "";
     }
 
-    private static async Task<string?> SaveEntradaPhotoAsync(string image, string targetDirectory, string creferencia, int lineNo, int ntipodocto = 100)
+    private static async Task<string?> SaveEntradaPhotoAsync(string image, string targetDirectory, string creferencia, int lineNo, int ntipodocto = 100, IFotoMejoraCola? mejora = null)
     {
         if (string.IsNullOrWhiteSpace(image))
             return null;
@@ -1234,7 +1236,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
             ntipodocto,
             lineNo,
             extension);
-        await File.WriteAllBytesAsync(Path.Combine(targetDirectory, fileName), bytes);
+        string rutaFoto = Path.Combine(targetDirectory, fileName);
+        await File.WriteAllBytesAsync(rutaFoto, bytes);
+
+        // Se responde con la original y la mejora corre después en segundo plano (la cola ignora lo que no sea JPG).
+        mejora?.Encolar(rutaFoto, ntipodocto == 103 ? "entrada-danio" : "entrada");
 
         return extension;
     }

@@ -102,14 +102,21 @@ public class AsignacionesController : ControllerBase
                     nota = (req.Nota ?? "")
                 });
             }
-            await _hub.Clients.Group("USER_" + req.Usuario).SendAsync("onRevisionAsignada", new
+            try
             {
-                idAsignacion = idAsignacion,
-                crefAgrupada = req.CrefAgrupada,
-                supervisor = supervisor,
-                prioridad = req.Prioridad,
-                nota = (req.Nota ?? "")
-            });
+                await _hub.Clients.Group("USER_" + req.Usuario).SendAsync("onRevisionAsignada", new
+                {
+                    idAsignacion = idAsignacion,
+                    crefAgrupada = req.CrefAgrupada,
+                    supervisor = supervisor,
+                    prioridad = req.Prioridad,
+                    nota = (req.Nota ?? "")
+                });
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "La asignación {Id} se guardó sin aviso en vivo.", idAsignacion);
+            }
 
             // Que un supervisor asigne la entrada a alguien YA cuenta como
             // autorización de acceso -- no debería tener que, además,
@@ -142,12 +149,17 @@ public class AsignacionesController : ControllerBase
                         new { entryId, usuario = req.Usuario, supervisor });
                 }
 
-                await _hub.Clients.Group("USER_" + req.Usuario).SendAsync("onDesbloqueoAprobado", new { cnofact = entryId, supervisor });
+                try
+                {
+                    await _hub.Clients.Group("USER_" + req.Usuario).SendAsync("onDesbloqueoAprobado", new { cnofact = entryId, supervisor });
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogWarning(exception, "La autorización de {Usuario} se guardó sin aviso en vivo.", req.Usuario);
+                }
             }
 
-            // Si existe una sesión activa, llega por FCM. Si el usuario está
-            // deslogueado o no tiene ningún dispositivo activo, se conserva
-            // en la bandeja persistente para el siguiente inicio de sesión.
+            // La bandeja conserva la asignación y FCM avisa a las sesiones activas.
             await _notifications.SendToUserOrInboxAsync(
                 req.Usuario,
                 "Revisión asignada",

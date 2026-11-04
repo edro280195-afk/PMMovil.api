@@ -1249,7 +1249,7 @@ new { relno })).ToList();
                 $"<h3 style='color:#b00020;margin:0 0 8px'>{System.Net.WebUtility.HtmlEncode(titulo)}</h3>" +
                 $"<table>{filas}</table></div>";
 
-            await _smtp.EnviarAsync(recipients, asunto.Replace("[caja]", caja), cuerpo);
+            await _smtp.EnviarAsync(recipients, asunto.Replace("[caja]", caja), cuerpo, preferirCola: true);
         }
         catch (Exception ex)
         {

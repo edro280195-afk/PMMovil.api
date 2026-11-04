@@ -431,15 +431,21 @@ public class MonitorController : ControllerBase
                 });
             }
 
-            await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
-                "onDesbloqueoAprobado",
-                new { cnofact, supervisor });
+            try
+            {
+                await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+                    "onDesbloqueoAprobado", new { cnofact, supervisor });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "El permiso {Id} se autorizó sin aviso en vivo.", idDesbloqueo);
+            }
 
             string refAutorizada = cnofact.StartsWith("ENTRY_", StringComparison.OrdinalIgnoreCase) ? cnofact[6..] : cnofact;
             string? crefParaAbrir = await ResolveCrefAgrupadaAsync(conn, cnofact);
             var dataAutorizada = new Dictionary<string, string> { ["type"] = "desbloqueo_aprobado", ["cnofact"] = cnofact };
             if (crefParaAbrir != null) dataAutorizada["crefAgrupada"] = crefParaAbrir;
-            _ = _notifications.SendToUserAsync(
+            await _notifications.SendToUserOrInboxAsync(
                 usuarioSolicita,
                 "Entrada autorizada",
                 $"{supervisor} te dio acceso a {refAutorizada}. Ya puedes continuar.",
@@ -509,15 +515,21 @@ public class MonitorController : ControllerBase
                 });
             }
 
-            await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
-                "onDesbloqueoRechazado",
-                new { cnofact, supervisor });
+            try
+            {
+                await _hub.Clients.Group("USER_" + usuarioSolicita).SendAsync(
+                    "onDesbloqueoRechazado", new { cnofact, supervisor });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "El permiso {Id} se rechazó sin aviso en vivo.", idDesbloqueo);
+            }
 
             string refRechazada = cnofact.StartsWith("ENTRY_", StringComparison.OrdinalIgnoreCase) ? cnofact[6..] : cnofact;
             string? crefRechazada = await ResolveCrefAgrupadaAsync(conn, cnofact);
             var dataRechazada = new Dictionary<string, string> { ["type"] = "desbloqueo_rechazado", ["cnofact"] = cnofact };
             if (crefRechazada != null) dataRechazada["crefAgrupada"] = crefRechazada;
-            _ = _notifications.SendToUserAsync(
+            await _notifications.SendToUserOrInboxAsync(
                 usuarioSolicita,
                 "Solicitud rechazada",
                 $"{supervisor} rechazó tu solicitud para {refRechazada}.",
@@ -712,7 +724,7 @@ public class MonitorController : ControllerBase
                 "onDesbloqueoRechazado",
                 new { cnofact, supervisor });
 
-            _ = _notifications.SendToUserAsync(
+            await _notifications.SendToUserOrInboxAsync(
                 usuarioSolicita,
                 "Permiso retirado",
                 $"{supervisor} retiró tu permiso de edición para {cnofact}.",

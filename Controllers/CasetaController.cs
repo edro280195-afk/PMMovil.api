@@ -281,10 +281,11 @@ public class CasetaController : ControllerBase
     {
         // La ruta es la identidad del registro que el usuario abrió para
         // editar. Se valida también contra el cuerpo para evitar actualizar
-        // accidentalmente otro folio por una solicitud mal formada.
-        if (string.IsNullOrWhiteSpace(casetaId) ||
-            (!string.IsNullOrWhiteSpace(request.Casetaid) &&
-             !string.Equals(casetaId, request.Casetaid, StringComparison.OrdinalIgnoreCase)))
+        // accidentalmente otro folio por una solicitud mal formada. El folio
+        // lleva diagonal y llega en la ruta como "E-020485%2F26" (ASP.NET Core
+        // no lo decodifica): se normaliza antes de comparar, ver CasetaFolio.
+        string folio = CasetaFolio.Normalizar(casetaId);
+        if (folio.Length == 0 || !CasetaFolio.Coinciden(casetaId, request.Casetaid))
         {
             return BadRequest(new CasetaEntradaGuardarResult
             {
@@ -293,7 +294,7 @@ public class CasetaController : ControllerBase
             });
         }
 
-        request.Casetaid = casetaId;
+        request.Casetaid = folio;
         request.Actualizado = true;
         try
         {
@@ -521,13 +522,35 @@ public class CasetaController : ControllerBase
         {
             string usuario = ObtenerUsuario();
             string observaciones = request?.Observaciones ?? "";
-            var result = await _casetaService.ConfirmarSalidaAsync(relno, usuario, observaciones, request?.FotosBase64, ct);
+            var result = await _casetaService.ConfirmarSalidaAsync(relno, usuario, observaciones, request?.FotosBase64, request?.TotalFotos, ct);
             return Ok(result);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error al confirmar salida caseta {Relno}", relno);
             return Ok(new ConfirmarResult { Success = false, Message = "Error: " + ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Sube un lote pequeño de fotos de la salida ANTES de confirmarla. La app las manda de pocas en pocas (como ya hace la
+    /// entrada) para que se vea el avance y una red lenta no deje colgada la salida; la confirmación solo verifica que estén.
+    /// Repetir un lote es seguro: reemplaza las fotos de esas posiciones.
+    /// </summary>
+    [HttpPost("{relno}/salida-fotos")]
+    [RequiereModulo(MobileModuleIds.GateRelationExit, "Agregar", true)]
+    public async Task<IActionResult> SubirFotosSalida(string relno, [FromBody] SubirFotosSalidaRequest? request, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _casetaService.SubirFotosSalidaAsync(
+                CasetaFolio.Normalizar(relno), request?.IndiceInicial ?? 1, request?.FotosBase64, ObtenerUsuario(), ct);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al subir fotos de salida caseta {Relno}", relno);
+            return Ok(new ConfirmarResult { Success = false, Message = "Error al subir las fotos de salida." });
         }
     }
 

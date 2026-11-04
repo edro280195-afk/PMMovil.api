@@ -203,7 +203,7 @@ ON DUPLICATE KEY UPDATE
         return new PushSubscriptionResult { Success = true, Message = "Token FCM registrado." };
     }
 
-    public async Task<PushSubscriptionResult> RemoveFcmTokenAsync(string token)
+    public async Task<PushSubscriptionResult> RemoveFcmTokenAsync(string usuario, string token)
     {
         if (string.IsNullOrWhiteSpace(token))
         {
@@ -214,15 +214,15 @@ ON DUPLICATE KEY UPDATE
 
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
         await conn.ExecuteAsync(
-            "UPDATE fcm_tokens SET active = 0, session_active = 0, updated_at = NOW() WHERE token = @token",
-            new { token });
+            "UPDATE fcm_tokens SET active = 0, session_active = 0, updated_at = NOW() WHERE token = @token AND usuario = @usuario",
+            new { token, usuario });
 
         return new PushSubscriptionResult { Success = true, Message = "Token FCM desactivado." };
     }
 
     public async Task SendToUserAsync(string usuario, string title, string body, IDictionary<string, string>? data = null)
     {
-        await SendFcmToUserAsync(usuario, title, body, data);
+        await SendToUserOrInboxAsync(usuario, title, body, data);
     }
 
     public async Task<NotificationDeliveryResult> SendToUserOrInboxAsync(
@@ -231,35 +231,36 @@ ON DUPLICATE KEY UPDATE
         string body,
         IDictionary<string, string>? data = null)
     {
+        if (string.IsNullOrWhiteSpace(usuario))
+            return new NotificationDeliveryResult { Message = "Usuario no válido." };
+
+        bool inboxStored = false;
+        bool pushSent = false;
         try
         {
-            bool pushSent = await SendFcmToUserAsync(usuario, title, body, data);
-            if (pushSent)
-            {
-                return new NotificationDeliveryResult
-                {
-                    PushSent = true,
-                    Message = "Notificación enviada por push."
-                };
-            }
-
             await SaveInboxNotificationAsync(usuario, title, body, data);
-            return new NotificationDeliveryResult
-            {
-                InboxStored = true,
-                Message = "Notificación guardada en la bandeja."
-            };
+            inboxStored = true;
         }
         catch (Exception ex)
         {
-            // La asignación ya quedó guardada; un fallo del canal de avisos no
-            // debe convertir una asignación válida en un error HTTP.
-            _logger.LogError(ex, "No se pudo entregar ni guardar notificación para {Usuario}.", usuario);
-            return new NotificationDeliveryResult
-            {
-                Message = "No se pudo entregar la notificación."
-            };
+            _logger.LogError(ex, "No se pudo guardar la notificación de {Usuario} en la bandeja.", usuario);
         }
+
+        try
+        {
+            pushSent = await SendFcmToUserAsync(usuario, title, body, data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudo enviar la notificación push de {Usuario}.", usuario);
+        }
+
+        return new NotificationDeliveryResult
+        {
+            InboxStored = inboxStored,
+            PushSent = pushSent,
+            Message = inboxStored || pushSent ? "Notificación registrada." : "No se pudo entregar la notificación."
+        };
     }
 
     private async Task<bool> SendFcmToUserAsync(
@@ -295,19 +296,19 @@ ON DUPLICATE KEY UPDATE
 
         foreach (var row in tokens)
         {
+            var payload = data != null
+                ? new Dictionary<string, string>(data)
+                : new Dictionary<string, string>();
+            payload["title"] = title;
+            payload["body"] = body;
+
             var message = new Message
             {
                 Token = row.Token,
-                Notification = new FirebaseAdmin.Messaging.Notification { Title = title, Body = body },
-                Data = data != null ? new Dictionary<string, string>(data) : null,
+                Data = payload,
                 Android = new AndroidConfig
                 {
-                    Priority = Priority.High,
-                    Notification = new AndroidNotification { Sound = "default" }
-                },
-                Webpush = new WebpushConfig
-                {
-                    Notification = new WebpushNotification { Title = title, Body = body }
+                    Priority = Priority.High
                 }
             };
 

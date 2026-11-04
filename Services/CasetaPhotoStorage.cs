@@ -8,12 +8,14 @@ public class CasetaPhotoStorage
 {
     private readonly IConfiguration _config;
     private readonly ILogger<CasetaPhotoStorage> _logger;
+    private readonly IFotoMejoraCola? _mejora;
     private readonly SemaphoreSlim _syncLock = new(1, 1);
 
-    public CasetaPhotoStorage(IConfiguration config, ILogger<CasetaPhotoStorage> logger)
+    public CasetaPhotoStorage(IConfiguration config, ILogger<CasetaPhotoStorage> logger, IFotoMejoraCola? mejora = null)
     {
         _config = config;
         _logger = logger;
+        _mejora = mejora;
     }
 
     public string GetFileName(string casetaId, int index)
@@ -220,6 +222,9 @@ public class CasetaPhotoStorage
             File.Delete(pendingFile);
             TryDelete(Path.Combine(GetFallbackDirectory(), fileName));
             _logger.LogInformation("Foto de caseta sincronizada: {FileName}", fileName);
+
+            // Ya está en su lugar definitivo: se avisa para mejorarla en segundo plano (no espera ni puede fallar).
+            _mejora?.Encolar(targetFile, "caseta");
         }
         catch (OperationCanceledException)
         {

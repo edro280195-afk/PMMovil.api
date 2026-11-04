@@ -119,6 +119,28 @@ try
     builder.Services.AddScoped<IModulePermissionService, ModulePermissionService>();
     builder.Services.AddScoped<BaseRepository>();
     builder.Services.AddScoped<ISmtpService, SmtpService>();
+
+    // Cola durable de correo: todo mensaje que no sale a la primera queda en disco y se reintenta solo. Va fuera de
+    // DisableBackgroundWorkers porque es la entrega de notificaciones, no un proceso de negocio. Los modos admin de
+    // línea de comandos no arrancan el host, así que ahí `Activa` es falso y el envío sigue siendo directo.
+    builder.Services.AddSingleton<ITransporteCorreo, TransporteSmtp>();
+    builder.Services.AddSingleton(sp => new ColaDeCorreo(
+        sp.GetRequiredService<ITransporteCorreo>(),
+        ResolveOutboxDirectory(builder.Configuration, logDirectory),
+        sp.GetRequiredService<ILogger<ColaDeCorreo>>()));
+    builder.Services.AddSingleton<ICorreoSalienteCola>(sp => sp.GetRequiredService<ColaDeCorreo>());
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ColaDeCorreo>());
+
+    // Avisos de entrada de caseta que esperan a las fotos: se anotan en disco junto a la cola de correo y un respaldo los
+    // manda si la tableta no termina de sincronizar. Tampoco depende de DisableBackgroundWorkers: es entrega de avisos.
+    builder.Services.AddSingleton<ICorreoEntradaDiferido>(sp => new AlmacenCorreoEntradaDiferido(
+        Path.Combine(ResolveOutboxDirectory(builder.Configuration, logDirectory), "diferidos"),
+        sp.GetRequiredService<ILogger<AlmacenCorreoEntradaDiferido>>(),
+        builder.Configuration.GetValue<int?>("CasetaEntrada:CorreoDiferidoGraciaMinutos") is > 0 and var minutos
+            ? TimeSpan.FromMinutes(minutos)
+            : null));
+    builder.Services.AddHostedService<RespaldoCorreoEntrada>();
+
     builder.Services.AddScoped<IRealtimeNotificationService, RealtimeNotificationService>();
     builder.Services.AddScoped<IRevisionReportService, RevisionReportService>();
     builder.Services.AddScoped<EntradaService>();
@@ -140,6 +162,7 @@ try
     builder.Services.AddScoped<ReportService>();
     builder.Services.AddScoped<RevisionActivityService>();
     builder.Services.AddScoped<RevisionAuditService>();
+    builder.Services.AddSingleton<EntrySearchIndex>();
     builder.Services.AddScoped<RevisionService>();
     builder.Services.AddScoped<LabelCaptureService>();
     builder.Services.AddScoped<EtiquetaGrupoClienteService>();
@@ -159,6 +182,15 @@ try
     builder.Services.AddScoped<BiometriaLabService>();
     builder.Services.AddScoped<FaceService>();
     builder.Services.AddSingleton<CasetaPhotoStorage>();
+
+    // Mejora clásica de fotos de evidencia (luz, contraste, nitidez), en segundo plano y sin IA. Quien guarda una foto solo
+    // la avisa a la cola; el trabajador (abajo, con los demás) la reemplaza si hacía falta. Sin sección "FotoMejora" rigen
+    // los valores por defecto (activa); se apaga con FotoMejora:Enabled=false. Ver FotoMejoraService.
+    FotoMejoraOptions fotoMejoraOptions = builder.Configuration.GetSection("FotoMejora").Get<FotoMejoraOptions>() ?? new FotoMejoraOptions();
+    builder.Services.AddSingleton(fotoMejoraOptions);
+    builder.Services.AddSingleton<FotoMejoraService>();
+    builder.Services.AddSingleton<FotoMejoraCola>();
+    builder.Services.AddSingleton<IFotoMejoraCola>(sp => sp.GetRequiredService<FotoMejoraCola>());
     builder.Services.AddMemoryCache();
     builder.Services.AddSignalR();
 
@@ -271,6 +303,7 @@ try
         builder.Services.AddHostedService<AutoFinalizerService>();
         builder.Services.AddHostedService<RevisionHygieneService>();
         builder.Services.AddHostedService<CasetaPhotoSyncWorker>();
+        builder.Services.AddHostedService<FotoMejoraWorker>();
         builder.Services.AddHostedService<PreregistroPurgeWorker>();
         builder.Services.AddHostedService<PreregistroClosureWorker>();
     }
@@ -555,6 +588,21 @@ static string ResolveLogFilePath()
     // sobre C:\inetpub. El log queda junto al ejecutable para poder leerlo
     // desde Android Studio o desde el explorador de archivos.
     return Path.Combine(AppContext.BaseDirectory, "Logs", "pmmovil-api-.log");
+}
+
+/// <summary>
+/// Carpeta de la cola de correo. Por omisión es una subcarpeta de la de logs: ese directorio ya es escribible por el
+/// usuario del sitio en IIS, así que no hace falta dar permisos nuevos.
+/// </summary>
+static string ResolveOutboxDirectory(IConfiguration configuration, string? logDirectory)
+{
+    string? configured = configuration["CorreoSaliente:Directorio"];
+    if (!string.IsNullOrWhiteSpace(configured))
+    {
+        return configured;
+    }
+
+    return Path.Combine(string.IsNullOrWhiteSpace(logDirectory) ? AppContext.BaseDirectory : logDirectory, "outbox");
 }
 
 static void ValidateProductionConfiguration(WebApplicationBuilder builder)

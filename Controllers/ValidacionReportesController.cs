@@ -129,7 +129,7 @@ public class ValidacionReportesController : ControllerBase
 
             foreach (string validador in validadores)
             {
-                _ = _notifications.SendToUserOrInboxAsync(
+                await _notifications.SendToUserOrInboxAsync(
                     validador,
                     "Reporte pendiente de validar",
                     $"{usuario} mandó a validar el reporte de {creferencia} ({folio}).",
@@ -377,7 +377,7 @@ public class ValidacionReportesController : ControllerBase
                 fecha = DateTime.Now.ToString("o")
             });
 
-            _ = _notifications.SendToUserOrInboxAsync(
+            await _notifications.SendToUserOrInboxAsync(
                 usuarioGenera,
                 aprobar ? "Reporte aprobado" : "Reporte rechazado",
                 aprobar

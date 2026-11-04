@@ -29,11 +29,14 @@ public class SmtpService : ISmtpService
 
     private readonly IHostEnvironment _env;
 
-    public SmtpService(IConfiguration config, ILogger<SmtpService> logger, IHostEnvironment env)
+    private readonly ICorreoSalienteCola _cola;
+
+    public SmtpService(IConfiguration config, ILogger<SmtpService> logger, IHostEnvironment env, ICorreoSalienteCola cola)
     {
         _config = config;
         _logger = logger;
         _env = env;
+        _cola = cola;
     }
 
     public async Task<bool> EnviarAsync(
@@ -44,7 +47,8 @@ public class SmtpService : ISmtpService
         IEnumerable<string>? copias = null,
         IEnumerable<string>? copiasOcultas = null,
         bool incluirCopiasOcultasAutomaticas = true,
-        CancellationToken ct = default(CancellationToken))
+        CancellationToken ct = default(CancellationToken),
+        bool preferirCola = false)
     {
         List<string> lista = destinatarios?.Where((string c) => !string.IsNullOrWhiteSpace(c)).Distinct().ToList() ?? new List<string>();
 
@@ -80,9 +84,12 @@ public class SmtpService : ISmtpService
         {
             port = 587;
         }
+        // Fuera del try para que, si el servidor SMTP falla, el mensaje ya armado pase a la cola de reintentos.
+        MimeMessage? msg = null;
+        bool listoParaEnviar = false;
         try
         {
-            MimeMessage msg = new MimeMessage
+            msg = new MimeMessage
             {
                 From = { (InternetAddress)new MailboxAddress(fromName, from) }
             };
@@ -170,8 +177,21 @@ public class SmtpService : ISmtpService
                 }
             }
             msg.Body = bodyBuilder.ToMessageBody();
+            listoParaEnviar = true;
+
+            // Quien no puede esperar al SMTP (la confirmacion de una salida con el guardia mirando el spinner) pide la
+            // cola: el mensaje queda guardado en disco y sale por el trabajador en segundos. Si no se pudo guardar,
+            // sigue el envio directo de siempre.
+            if (preferirCola && _cola.Activa
+                && await _cola.EncolarAsync(msg, "smtp", asunto, CancellationToken.None))
+            {
+                _logger.LogInformation("SmtpService: '{Asunto}' quedó en la cola de correo ({N} destinatarios).", asunto, msg.To.Count);
+                return true;
+            }
+
+            // 30 s y no 10: un apretón de manos TLS lento contra Mailgun no debe contar como fallo.
             using SmtpClient client = new SmtpClient();
-            client.Timeout = 10000;
+            client.Timeout = 30000;
 
             SecureSocketOptions secureOption = SecureSocketOptions.Auto;
             if (_config["Smtp:UseSsl"] == "true") secureOption = SecureSocketOptions.SslOnConnect;
@@ -184,7 +204,7 @@ public class SmtpService : ISmtpService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "SmtpService: Error al conectar con el host {Host}:{Port}", host, port);
-                return false;
+                return await DejarEnColaAsync(msg, asunto);
             }
 
             if (!string.IsNullOrWhiteSpace(user))
@@ -196,7 +216,7 @@ public class SmtpService : ISmtpService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "SmtpService: Error de autenticación para el usuario {User}", user);
-                    return false;
+                    return await DejarEnColaAsync(msg, asunto);
                 }
             }
 
@@ -208,7 +228,32 @@ public class SmtpService : ISmtpService
         catch (Exception exception)
         {
             _logger.LogError(exception, "SmtpService: error crítico enviando '{Asunto}'. Detalle: {Msg}", asunto, exception.Message);
+            if (msg != null && listoParaEnviar)
+            {
+                return await DejarEnColaAsync(msg, asunto);
+            }
             return false;
         }
+    }
+
+    /// <summary>
+    /// El envío directo falló: el mensaje se guarda en la cola durable para que se reintente solo. Sigue devolviendo
+    /// falso (no salió AHORA), pero la notificación ya no se pierde. Sin trabajador de cola (modos admin de línea de
+    /// comandos) no se encola: el fallo se reporta en pantalla.
+    /// </summary>
+    private async Task<bool> DejarEnColaAsync(MimeMessage msg, string asunto)
+    {
+        if (!_cola.Activa) return false;
+
+        bool encolado = await _cola.EncolarAsync(msg, "smtp", asunto, CancellationToken.None);
+        if (encolado)
+        {
+            _logger.LogWarning("SmtpService: '{Asunto}' no salió ahora; quedó en la cola de correo para reintentarse.", asunto);
+        }
+        else
+        {
+            _logger.LogError("SmtpService: '{Asunto}' no salió y tampoco se pudo guardar en la cola de correo.", asunto);
+        }
+        return false;
     }
 }
