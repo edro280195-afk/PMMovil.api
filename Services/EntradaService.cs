@@ -486,6 +486,62 @@ LIMIT @take", new { fromDate, take })).ToList(),
         };
     }
 
+    /// <summary><c>traf.crecibio</c> es varchar(30).</summary>
+    public const int LongitudMaximaRecibio = 30;
+
+    /// <summary>
+    /// El texto que se guarda en <c>traf.crecibio</c>: el nombre completo en mayúsculas, como lo tienen las entradas del
+    /// legacy («GLADYS RODRIGUEZ»), y nunca la clave del usuario si hay nombre. Orden de preferencia: el nombre de
+    /// <c>usuarios</c> (nombre + apellido paterno), lo que mandó el cliente y, al final, la clave. Se recorta a la
+    /// longitud de la columna: con el modo estricto de MySQL un nombre más largo haría fallar todo el guardado.
+    /// </summary>
+    public static string NombreRecibio(string? nombreDeUsuarios, string? recibioEnviado, string? claveUsuario)
+    {
+        string elegido = new[] { nombreDeUsuarios, recibioEnviado, claveUsuario }
+            .Select(texto => Regex.Replace((texto ?? string.Empty).Trim(), @"\s+", " "))
+            .FirstOrDefault(texto => texto.Length > 0) ?? string.Empty;
+
+        elegido = elegido.ToUpperInvariant();
+        return elegido.Length <= LongitudMaximaRecibio ? elegido : elegido[..LongitudMaximaRecibio].TrimEnd();
+    }
+
+    private static async Task<string> ResolverRecibioAsync(
+        IDbConnection conn, IDbTransaction tran, string? usuarioActual, string? recibioEnviado)
+    {
+        string? nombre = null;
+        if (!string.IsNullOrWhiteSpace(usuarioActual))
+        {
+            nombre = await conn.ExecuteScalarAsync<string?>(@"
+   SELECT TRIM(CONCAT_WS(' ', NULLIF(TRIM(nombre), ''), NULLIF(TRIM(apaterno), '')))
+   FROM usuarios
+   WHERE TRIM(claveusuario) = @usuario
+   LIMIT 1",
+                new { usuario = usuarioActual.Trim() },
+                transaction: tran);
+        }
+
+        return NombreRecibio(nombre, recibioEnviado, usuarioActual);
+    }
+
+    /// <summary>
+    /// El número de caja que va en <c>traf.cnocaja</c>. Si la entrada está ligada a una caja de caseta
+    /// (<c>traf3.ccasetaid</c>), manda el <c>nequipo</c> de esa caja; si no, o si la caja de caseta no trae número
+    /// (un registro de tractocamión), se queda con lo que capturó la app.
+    /// </summary>
+    private static async Task<string> ResolverNumeroCajaAsync(
+        IDbConnection conn, IDbTransaction tran, string? casetaId, string? cajaEnviada)
+    {
+        string enviada = (cajaEnviada ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(casetaId)) return enviada;
+
+        string? nequipo = await conn.ExecuteScalarAsync<string?>(
+            "SELECT NULLIF(TRIM(nequipo), '') FROM caseta WHERE casetaid = @casetaId LIMIT 1",
+            new { casetaId = casetaId.Trim() },
+            transaction: tran);
+
+        return string.IsNullOrWhiteSpace(nequipo) ? enviada : nequipo.Trim();
+    }
+
     public async Task<ResultadoOperacion> GuardarRecepcionAsync(GuardarRecepcionRequest datos, string usuarioActual)
     {
         var resultado = new ResultadoOperacion { Success = false };
@@ -502,11 +558,8 @@ LIMIT @take", new { fromDate, take })).ToList(),
             return resultado;
         }
 
-        if (string.IsNullOrWhiteSpace(datos.Recibio))
-        {
-            resultado.Message = "Indica quién recibió la mercancía.";
-            return resultado;
-        }
+        // «Recibió» ya no se captura: es el usuario que guarda la entrada. Se resuelve más abajo contra `usuarios`
+        // para guardar su nombre y no su clave.
 
         if (datos.Detalles == null || datos.Detalles.Count == 0)
         {
@@ -598,6 +651,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
                 }
             }
 
+            // Quién recibió: el nombre del usuario que guarda (nombre + apellido paterno, como lo guarda el legacy),
+            // no su clave. Y el número de caja sale de la caja de caseta (`nequipo`) cuando la entrada está ligada a una.
+            string recibioGuardar = await ResolverRecibioAsync(conn, tran, usuarioActual, datos.Recibio);
+            string cajaGuardar = await ResolverNumeroCajaAsync(conn, tran, datos.CasetaId, datos.CajaArribo);
+
             string obs = datos.Observaciones ?? "";
             if (datos.Danada) obs += " | DAÑADA";
             if (datos.MaderaSello) obs += $" | MaderaSello:{datos.MaderaSelloCant}";
@@ -623,7 +681,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
    @referencia, @ref4, @codCliente, @fecha, @manejo,
    @cajaArribo, @guia, @codTransporte, @hora,
    @inBond, @inBondVal, NOW(), @usuario,
-   @observaciones, @hazmat, '01', '1', 'D', 0,
+   @observaciones, @hazmat, '01', '1', 'C', 0,
    @totalRecibido, @pesoLbs, @pesoKgs, @recibio, @cmarcas1, @cmarcas2,
    @usuario, NOW()
     );
@@ -634,7 +692,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
                 codCliente = datos.CodCliente ?? "",
                 fecha = fechaRecepcion,
                 manejo = datos.Manejo ?? "",
-                cajaArribo = datos.CajaArribo ?? "",
+                cajaArribo = cajaGuardar,
                 guia = datos.Guia ?? "",
                 codTransporte = datos.CodTransporte ?? "",
                 hora = fechaRecepcion,
@@ -646,7 +704,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
                 totalRecibido = datos.TotalRecibido,
                 pesoLbs = datos.PesoLbs,
                 pesoKgs = datos.PesoKgs,
-                recibio = datos.Recibio ?? "",
+                recibio = recibioGuardar,
                 cmarcas1 = datos.Hazmat ? (datos.UN ?? "") : "",
                 cmarcas2 = datos.Hazmat ? (datos.Clase ?? "") : ""
             }, transaction: tran);
@@ -847,6 +905,17 @@ LIMIT @take", new { fromDate, take })).ToList(),
             int idtraf = idtrafNullable.Value;
             DateTime fechaRecepcion = DateTime.TryParse(datos.Fecha, out var parsed) ? parsed : DateTime.Now;
 
+            // Quien recibió es quien guardó la entrada: editarla después no se lo cambia a quien la edita. Solo si
+            // quedó vacía se completa con el usuario actual. El número de caja sigue a la caja de caseta ligada.
+            string? recibioPrevio = await conn.ExecuteScalarAsync<string?>(
+                "SELECT crecibio FROM traf WHERE idtraf = @idtraf",
+                new { idtraf },
+                transaction: tran);
+            string recibioGuardar = string.IsNullOrWhiteSpace(recibioPrevio)
+                ? await ResolverRecibioAsync(conn, tran, usuarioActual, datos.Recibio)
+                : recibioPrevio.Trim();
+            string cajaGuardar = await ResolverNumeroCajaAsync(conn, tran, datos.CasetaId, datos.CajaArribo);
+
             string obs = datos.Observaciones ?? "";
             if (datos.Danada) obs += " | DAÑADA";
             if (datos.MaderaSello) obs += $" | MaderaSello:{datos.MaderaSelloCant}";
@@ -883,7 +952,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
                     codCliente = datos.CodCliente ?? "",
                     fecha = fechaRecepcion,
                     manejo = datos.Manejo ?? "",
-                    cajaArribo = datos.CajaArribo ?? "",
+                    cajaArribo = cajaGuardar,
                     guia = datos.Guia ?? "",
                     codTransporte = datos.CodTransporte ?? "",
                     hora = fechaRecepcion,
@@ -894,56 +963,78 @@ LIMIT @take", new { fromDate, take })).ToList(),
                     totalRecibido = datos.TotalRecibido,
                     pesoLbs = datos.PesoLbs,
                     pesoKgs = datos.PesoKgs,
-                    recibio = datos.Recibio ?? "",
+                    recibio = recibioGuardar,
                     cmarcas1 = datos.Hazmat ? (datos.UN ?? "") : "",
                     cmarcas2 = datos.Hazmat ? (datos.Clase ?? "") : "",
                     usuario = usuarioActual
                 },
                 transaction: tran);
 
-            await conn.ExecuteAsync(@"
-                INSERT INTO traf3 (
-                    fk_idtraf, creferencia, ccasetaid,
-                    madera_c_sello, madera_s_sello, aserrin, nosello, danada, danada_descripcion,
-                    hazmat_un, hazmat_clase,
-                    detkg, detlbs
-                ) VALUES (
-                    @idtraf, @cref, @casetaId,
-                    @maderaCSello, @maderaSSello, @aserrin, @noSello, @danada, @danadaDescripcion,
-                    @hazmatUn, @hazmatClase,
-                    @detkg, @detlbs
-                )
-                ON DUPLICATE KEY UPDATE
-                    ccasetaid          = VALUES(ccasetaid),
-                    madera_c_sello     = VALUES(madera_c_sello),
-                    madera_s_sello     = VALUES(madera_s_sello),
-                    aserrin            = VALUES(aserrin),
-                    nosello            = VALUES(nosello),
-                    danada             = VALUES(danada),
-                    danada_descripcion = VALUES(danada_descripcion),
-                    hazmat_un          = VALUES(hazmat_un),
-                    hazmat_clase       = VALUES(hazmat_clase),
-                    detkg              = VALUES(detkg),
-                    detlbs             = VALUES(detlbs)",
-                new
-                {
-                    idtraf,
-                    cref = crefOriginal,
-                    casetaId = string.IsNullOrWhiteSpace(datos.CasetaId)
-                        ? (object)DBNull.Value
-                        : datos.CasetaId,
-                    maderaCSello = datos.MaderaSello ? datos.MaderaSelloCant : 0,
-                    maderaSSello = datos.MaderaSinSello ? datos.MaderaSinSelloCant : 0,
-                    aserrin = datos.Aserrin ? datos.AserrinCant : 0,
-                    noSello = datos.NoSello ? datos.NoSelloCant : 0,
-                    danada = datos.Danada ? 1 : 0,
-                    danadaDescripcion = datos.Danada ? (datos.DanadaDescripcion ?? "") : (object)DBNull.Value,
-                    hazmatUn = datos.Hazmat ? (datos.UN ?? "") : "",
-                    hazmatClase = datos.Hazmat ? (datos.Clase ?? "") : "",
-                    detkg = datos.PesoKgs,
-                    detlbs = datos.PesoLbs
-                },
+            // traf3 no tiene UNIQUE por entrada (solo la clave primaria idtraf3), así que el antiguo «INSERT … ON DUPLICATE KEY
+            // UPDATE» nunca encontraba el duplicado y agregaba una fila nueva en cada edición. Ahora se busca por referencia
+            // (columna indexada, igual que LabelCaptureService y RevisionService): si ya hay filas se actualizan todas para no
+            // dejar una con el dato y otra sin él, y solo si no hay ninguna se inserta. Se cuenta antes en lugar de mirar
+            // las filas afectadas: con UseAffectedRows un UPDATE que no cambia nada devuelve 0 y se insertaría de más.
+            var datosTraf3 = new
+            {
+                idtraf,
+                cref = crefOriginal,
+                casetaId = string.IsNullOrWhiteSpace(datos.CasetaId)
+                    ? (object)DBNull.Value
+                    : datos.CasetaId,
+                maderaCSello = datos.MaderaSello ? datos.MaderaSelloCant : 0,
+                maderaSSello = datos.MaderaSinSello ? datos.MaderaSinSelloCant : 0,
+                aserrin = datos.Aserrin ? datos.AserrinCant : 0,
+                noSello = datos.NoSello ? datos.NoSelloCant : 0,
+                danada = datos.Danada ? 1 : 0,
+                danadaDescripcion = datos.Danada ? (datos.DanadaDescripcion ?? "") : (object)DBNull.Value,
+                hazmatUn = datos.Hazmat ? (datos.UN ?? "") : "",
+                hazmatClase = datos.Hazmat ? (datos.Clase ?? "") : "",
+                detkg = datos.PesoKgs,
+                detlbs = datos.PesoLbs
+            };
+
+            int filasTraf3 = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM traf3 WHERE creferencia = @cref",
+                new { cref = crefOriginal },
                 transaction: tran);
+
+            if (filasTraf3 > 0)
+            {
+                await conn.ExecuteAsync(@"
+                    UPDATE traf3 SET
+                        ccasetaid          = @casetaId,
+                        madera_c_sello     = @maderaCSello,
+                        madera_s_sello     = @maderaSSello,
+                        aserrin            = @aserrin,
+                        nosello            = @noSello,
+                        danada             = @danada,
+                        danada_descripcion = @danadaDescripcion,
+                        hazmat_un          = @hazmatUn,
+                        hazmat_clase       = @hazmatClase,
+                        detkg              = @detkg,
+                        detlbs             = @detlbs
+                    WHERE creferencia = @cref",
+                    datosTraf3,
+                    transaction: tran);
+            }
+            else
+            {
+                await conn.ExecuteAsync(@"
+                    INSERT INTO traf3 (
+                        fk_idtraf, creferencia, ccasetaid,
+                        madera_c_sello, madera_s_sello, aserrin, nosello, danada, danada_descripcion,
+                        hazmat_un, hazmat_clase,
+                        detkg, detlbs
+                    ) VALUES (
+                        @idtraf, @cref, @casetaId,
+                        @maderaCSello, @maderaSSello, @aserrin, @noSello, @danada, @danadaDescripcion,
+                        @hazmatUn, @hazmatClase,
+                        @detkg, @detlbs
+                    )",
+                    datosTraf3,
+                    transaction: tran);
+            }
 
             await conn.ExecuteAsync(
                 "DELETE FROM trafdet WHERE creferencia = @cref",
