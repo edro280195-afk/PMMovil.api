@@ -51,6 +51,7 @@ public static class HomeSummaryRules
         TraceStationId.Caseta => new[] { MobileModuleIds.Gate },
         TraceStationId.Entrada => new[] { MobileModuleIds.WarehouseOperations },
         TraceStationId.Revision => new[] { MobileModuleIds.Review },
+        TraceStationId.Carga => new[] { MobileModuleIds.WarehouseExit },
         TraceStationId.Relacion => new[] { MobileModuleIds.WarehouseRelation },
         TraceStationId.Salida => new[] { MobileModuleIds.GateRelationExit, MobileModuleIds.GatePhysicalExit },
         _ => Array.Empty<int>()

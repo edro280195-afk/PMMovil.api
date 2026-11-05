@@ -55,6 +55,12 @@ public sealed class TraceFacts
     public DateTime? RelacionDeparture { get; set; }
     public bool RelacionBusy { get; set; }
 
+    /// <summary>Cuándo se empezó a cargar la relación (<c>inicio_carga</c>).</summary>
+    public DateTime? LoadStartedAt { get; set; }
+
+    /// <summary>Cuándo se terminó de cargar (<c>fin_carga</c>).</summary>
+    public DateTime? LoadFinishedAt { get; set; }
+
     public int EntradasCount { get; set; }
     public bool EntradasTruncated { get; set; }
 
@@ -231,7 +237,7 @@ public static class TrazabilidadRules
     // ── Estaciones ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Las cinco estaciones con su estado. <c>SIN_DATO</c> se reserva para lo que no se puede saber: hoy Bodega no
+    /// Las seis estaciones con su estado. <c>SIN_DATO</c> se reserva para lo que no se puede saber: hoy Bodega no
     /// liga la entrada a la caja, así que una caja sin relación no se marca «sin entrada» (podría tenerla), se marca
     /// «sin dato».
     /// </summary>
@@ -244,8 +250,54 @@ public static class TrazabilidadRules
             new() { Id = TraceStationId.Caseta, State = CasetaState(facts), At = FormatDate(facts.CajaArrival) },
             new() { Id = TraceStationId.Entrada, State = EntradaState(facts), At = FormatDate(facts.EntradaArrival) },
             new() { Id = TraceStationId.Revision, State = RevisionState(facts) },
+            new() { Id = TraceStationId.Carga, State = CargaState(facts, departed), At = FormatDate(CargaDate(facts)) },
             new() { Id = TraceStationId.Relacion, State = RelacionState(facts, departed), At = FormatDate(facts.RelacionAuthorizedAt) },
             new() { Id = TraceStationId.Salida, State = SalidaState(facts, departed), At = FormatDate(DepartureDate(facts)) }
+        };
+    }
+
+    // `estatus_carga` de la relación (tablas relacion / relacion_imex). Los valores salen de SalidaReglas.
+    private static string LoadStatus(TraceFacts facts)
+        => (facts.RelacionStatus ?? string.Empty).Trim().ToUpperInvariant();
+
+    /// <summary>La carga terminó: el cargador cerró la relación (aunque falte que el supervisor la autorice).</summary>
+    public static bool IsLoadFinished(TraceFacts facts)
+        => LoadStatus(facts) is "CARGADA" or "DEMASIADO RAPIDO" or "AUTORIZADA" or "SALIDA";
+
+    /// <summary>
+    /// Falta cargar y el cargador puede hacerlo: la relación existe, no ha salido y está sin empezar, cargándose o en
+    /// espera. Bloqueada o incompleta la resuelve el supervisor, no el cargador, y por eso no se ofrece cargarla.
+    /// </summary>
+    public static bool IsLoadPending(TraceFacts facts)
+        => facts.HasRelacion && !IsDeparted(facts) && (LoadStatus(facts) is "" or "CARGANDO" or "EN ESPERA");
+
+    private static DateTime? CargaDate(TraceFacts facts)
+        => IsRealDate(facts.LoadFinishedAt) ? facts.LoadFinishedAt
+            : IsRealDate(facts.LoadStartedAt) ? facts.LoadStartedAt
+            : null;
+
+    /// <summary>
+    /// Cargar mercancía. Hecha cuando el cargador cerró la relación (<c>CARGADA</c>) o ya pasó de ahí; en curso mientras
+    /// se carga o está en espera; atención si quedó bloqueada o incompleta (pide al supervisor); pendiente si la
+    /// relación existe y nadie la ha empezado. Sin relación no hay nada que cargar con relación: la salida física no la
+    /// usa (no aplica) y, si la caja sigue en el patio, todavía no se sabe.
+    /// </summary>
+    private static string CargaState(TraceFacts facts, bool departed)
+    {
+        if (!facts.HasRelacion)
+        {
+            if (departed) return TraceState.NoAplica;
+            return facts.HasCaja || facts.EntradasCount > 0 ? TraceState.Pendiente : TraceState.SinDato;
+        }
+
+        if (departed) return TraceState.Hecha;
+
+        return LoadStatus(facts) switch
+        {
+            "CARGADA" or "DEMASIADO RAPIDO" or "AUTORIZADA" or "SALIDA" => TraceState.Hecha,
+            "CARGANDO" or "EN ESPERA" => TraceState.EnCurso,
+            "BLOQUEO" or "BLOQUEO REIMPRESION" or "INCOMPLETA" => TraceState.Atencion,
+            _ => TraceState.Pendiente
         };
     }
 
@@ -291,10 +343,17 @@ public static class TrazabilidadRules
     {
         if (facts.HasRelacion)
         {
-            return string.Equals(facts.RelacionStatus, "AUTORIZADA", StringComparison.OrdinalIgnoreCase)
-                   || string.Equals(facts.RelacionStatus, "SALIDA", StringComparison.OrdinalIgnoreCase)
-                ? TraceState.Hecha
-                : TraceState.EnCurso;
+            if (departed) return TraceState.Hecha;
+
+            // La relación es la autorización del supervisor y llega DESPUÉS de cargar: mientras se carga (o no se ha
+            // empezado) todavía no le toca; cuando el cargador cierra (cargada, bloqueada, incompleta) espera al
+            // supervisor, que es lo que significa «en curso» aquí.
+            return LoadStatus(facts) switch
+            {
+                "AUTORIZADA" or "SALIDA" => TraceState.Hecha,
+                "" or "CARGANDO" or "EN ESPERA" => TraceState.Pendiente,
+                _ => TraceState.EnCurso
+            };
         }
 
         // Más de la mitad de las cajas sale por «salida física», sin relación: no es una falta.
@@ -320,7 +379,7 @@ public static class TrazabilidadRules
     /// <summary>
     /// Reduce una ficha a lo que cabe en la marca de un QR: señal, estado de las estaciones, banderas y tres datos para
     /// reconocer la pieza (cliente, caja, relación). El orden de <see cref="TraceCompactItem.States"/> es siempre el de
-    /// <see cref="TraceStationId.Order"/>, aunque la ficha traiga menos estaciones.
+    /// <see cref="TraceStationId.CompactOrder"/>, aunque la ficha traiga menos estaciones.
     /// </summary>
     public static TraceCompactItem ToCompact(TraceResult result)
     {
@@ -334,8 +393,9 @@ public static class TrazabilidadRules
             Flags = result.Flags.ToList()
         };
 
-        foreach (string id in TraceStationId.Order)
+        foreach (string id in TraceStationId.CompactOrder)
             item.States.Add(result.Stations.FirstOrDefault(station => station.Id == id)?.State ?? TraceState.SinDato);
+        item.Carga = result.Stations.FirstOrDefault(station => station.Id == TraceStationId.Carga)?.State ?? TraceState.SinDato;
 
         if (!result.Found) return item;
 
@@ -431,6 +491,7 @@ public static class TrazabilidadRules
                 if (facts.CajaCancelled) break;
                 if (!departed && IsAuthorized(facts)) Add(TraceAction.ExitGate);
                 if (!departed && facts.EntradasCount == 0 && !facts.HasRelacion) Add(TraceAction.CreateEntry);
+                if (IsLoadPending(facts)) Add(TraceAction.OpenLoad);
                 if (facts.HasRelacion) Add(TraceAction.OpenRelation);
                 if (singleEntrada)
                 {
@@ -446,6 +507,8 @@ public static class TrazabilidadRules
 
             case TraceKind.Relacion:
                 if (!departed && IsAuthorized(facts)) Add(TraceAction.ExitGate);
+                // Sin cargar es lo que sigue: «Cargar mercancía» va primero. Una relación ya cargada no la ofrece.
+                if (IsLoadPending(facts)) Add(TraceAction.OpenLoad);
                 Add(TraceAction.OpenRelation);
                 if (singleEntrada)
                 {

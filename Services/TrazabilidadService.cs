@@ -65,6 +65,9 @@ public sealed class TrazabilidadService
         public DateTime? AuthorizedAt { get; set; }
         public DateTime? DepartureAt { get; set; }
         public string UsuEdit { get; set; } = string.Empty;
+        public DateTime? LoadStartedAt { get; set; }
+        public DateTime? LoadFinishedAt { get; set; }
+        public string LoadedBy { get; set; } = string.Empty;
     }
 
     private sealed class EntradaRow
@@ -189,7 +192,7 @@ public sealed class TrazabilidadService
             {
                 Found = false,
                 Reason = parsed.Rejection ?? TraceReason.Unsupported,
-                States = TraceStationId.Order.Select(_ => TraceState.SinDato).ToList()
+                States = TraceStationId.CompactOrder.Select(_ => TraceState.SinDato).ToList()
             };
         }
 
@@ -283,7 +286,10 @@ public sealed class TrazabilidadService
                       IFNULL(t.cnombre, '') AS Transfer,
                       CASE WHEN YEAR(r.autoriza_carga) >= 2000 THEN r.autoriza_carga END AS AuthorizedAt,
                       CASE WHEN YEAR(r.salida_caseta) >= 2000 THEN r.salida_caseta END AS DepartureAt,
-                      IFNULL(r.usuedit, '') AS UsuEdit
+                      IFNULL(r.usuedit, '') AS UsuEdit,
+                      CASE WHEN YEAR(r.inicio_carga) >= 2000 THEN r.inicio_carga END AS LoadStartedAt,
+                      CASE WHEN YEAR(r.fin_carga) >= 2000 THEN r.fin_carga END AS LoadFinishedAt,
+                      IFNULL(r.usucargamcia, '') AS LoadedBy
                FROM {table} r
                LEFT JOIN tranfers t ON r.cidtransfer = t.cidtransfer
                WHERE r.relno = @relno
@@ -601,7 +607,10 @@ public sealed class TrazabilidadService
                 Transfer = chain.Relacion.Transfer,
                 AuthorizedAt = TrazabilidadRules.FormatDate(chain.Relacion.AuthorizedAt),
                 DepartureAt = TrazabilidadRules.FormatDate(chain.Relacion.DepartureAt),
-                TotalEntradas = chain.Entradas.Count
+                TotalEntradas = chain.Entradas.Count,
+                LoadStartedAt = TrazabilidadRules.FormatDate(chain.Relacion.LoadStartedAt),
+                LoadFinishedAt = TrazabilidadRules.FormatDate(chain.Relacion.LoadFinishedAt),
+                LoadedBy = chain.Relacion.LoadedBy.Trim()
             };
         }
 
@@ -626,6 +635,8 @@ public sealed class TrazabilidadService
             RelacionStatus = relacion?.EstatusCarga ?? string.Empty,
             RelacionAuthorizedAt = relacion?.AuthorizedAt,
             RelacionDeparture = relacion?.DepartureAt,
+            LoadStartedAt = relacion?.LoadStartedAt,
+            LoadFinishedAt = relacion?.LoadFinishedAt,
             RelacionBusy = relacion is not null && !string.IsNullOrWhiteSpace(relacion.UsuEdit),
             EntradasCount = chain.Entradas.Count,
             EntradasTruncated = chain.Truncated,

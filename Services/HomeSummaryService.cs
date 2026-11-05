@@ -65,12 +65,14 @@ public sealed class HomeSummaryService
             "entrada", () => EntradaAsync(ct));
         Task<HomeStationSummary?> revision = StationAsync(TraceStationId.Revision, username, ct,
             $"revision:{username}", () => RevisionAsync(username, ct));
+        Task<HomeStationSummary?> carga = StationAsync(TraceStationId.Carga, username, ct,
+            "carga", () => CargaAsync(ct));
         Task<HomeStationSummary?> relacion = StationAsync(TraceStationId.Relacion, username, ct,
             "relacion", () => RelacionAsync(ct));
         Task<HomeStationSummary?> salida = StationAsync(TraceStationId.Salida, username, ct,
             $"salida:{planta}", () => SalidaAsync(planta, ct));
 
-        await Task.WhenAll(caseta, entrada, revision, relacion, salida);
+        await Task.WhenAll(caseta, entrada, revision, carga, relacion, salida);
 
         return new HomeSummaryResult
         {
@@ -78,6 +80,7 @@ public sealed class HomeSummaryService
             Caseta = caseta.Result,
             Entrada = entrada.Result,
             Revision = revision.Result,
+            Carga = carga.Result,
             Relacion = relacion.Result,
             Salida = salida.Result,
             CacheSeconds = HomeSummaryRules.CacheSeconds
@@ -205,6 +208,22 @@ public sealed class HomeSummaryService
         return HomeSummaryRules.Summary(
             mine.Count,
             HomeSummaryRules.ExceptionOf(TraceSignal.Alto, HomeExceptionCode.Discrepancies, withDiscrepancies));
+    }
+
+    /// <summary>
+    /// Carga: las relaciones que se están cargando ahora (un cargador la tiene tomada o quedó en espera). Una relación
+    /// bloqueada o incompleta ya no es del cargador y se cuenta como excepción de Relación. Sin excepción propia.
+    /// </summary>
+    private async Task<HomeStationSummary> CargaAsync(CancellationToken ct)
+    {
+        using IDbConnection conn = _db.CreateConnection();
+        long loading = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+            @"SELECT
+                  (SELECT COUNT(*) FROM relacion WHERE TIPOP = 'I' AND estatus_carga IN ('CARGANDO', 'EN ESPERA'))
+                + (SELECT COUNT(*) FROM relacion_imex WHERE TIPOP = 'C' AND estatus_carga IN ('CARGANDO', 'EN ESPERA'))",
+            cancellationToken: ct));
+
+        return HomeSummaryRules.Summary(loading);
     }
 
     /// <summary>

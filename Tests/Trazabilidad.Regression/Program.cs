@@ -125,8 +125,60 @@ Equal(TraceState.Pendiente, StateOf(fresh, TraceStationId.Salida), "Fresca: sali
 Sequence(new[] { TraceFlag.SinEntradaVinculada, TraceFlag.SinRelacion }, TrazabilidadRules.BuildFlags(fresh), "Fresca: banderas");
 Sequence(new[] { TraceAction.CreateEntry, TraceAction.FindInYard, TraceAction.ExitGate }, TrazabilidadRules.BuildActions(fresh, true), "Fresca: acciones");
 Equal(TraceSignal.Aviso, TrazabilidadRules.BuildSignal(fresh, true), "Fresca: aviso");
-Equal(5, TrazabilidadRules.BuildStations(fresh).Count, "Siempre son cinco estaciones");
+Equal(6, TrazabilidadRules.BuildStations(fresh).Count, "Siempre son seis estaciones");
 Sequence(TraceStationId.Order, TrazabilidadRules.BuildStations(fresh).Select(item => item.Id), "En el orden de La Línea");
+Sequence(new[] { "CASETA", "ENTRADA", "REVISION", "CARGA", "RELACION", "SALIDA" }, TraceStationId.Order, "Carga va entre la revisión y la relación");
+Equal(TraceState.Pendiente, StateOf(fresh, TraceStationId.Carga), "Fresca: carga pendiente");
+
+// ── Cargar mercancía (5-nov-2026): se ve en La Línea y se ofrece desde el escaneo de una relación ─────────────
+TraceFacts LoadFacts(string status, Action<TraceFacts>? more = null) => Facts(f =>
+{
+    f.Kind = TraceKind.Relacion; f.HasRelacion = true; f.RelacionStatus = status; f.EntradasCount = 2;
+    more?.Invoke(f);
+});
+DateTime loadStart = new(2026, 11, 4, 9, 0, 0);
+DateTime loadEnd = new(2026, 11, 4, 9, 40, 0);
+
+TraceFacts notLoaded = LoadFacts("");
+Equal(TraceState.Pendiente, StateOf(notLoaded, TraceStationId.Carga), "Sin cargar: carga pendiente");
+Equal(TraceState.Pendiente, StateOf(notLoaded, TraceStationId.Relacion), "Sin cargar: todavía no le toca al supervisor");
+Check(TrazabilidadRules.IsLoadPending(notLoaded), "Sin cargar: se puede cargar");
+Sequence(new[] { TraceAction.OpenLoad, TraceAction.OpenRelation, TraceAction.ExitGate },
+    TrazabilidadRules.BuildActions(notLoaded, true), "Relación sin cargar: «Cargar mercancía» va primero");
+
+TraceFacts loading = LoadFacts("CARGANDO", f => f.LoadStartedAt = loadStart);
+Equal(TraceState.EnCurso, StateOf(loading, TraceStationId.Carga), "Cargándose: carga en curso");
+Equal(TraceState.Pendiente, StateOf(loading, TraceStationId.Relacion), "Cargándose: relación pendiente");
+Equal("2026-11-04T09:00:00", TrazabilidadRules.BuildStations(loading).Single(s2 => s2.Id == TraceStationId.Carga).At, "En curso: fecha de inicio");
+Check(TrazabilidadRules.IsLoadPending(loading), "Cargándose: se puede seguir cargando");
+
+TraceFacts paused = LoadFacts("EN ESPERA", f => f.LoadStartedAt = loadStart);
+Equal(TraceState.EnCurso, StateOf(paused, TraceStationId.Carga), "En espera: carga en curso");
+Equal(TraceAction.OpenLoad, TrazabilidadRules.BuildActions(paused, true).First(), "En espera: se puede reanudar");
+
+TraceFacts loaded = LoadFacts("CARGADA", f => { f.LoadStartedAt = loadStart; f.LoadFinishedAt = loadEnd; });
+Equal(TraceState.Hecha, StateOf(loaded, TraceStationId.Carga), "Cargada: carga hecha");
+Equal(TraceState.EnCurso, StateOf(loaded, TraceStationId.Relacion), "Cargada: espera al supervisor");
+Equal("2026-11-04T09:40:00", TrazabilidadRules.BuildStations(loaded).Single(s2 => s2.Id == TraceStationId.Carga).At, "Cargada: fecha de fin");
+Check(!TrazabilidadRules.IsLoadPending(loaded), "Cargada: ya no se ofrece cargar");
+Check(!TrazabilidadRules.BuildActions(loaded, true).Contains(TraceAction.OpenLoad), "Cargada: sin «Cargar mercancía»");
+Equal(TraceState.Hecha, StateOf(LoadFacts("DEMASIADO RAPIDO"), TraceStationId.Carga), "Demasiado rápido: la carga se cerró");
+
+Equal(TraceState.Atencion, StateOf(LoadFacts("BLOQUEO"), TraceStationId.Carga), "Bloqueada: atención");
+Equal(TraceState.Atencion, StateOf(LoadFacts("INCOMPLETA"), TraceStationId.Carga), "Incompleta: atención");
+Check(!TrazabilidadRules.IsLoadPending(LoadFacts("BLOQUEO")), "Bloqueada: la resuelve el supervisor, no se ofrece cargar");
+Check(!TrazabilidadRules.BuildActions(LoadFacts("INCOMPLETA"), true).Contains(TraceAction.OpenLoad), "Incompleta: sin «Cargar mercancía»");
+
+TraceFacts authorizedLoad = LoadFacts("AUTORIZADA");
+Equal(TraceState.Hecha, StateOf(authorizedLoad, TraceStationId.Carga), "Autorizada: carga hecha");
+Equal(TraceState.Hecha, StateOf(authorizedLoad, TraceStationId.Relacion), "Autorizada: relación hecha");
+Equal(TraceAction.ExitGate, TrazabilidadRules.BuildActions(authorizedLoad, true).First(), "Autorizada: lo siguiente es la salida");
+
+// Una caja con relación sin cargar también ofrece cargarla; una salida física no tiene carga que seguir.
+TraceFacts boxToLoad = Facts(f => { f.Kind = TraceKind.Caja; f.HasCaja = true; f.CajaArrival = arrived; f.HasRelacion = true; f.RelacionStatus = ""; f.EntradasCount = 1; });
+Check(TrazabilidadRules.BuildActions(boxToLoad, true).Contains(TraceAction.OpenLoad), "Caja con relación sin cargar: ofrece cargar");
+TraceFacts physicalExit = Facts(f => { f.Kind = TraceKind.Caja; f.HasCaja = true; f.CajaArrival = arrived; f.CajaDeparture = new DateTime(2026, 11, 4, 18, 0, 0); });
+Equal(TraceState.NoAplica, StateOf(physicalExit, TraceStationId.Carga), "Salida física: la carga no aplica");
 
 // Caja con relación autorizada y su entrada, completa, encontrada por la relación.
 TraceFacts ready = Facts(f =>
@@ -241,10 +293,10 @@ Check(TrazabilidadRules.BuildActions(fresh, false).Count == 0, "No encontrado: s
 
 // Nombres de acción: son los mismos de ScanActionId en la app (CreateEntry → CREATE_ENTRY…).
 Sequence(
-    new[] { "CREATE_ENTRY", "EXIT_GATE", "FIND_IN_YARD", "OPEN_RELATION", "OPEN_ENTRY", "REVIEW_ENTRY", "SHOW_ON_MAP", "REGISTER_PREREGISTRO" },
+    new[] { "CREATE_ENTRY", "EXIT_GATE", "FIND_IN_YARD", "OPEN_RELATION", "OPEN_LOAD", "OPEN_ENTRY", "REVIEW_ENTRY", "SHOW_ON_MAP", "REGISTER_PREREGISTRO" },
     new[]
     {
-        TraceAction.CreateEntry, TraceAction.ExitGate, TraceAction.FindInYard, TraceAction.OpenRelation,
+        TraceAction.CreateEntry, TraceAction.ExitGate, TraceAction.FindInYard, TraceAction.OpenRelation, TraceAction.OpenLoad,
         TraceAction.OpenEntry, TraceAction.ReviewEntry, TraceAction.ShowOnMap, TraceAction.RegisterPreRegistro
     },
     "Los nombres de las acciones no cambian sin avisar a la app");
@@ -274,7 +326,8 @@ Equal("E-17840/26", compactBox.Code, "Compacta: código");
 Equal(TraceKind.Caja, compactBox.Kind, "Compacta: clase");
 Check(compactBox.Found, "Compacta: encontrada");
 Equal(TraceSignal.Aviso, compactBox.Signal, "Compacta: señal");
-Sequence(new[] { TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.EnCurso }, compactBox.States, "Compacta: cinco estados en el orden de La Línea");
+Sequence(new[] { TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.Hecha, TraceState.EnCurso }, compactBox.States, "Compacta: las cinco estaciones originales por posición (una app anterior a «Carga» las espera así)");
+Equal(TraceState.Hecha, compactBox.Carga, "Compacta: la carga viaja aparte para no mover las demás posiciones");
 Sequence(new[] { TraceFlag.EntradaPorRelacion, TraceFlag.Hazmat }, compactBox.Flags, "Compacta: banderas");
 Equal("KATHION", compactBox.Customer, "Compacta: el cliente de la caja manda sobre el de la entrada");
 Equal("1657-2", compactBox.Box, "Compacta: número de caja");
@@ -297,6 +350,7 @@ TraceCompactItem compactMissing = TrazabilidadRules.ToCompact(lonely);
 Check(!compactMissing.Found, "Compacta: no encontrada");
 Equal(TraceReason.NotFound, compactMissing.Reason, "Compacta: motivo");
 Equal(5, compactMissing.States.Count, "Compacta: siempre cinco estados");
+Equal(TraceState.SinDato, compactMissing.Carga, "Compacta: la carga sin dato si no existe");
 Check(compactMissing.States.All(state => state == TraceState.SinDato), "Compacta: sin dato en todas si no existe");
 Equal(string.Empty, compactMissing.Customer, "Compacta: sin cliente si no existe");
 

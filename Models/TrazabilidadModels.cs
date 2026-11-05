@@ -18,16 +18,27 @@ public static class TraceKind
     public const string PreRegistro = "PREREGISTRO";
 }
 
-/// <summary>Las cinco estaciones de La Línea, en el orden en que se recorren.</summary>
+/// <summary>Las seis estaciones de La Línea, en el orden en que se recorren.</summary>
 public static class TraceStationId
 {
     public const string Caseta = "CASETA";
     public const string Entrada = "ENTRADA";
     public const string Revision = "REVISION";
+
+    /// <summary>Cargar mercancía en la caja (módulo «Cargar mercancía» de la app): va entre la revisión y la relación.</summary>
+    public const string Carga = "CARGA";
+
     public const string Relacion = "RELACION";
     public const string Salida = "SALIDA";
 
-    public static readonly string[] Order = { Caseta, Entrada, Revision, Relacion, Salida };
+    public static readonly string[] Order = { Caseta, Entrada, Revision, Carga, Relacion, Salida };
+
+    /// <summary>
+    /// Las cinco estaciones originales, en su orden. La ficha compacta del AR manda sus estados por posición y las
+    /// versiones de la app anteriores a «Carga» esperan exactamente estas cinco: la carga viaja aparte
+    /// (<see cref="TraceCompactItem.Carga"/>) para no desplazar a las demás en una app que todavía no se actualiza.
+    /// </summary>
+    public static readonly string[] CompactOrder = { Caseta, Entrada, Revision, Relacion, Salida };
 }
 
 /// <summary>Estado de una estación. <c>SIN_DATO</c> significa "no se puede saber", no "todavía no".</summary>
@@ -78,6 +89,9 @@ public static class TraceAction
     public const string ExitGate = "EXIT_GATE";
     public const string FindInYard = "FIND_IN_YARD";
     public const string OpenRelation = "OPEN_RELATION";
+
+    /// <summary>Ir a «Cargar mercancía» con esta relación. Una app anterior a «Carga» ignora la acción que no conoce.</summary>
+    public const string OpenLoad = "OPEN_LOAD";
     public const string OpenEntry = "OPEN_ENTRY";
     public const string ReviewEntry = "REVIEW_ENTRY";
     public const string ShowOnMap = "SHOW_ON_MAP";
@@ -141,6 +155,15 @@ public sealed class TraceRelacion
     public string? AuthorizedAt { get; set; }
     public string? DepartureAt { get; set; }
     public int TotalEntradas { get; set; }
+
+    /// <summary>Cuándo se empezó a cargar (<c>inicio_carga</c>); <c>null</c> si todavía no.</summary>
+    public string? LoadStartedAt { get; set; }
+
+    /// <summary>Cuándo se terminó de cargar (<c>fin_carga</c>); <c>null</c> si sigue pendiente o en proceso.</summary>
+    public string? LoadFinishedAt { get; set; }
+
+    /// <summary>Quién tiene tomada la carga (<c>usucargamcia</c>); vacío si nadie.</summary>
+    public string LoadedBy { get; set; } = string.Empty;
 }
 
 public sealed class TraceBulto
@@ -212,8 +235,11 @@ public sealed class TraceCompactItem
     public string? Reason { get; set; }
     public string Signal { get; set; } = TraceSignal.SinDato;
 
-    /// <summary>Estado de las cinco estaciones, en el orden de <see cref="TraceStationId.Order"/>.</summary>
+    /// <summary>Estado de las cinco estaciones originales, en el orden de <see cref="TraceStationId.CompactOrder"/>.</summary>
     public List<string> States { get; set; } = new();
+
+    /// <summary>Estado de la estación «Carga», aparte de <see cref="States"/> para no mover las demás posiciones.</summary>
+    public string Carga { get; set; } = TraceState.SinDato;
 
     public List<string> Flags { get; set; } = new();
     public string Customer { get; set; } = string.Empty;

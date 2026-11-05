@@ -45,6 +45,10 @@ public sealed class HomeSummaryResult
     public HomeStationSummary? Caseta { get; set; }
     public HomeStationSummary? Entrada { get; set; }
     public HomeStationSummary? Revision { get; set; }
+
+    /// <summary>Cargar mercancía: relaciones que se están cargando ahora (CARGANDO o EN ESPERA).</summary>
+    public HomeStationSummary? Carga { get; set; }
+
     public HomeStationSummary? Relacion { get; set; }
     public HomeStationSummary? Salida { get; set; }
 
