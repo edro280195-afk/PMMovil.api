@@ -222,12 +222,19 @@ public class WarehouseLayoutService
                 t.fcreatrafico
             HAVING EtiquetasPendientes > 0
                 OR (UPPER(COALESCE(t.tipop, '')) = 'D' AND EtiquetasTotal = 0)
+                /* Las entradas que se capturan en la app ya se guardan como «C» y nadie les crea etiquetas: sin esta
+                   línea desaparecían del mapa. Sin límite de días a propósito (decisión de Eduardo, 5-nov-2026): una «C»
+                   sin etiquetas que sigue con ubicación aparece ocupando lugar para que el equipo vea por qué hay tanta
+                   mercancía registrada en la bodega y le dé atención, en vez de esconderla. */
+                OR (UPPER(COALESCE(t.tipop, '')) = 'C' AND EtiquetasTotal = 0)
             ORDER BY Ubicacion, t.fcreatrafico DESC, d.creferencia DESC, d.nlineno ASC
             """;
 
         var rows = (await conn.QueryAsync<OccupancyRow>(sql)).ToList();
 
         var locations = new Dictionary<string, LocationOccupancy>(StringComparer.OrdinalIgnoreCase);
+        // Cuántos bultos sin etiqueta de entradas «C» hay por ubicación (las «D» ya se cuentan en DirectasSinEtiqueta).
+        var consolidatedUnlabeled = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in rows)
         {
             if (string.IsNullOrWhiteSpace(r.Ubicacion)) continue;
@@ -243,23 +250,35 @@ public class WarehouseLayoutService
             int salidaLabels = (int)r.EtiquetasSalida;
             bool isDirectWithoutLabels = string.Equals(r.Tipop, "D", StringComparison.OrdinalIgnoreCase)
                 && r.EtiquetasTotal == 0;
-            int unlabeledBultos = isDirectWithoutLabels
+            // «C» sin etiquetas: se muestra igual que una directa, pero sin llamarla «directa», porque no lo es.
+            bool isConsolidatedWithoutLabels = string.Equals(r.Tipop, "C", StringComparison.OrdinalIgnoreCase)
+                && r.EtiquetasTotal == 0;
+            int unlabeledBultos = isDirectWithoutLabels || isConsolidatedWithoutLabels
                 ? Math.Max(1, (int)Math.Round(r.CantidadDetalle))
                 : 0;
             int bultos = pendingLabels + unlabeledBultos;
-            string confidence = isDirectWithoutLabels ? "directa" : "alta";
+            string confidence = isDirectWithoutLabels ? "directa" : isConsolidatedWithoutLabels ? "sin_etiqueta" : "alta";
             string estado = isDirectWithoutLabels
                 ? "directa"
-                : loadedLabels + salidaLabels > 0
-                    ? "parcial"
-                    : "ocupada";
+                : isConsolidatedWithoutLabels
+                    ? "sin_etiqueta"
+                    : loadedLabels + salidaLabels > 0
+                        ? "parcial"
+                        : "ocupada";
 
             loc.Bultos += bultos;
             loc.EtiquetasPendientes += pendingLabels;
             loc.EtiquetasCargadas += loadedLabels;
             loc.EtiquetasSalida += salidaLabels;
             loc.BultosSinEtiqueta += unlabeledBultos;
-            loc.DirectasSinEtiqueta += unlabeledBultos;
+            if (isDirectWithoutLabels)
+            {
+                loc.DirectasSinEtiqueta += unlabeledBultos;
+            }
+            else if (isConsolidatedWithoutLabels)
+            {
+                consolidatedUnlabeled[r.Ubicacion] = consolidatedUnlabeled.GetValueOrDefault(r.Ubicacion) + unlabeledBultos;
+            }
             loc.EntradasCount++;
 
             if (!string.IsNullOrWhiteSpace(r.Clase) && bultos > 0)
@@ -290,7 +309,7 @@ public class WarehouseLayoutService
                     EtiquetasCargadas = loadedLabels,
                     EtiquetasSalida = salidaLabels,
                     BultosSinEtiqueta = unlabeledBultos,
-                    DirectasSinEtiqueta = unlabeledBultos,
+                    DirectasSinEtiqueta = isDirectWithoutLabels ? unlabeledBultos : 0,
                     Estado = estado,
                     Confidence = confidence,
                     FechaArribo = r.FechaArribo ?? "",
@@ -300,12 +319,14 @@ public class WarehouseLayoutService
             }
         }
 
-        foreach (var loc in locations.Values)
+        foreach (var (ubicacion, loc) in locations)
         {
             loc.EntradasOmitidas = Math.Max(0, loc.EntradasCount - loc.Entradas.Count);
             loc.Confidence = loc.DirectasSinEtiqueta > 0
                 ? loc.EtiquetasPendientes > 0 ? "mixta" : "directa"
-                : "alta";
+                : consolidatedUnlabeled.GetValueOrDefault(ubicacion) > 0
+                    ? loc.EtiquetasPendientes > 0 ? "mixta" : "sin_etiqueta"
+                    : "alta";
             loc.Status = loc.EtiquetasPendientes > 0
                          && (loc.EtiquetasCargadas > 0 || loc.EtiquetasSalida > 0 || loc.BultosSinEtiqueta > 0)
                 ? "parcial"
