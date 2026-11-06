@@ -67,14 +67,15 @@ public sealed class TrazabilidadService
         public string UsuEdit { get; set; } = string.Empty;
         public DateTime? LoadStartedAt { get; set; }
         public DateTime? LoadFinishedAt { get; set; }
+        public DateTime? LastLoadScanAt { get; set; }
         public string LoadedBy { get; set; } = string.Empty;
+        public bool LoadNotRequired { get; set; }
     }
 
     private sealed class EntradaRow
     {
         public string Reference { get; set; } = string.Empty;
         public string Cliente { get; set; } = string.Empty;
-        public DateTime? ArrivalAt { get; set; }
         public bool HasHazmat { get; set; }
     }
 
@@ -82,6 +83,13 @@ public sealed class TrazabilidadService
     {
         public string Reference { get; set; } = string.Empty;
         public bool HasDamage { get; set; }
+    }
+
+    private sealed class EntradaTimelineRow
+    {
+        public string Reference { get; set; } = string.Empty;
+        public DateTime? WarehouseReceivedAt { get; set; }
+        public DateTime? ReviewFinishedAt { get; set; }
     }
 
     private sealed class LabelRow
@@ -110,6 +118,7 @@ public sealed class TrazabilidadService
         public RelacionRow? Relacion { get; set; }
         public List<TraceEntrada> Entradas { get; } = new();
         public List<DateTime> EntradaDates { get; } = new();
+        public List<DateTime> RevisionFinishedDates { get; } = new();
         public bool Truncated { get; set; }
         public bool HasDirectLink { get; set; }
         public bool HasLinkByRelacion { get; set; }
@@ -289,7 +298,11 @@ public sealed class TrazabilidadService
                       IFNULL(r.usuedit, '') AS UsuEdit,
                       CASE WHEN YEAR(r.inicio_carga) >= 2000 THEN r.inicio_carga END AS LoadStartedAt,
                       CASE WHEN YEAR(r.fin_carga) >= 2000 THEN r.fin_carga END AS LoadFinishedAt,
-                      IFNULL(r.usucargamcia, '') AS LoadedBy
+                      (SELECT MAX(e.time_scan)
+                       FROM etiqueta_mcia e
+                       WHERE e.relacion = r.relno AND YEAR(e.time_scan) >= 2000) AS LastLoadScanAt,
+                      IFNULL(r.usucargamcia, '') AS LoadedBy,
+                      CASE WHEN UPPER(TRIM(IFNULL(r.usucargamcia, ''))) = 'NO REQUERIDO' THEN 1 ELSE 0 END AS LoadNotRequired
                FROM {table} r
                LEFT JOIN tranfers t ON r.cidtransfer = t.cidtransfer
                WHERE r.relno = @relno
@@ -300,9 +313,9 @@ public sealed class TrazabilidadService
 
     private static async Task<List<string>> LoadReferencesByRelacionAsync(IDbConnection conn, string relno, CancellationToken ct)
         => (await conn.QueryAsync<string>(new CommandDefinition(
-            @"SELECT DISTINCT creferencia
+            @"SELECT DISTINCT TRIM(cref_origen) AS Reference
               FROM traf2
-              WHERE nrelacion = @relno AND creferencia <> ''
+              WHERE nrelacion = @relno AND cref_origen IS NOT NULL AND TRIM(cref_origen) <> ''
               LIMIT 26",
             new { relno },
             cancellationToken: ct))).ToList();
@@ -483,7 +496,6 @@ public sealed class TrazabilidadService
         var rows = (await conn.QueryAsync<EntradaRow>(new CommandDefinition(
             @"SELECT t.creferencia AS Reference,
                      IFNULL(MAX(cl.cnombre), '') AS Cliente,
-                     CASE WHEN YEAR(MAX(t.fcreatrafico)) >= 2000 THEN MAX(t.fcreatrafico) END AS ArrivalAt,
                      MAX(CASE WHEN COALESCE(t.lhazmat, 0) = 1 THEN 1 ELSE 0 END) AS HasHazmat
               FROM traf t
               LEFT JOIN clientes cl ON cl.cidcte = t.cclienteidtraf
@@ -498,7 +510,6 @@ public sealed class TrazabilidadService
             var grouped = (await conn.QueryAsync<EntradaRow>(new CommandDefinition(
                 @"SELECT f.cref_agrupada AS Reference,
                          IFNULL(MAX(cl.cnombre), '') AS Cliente,
-                         CASE WHEN YEAR(MAX(f.dfecha)) >= 2000 THEN MAX(f.dfecha) END AS ArrivalAt,
                          0 AS HasHazmat
                   FROM fact f
                   LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
@@ -520,6 +531,16 @@ public sealed class TrazabilidadService
             new { references = ordered },
             cancellationToken: ct))).ToDictionary(row => row.Reference, row => row.HasDamage, StringComparer.OrdinalIgnoreCase);
 
+        var timelineDates = (await conn.QueryAsync<EntradaTimelineRow>(new CommandDefinition(
+            @"SELECT creferencia AS Reference,
+                     CASE WHEN YEAR(MAX(recep_docs_bod)) >= 2000 THEN MAX(recep_docs_bod) END AS WarehouseReceivedAt,
+                     CASE WHEN YEAR(MAX(ffin_revision)) >= 2000 THEN MAX(ffin_revision) END AS ReviewFinishedAt
+              FROM traf3
+              WHERE creferencia IN @references
+              GROUP BY creferencia",
+            new { references = ordered },
+            cancellationToken: ct))).ToDictionary(row => row.Reference, StringComparer.OrdinalIgnoreCase);
+
         Dictionary<string, RevisionNormalCompletionSummary> summaries =
             await _completion.ObtenerResumenesAsync(conn, ordered);
 
@@ -528,11 +549,12 @@ public sealed class TrazabilidadService
             if (singleCodeReference && !rows.ContainsKey(reference)) continue;
 
             rows.TryGetValue(reference, out EntradaRow? row);
+            timelineDates.TryGetValue(reference, out EntradaTimelineRow? timelineDate);
             var entrada = new TraceEntrada
             {
                 Reference = reference,
                 Cliente = row?.Cliente ?? string.Empty,
-                ArrivalAt = TrazabilidadRules.FormatDate(row?.ArrivalAt),
+                ArrivalAt = TrazabilidadRules.FormatDate(timelineDate?.WarehouseReceivedAt),
                 Via = via[reference],
                 HasHazmat = row?.HasHazmat ?? false,
                 HasDamage = damage.TryGetValue(reference, out bool damaged) && damaged
@@ -548,7 +570,13 @@ public sealed class TrazabilidadService
             }
 
             chain.Entradas.Add(entrada);
-            if (TrazabilidadRules.IsRealDate(row?.ArrivalAt)) chain.EntradaDates.Add(row!.ArrivalAt!.Value);
+            if (timelineDate is not null)
+            {
+                if (TrazabilidadRules.IsRealDate(timelineDate.WarehouseReceivedAt))
+                    chain.EntradaDates.Add(timelineDate.WarehouseReceivedAt!.Value);
+                if (TrazabilidadRules.IsRealDate(timelineDate.ReviewFinishedAt))
+                    chain.RevisionFinishedDates.Add(timelineDate.ReviewFinishedAt!.Value);
+            }
         }
     }
 
@@ -609,8 +637,9 @@ public sealed class TrazabilidadService
                 DepartureAt = TrazabilidadRules.FormatDate(chain.Relacion.DepartureAt),
                 TotalEntradas = chain.Entradas.Count,
                 LoadStartedAt = TrazabilidadRules.FormatDate(chain.Relacion.LoadStartedAt),
-                LoadFinishedAt = TrazabilidadRules.FormatDate(chain.Relacion.LoadFinishedAt),
-                LoadedBy = chain.Relacion.LoadedBy.Trim()
+                LoadFinishedAt = TrazabilidadRules.FormatDate(LoadEventAt(chain.Relacion)),
+                LoadedBy = chain.Relacion.LoadedBy.Trim(),
+                LoadNotRequired = chain.Relacion.LoadNotRequired
             };
         }
 
@@ -636,13 +665,15 @@ public sealed class TrazabilidadService
             RelacionAuthorizedAt = relacion?.AuthorizedAt,
             RelacionDeparture = relacion?.DepartureAt,
             LoadStartedAt = relacion?.LoadStartedAt,
-            LoadFinishedAt = relacion?.LoadFinishedAt,
+            LoadFinishedAt = relacion is null ? null : LoadEventAt(relacion),
+            CargaNoRequerida = relacion?.LoadNotRequired ?? false,
             RelacionBusy = relacion is not null && !string.IsNullOrWhiteSpace(relacion.UsuEdit),
             EntradasCount = chain.Entradas.Count,
             EntradasTruncated = chain.Truncated,
             HasDirectLink = chain.HasDirectLink,
             HasLinkByRelacion = chain.HasLinkByRelacion,
-            EntradaArrival = chain.EntradaDates.Count > 0 ? chain.EntradaDates.Min() : null,
+            EntradaArrival = chain.EntradaDates.Count > 0 ? chain.EntradaDates.Max() : null,
+            RevisionFinishedAt = chain.RevisionFinishedDates.Count > 0 ? chain.RevisionFinishedDates.Max() : null,
             // Una entrada sin facturas no tiene nada que revisar: contarla como «sin revisar» pintaría pendiente
             // una revisión que no existe (pasa con entradas viejas o que todavía no se capturan).
             ReviewStatuses = chain.Entradas
@@ -653,6 +684,15 @@ public sealed class TrazabilidadService
             HasHazmat = chain.Entradas.Any(entrada => entrada.HasHazmat),
             PreStatus = chain.Preregistro?.Status ?? string.Empty
         };
+    }
+
+    private static DateTime? LoadEventAt(RelacionRow relacion)
+    {
+        if (relacion.LoadNotRequired) return null;
+        if (TrazabilidadRules.IsRealDate(relacion.LastLoadScanAt)) return relacion.LastLoadScanAt;
+
+        string status = relacion.EstatusCarga.Trim().ToUpperInvariant();
+        return status is "CARGADA" or "DEMASIADO RAPIDO" ? relacion.LoadFinishedAt : null;
     }
 
     private static List<TraceStation> EmptyStations()

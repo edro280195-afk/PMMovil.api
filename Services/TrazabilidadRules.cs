@@ -60,6 +60,8 @@ public sealed class TraceFacts
 
     /// <summary>Cuándo se terminó de cargar (<c>fin_carga</c>).</summary>
     public DateTime? LoadFinishedAt { get; set; }
+    public DateTime? CargaAt { get; set; }
+    public bool CargaNoRequerida { get; set; }
 
     public int EntradasCount { get; set; }
     public bool EntradasTruncated { get; set; }
@@ -71,6 +73,7 @@ public sealed class TraceFacts
     public bool HasLinkByRelacion { get; set; }
 
     public DateTime? EntradaArrival { get; set; }
+    public DateTime? RevisionFinishedAt { get; set; }
     public IReadOnlyList<string> ReviewStatuses { get; set; } = Array.Empty<string>();
     public bool HasDamage { get; set; }
     public bool HasHazmat { get; set; }
@@ -249,8 +252,8 @@ public static class TrazabilidadRules
         {
             new() { Id = TraceStationId.Caseta, State = CasetaState(facts), At = FormatDate(facts.CajaArrival) },
             new() { Id = TraceStationId.Entrada, State = EntradaState(facts), At = FormatDate(facts.EntradaArrival) },
-            new() { Id = TraceStationId.Revision, State = RevisionState(facts) },
-            new() { Id = TraceStationId.Carga, State = CargaState(facts, departed), At = FormatDate(CargaDate(facts)) },
+            new() { Id = TraceStationId.Revision, State = RevisionState(facts), At = FormatDate(facts.RevisionFinishedAt) },
+            new() { Id = TraceStationId.Carga, State = CargaState(facts, departed), At = FormatDate(facts.CargaAt) },
             new() { Id = TraceStationId.Relacion, State = RelacionState(facts, departed), At = FormatDate(facts.RelacionAuthorizedAt) },
             new() { Id = TraceStationId.Salida, State = SalidaState(facts, departed), At = FormatDate(DepartureDate(facts)) }
         };
@@ -271,11 +274,6 @@ public static class TrazabilidadRules
     public static bool IsLoadPending(TraceFacts facts)
         => facts.HasRelacion && !IsDeparted(facts) && (LoadStatus(facts) is "" or "CARGANDO" or "EN ESPERA");
 
-    private static DateTime? CargaDate(TraceFacts facts)
-        => IsRealDate(facts.LoadFinishedAt) ? facts.LoadFinishedAt
-            : IsRealDate(facts.LoadStartedAt) ? facts.LoadStartedAt
-            : null;
-
     /// <summary>
     /// Cargar mercancía. Hecha cuando el cargador cerró la relación (<c>CARGADA</c>) o ya pasó de ahí; en curso mientras
     /// se carga o está en espera; atención si quedó bloqueada o incompleta (pide al supervisor); pendiente si la
@@ -284,6 +282,8 @@ public static class TrazabilidadRules
     /// </summary>
     private static string CargaState(TraceFacts facts, bool departed)
     {
+        if (facts.CargaNoRequerida) return TraceState.NoAplica;
+
         if (!facts.HasRelacion)
         {
             if (departed) return TraceState.NoAplica;

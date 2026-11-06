@@ -164,6 +164,9 @@ public sealed class TraceRelacion
 
     /// <summary>Quién tiene tomada la carga (<c>usucargamcia</c>); vacío si nadie.</summary>
     public string LoadedBy { get; set; } = string.Empty;
+
+    /// <summary>La relación se liberó sin requerir captura de carga.</summary>
+    public bool LoadNotRequired { get; set; }
 }
 
 public sealed class TraceBulto
