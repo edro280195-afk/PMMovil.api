@@ -165,6 +165,8 @@ public class CasetaEntradaGuardarRequest
     public string Pedimento { get; set; } = string.Empty;
     public string Guia { get; set; } = string.Empty;
     public List<string> Fotos { get; set; } = new();
+    /// <summary>Índices de evidencia remota que se deben eliminar por petición explícita de la app.</summary>
+    public List<int> IndicesFotosEliminar { get; set; } = new();
     /// <summary>
     /// La app movil puede guardar primero el folio y enviar la evidencia en
     /// segundo plano. En ese caso el correo se dispara al finalizar la cola.

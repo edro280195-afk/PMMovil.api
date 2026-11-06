@@ -85,6 +85,9 @@ public class CasetaPhotoStorage
 
         foreach (CasetaPhotoStage photo in photos)
         {
+            // Una foto nueva con el mismo índice reemplaza una baja pendiente de ese nombre.
+            TryDelete(Path.Combine(GetDeleteDirectory(), photo.FileName + ".delete"));
+
             string target = Path.Combine(pending, photo.FileName);
             if (File.Exists(target))
             {

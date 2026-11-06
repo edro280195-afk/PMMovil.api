@@ -1059,6 +1059,12 @@ LIMIT 1", new { casetaId });
             return new CasetaEntradaGuardarResult { Success = false, Message = "Solo se permiten hasta 15 fotos." };
         }
 
+        if (datosF.IndicesFotosEliminar.Any(indice => indice is < 1 or > 15))
+        {
+            return new CasetaEntradaGuardarResult { Success = false, Message = "El indice de foto a eliminar no es valido." };
+        }
+        var indicesFotosEliminar = datosF.IndicesFotosEliminar.Distinct().ToList();
+
         datos.Planta = FirstNonEmpty(await ObtenerPlantaUsuarioSeguroAsync(datos.Usucrea, ct), datos.Planta);
         if (!datos.EsPreRegistro)
         {
@@ -1086,7 +1092,7 @@ LIMIT 1", new { casetaId });
         {
             bool existe = await ExisteCasetaIdEnBDAsync(conn, tx, datos.CasetaId);
             var resultado = existe
-           ? await ActualizarEntradaCasetaYFotosAsync(conn, tx, datos, listaFotos, fotosStaged, fotosParaEliminar, ct)
+           ? await ActualizarEntradaCasetaYFotosAsync(conn, tx, datos, listaFotos, fotosStaged, fotosParaEliminar, indicesFotosEliminar, ct)
            : await GuardarEntradaCasetaYFotosAsync(conn, tx, datos, listaFotos, fotosStaged, ct);
 
             if (!resultado.Success)
@@ -2528,6 +2534,7 @@ ORDER BY Nombre
    List<CasetaEntradaFoto> listaFotos,
    List<CasetaPhotoStage> fotosStaged,
    List<string> fotosParaEliminar,
+   IReadOnlyCollection<int> indicesFotosEliminar,
    CancellationToken ct)
     {
         int rows = await conn.ExecuteAsync(new CommandDefinition(@"
@@ -2569,7 +2576,8 @@ WHERE casetaid = @CasetaId",
             return new CasetaEntradaGuardarResult { Success = false, Message = "No se actualizo ningun registro." };
         }
 
-        var fotosResult = await GuardarFotosEntradaCasetaAsync(conn, tx, caseta, listaFotos, fotosStaged, fotosParaEliminar, ct);
+        var fotosResult = await GuardarFotosEntradaCasetaAsync(
+            conn, tx, caseta, listaFotos, fotosStaged, fotosParaEliminar, indicesFotosEliminar, ct);
         if (!fotosResult.Success)
             return fotosResult;
 
@@ -2626,7 +2634,8 @@ VALUES (
         if (rows <= 0)
             return new CasetaEntradaGuardarResult { Success = false, Message = "No se inserto ningun registro." };
 
-        var fotosResult = await GuardarFotosEntradaCasetaAsync(conn, tx, caseta, listaFotos, fotosStaged, new List<string>(), ct);
+        var fotosResult = await GuardarFotosEntradaCasetaAsync(
+            conn, tx, caseta, listaFotos, fotosStaged, new List<string>(), Array.Empty<int>(), ct);
         if (!fotosResult.Success)
             return fotosResult;
 
@@ -2642,6 +2651,7 @@ VALUES (
    List<CasetaEntradaFoto> listaFotos,
    List<CasetaPhotoStage> fotosStaged,
    List<string> fotosParaEliminar,
+   IReadOnlyCollection<int> indicesFotosEliminar,
    CancellationToken ct)
     {
         try
@@ -2656,12 +2666,11 @@ VALUES (
             // Separar entre fotos que se conservan (keep) y fotos nuevas a subir
             var fotosKeep = listaFotos.Where(f => f.TipoEtiqueta == "keep").ToList();
             var fotosNuevas = listaFotos.Where(f => f.TipoEtiqueta != "keep").ToList();
+            var indicesFotosNuevas = fotosNuevas.Select(f => f.Indice).ToHashSet();
 
-            // Índices que deben quedar al final: los keep + los nuevos
-            var indicesFinales = listaFotos.Select(f => f.Indice).ToHashSet();
-
-            // Eliminar fotos que ya no están en la lista final
-            foreach (int indice in existentes.Except(indicesFinales).ToList())
+            // Solo borrar fotos que el usuario quitó explícitamente. No inferimos una baja porque un índice falte
+            // de la lista: una lectura parcial de la unidad de red no debe borrar evidencia de la base ni del disco.
+            foreach (int indice in existentes.Intersect(indicesFotosEliminar).ToList())
             {
                 await conn.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM fotos WHERE nlineno = @nlineno AND creferencia = @creferencia AND ntipodocto = 106",
@@ -2669,8 +2678,12 @@ VALUES (
                 tx,
                 cancellationToken: ct));
 
-                string archivo = _photoStorage.GetFileName(caseta.CasetaId, indice);
-                fotosParaEliminar.Add(archivo);
+                existentes.Remove(indice);
+                if (!indicesFotosNuevas.Contains(indice))
+                {
+                    string archivo = _photoStorage.GetFileName(caseta.CasetaId, indice);
+                    fotosParaEliminar.Add(archivo);
+                }
             }
 
             // Las fotos keep ya existen en BD y en disco → no hacemos nada con ellas
@@ -2750,17 +2763,22 @@ ORDER BY nlineno", new { casetaId }))
             byIndex[indice] = (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre }, extension);
         }
 
-        foreach (string archivo in _photoStorage.EnumerateCasetaPhotos(casetaId))
+        // El detalle movil pide solo metadatos. No recorrer la unidad de red en ese caso:
+        // los registros de fotos ya están en BD y la app descarga las imagenes despues.
+        if (incluirBase64)
         {
-            string nombre = Path.GetFileName(archivo);
-            int indice = TryExtractPhotoIndex(nombre);
-            if (indice <= 0)
-                continue;
+            foreach (string archivo in _photoStorage.EnumerateCasetaPhotos(casetaId))
+            {
+                string nombre = Path.GetFileName(archivo);
+                int indice = TryExtractPhotoIndex(nombre);
+                if (indice <= 0)
+                    continue;
 
-            string extension = Path.GetExtension(nombre).TrimStart('.');
-            if (string.IsNullOrWhiteSpace(extension))
-                extension = "jpg";
-            byIndex.TryAdd(indice, (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre }, extension));
+                string extension = Path.GetExtension(nombre).TrimStart('.');
+                if (string.IsNullOrWhiteSpace(extension))
+                    extension = "jpg";
+                byIndex.TryAdd(indice, (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre }, extension));
+            }
         }
 
         foreach (var entry in byIndex.Values)
@@ -2776,6 +2794,9 @@ ORDER BY nlineno", new { casetaId }))
                 if (path == null)
                 {
                     _logger.LogWarning("Foto de caseta registrada en BD pero no encontrada en disco: {CasetaId}/{Indice}", casetaId, entry.Info.Indice);
+                    // Mantener base64 e info alineados por posición. El cliente usa esta posición para conocer el
+                    // índice original; omitir el elemento desplazaría todas las fotos siguientes.
+                    base64.Add(string.Empty);
                     continue;
                 }
 
@@ -2791,6 +2812,7 @@ ORDER BY nlineno", new { casetaId }))
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "No se pudo leer foto de caseta {CasetaId}/{Indice}", casetaId, entry.Info.Indice);
+                base64.Add(string.Empty);
             }
         }
 
