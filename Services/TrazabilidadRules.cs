@@ -228,6 +228,21 @@ public static class TrazabilidadRules
     public static string? FormatDate(DateTime? value)
         => IsRealDate(value) ? value!.Value.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture) : null;
 
+    /// <summary>
+    /// Cuándo ocurrió la carga que se enseña en La Línea: el último escaneo de mercancía de la relación; si no hay
+    /// ninguno, el fin de carga, pero solo cuando la carga ya cerró (<c>CARGADA</c> o <c>DEMASIADO RAPIDO</c>). Una
+    /// relación «NO REQUERIDO» no tiene fecha de carga. Quien arma los hechos la guarda en
+    /// <see cref="TraceFacts.CargaAt"/>, que es lo que lee la estación Carga.
+    /// </summary>
+    public static DateTime? LoadEventAt(bool notRequired, DateTime? lastLoadScanAt, string? loadStatus, DateTime? loadFinishedAt)
+    {
+        if (notRequired) return null;
+        if (IsRealDate(lastLoadScanAt)) return lastLoadScanAt;
+
+        string status = (loadStatus ?? string.Empty).Trim().ToUpperInvariant();
+        return status is "CARGADA" or "DEMASIADO RAPIDO" ? loadFinishedAt : null;
+    }
+
     /// <summary>La relación ya cargó y salió (o la caja ya salió): el recorrido físico terminó.</summary>
     public static bool IsDeparted(TraceFacts facts)
         => IsRealDate(facts.CajaDeparture)

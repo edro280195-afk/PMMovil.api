@@ -137,7 +137,9 @@ TraceFacts LoadFacts(string status, Action<TraceFacts>? more = null) => Facts(f 
     more?.Invoke(f);
 });
 DateTime loadStart = new(2026, 11, 4, 9, 0, 0);
+DateTime loadScan = new(2026, 11, 4, 9, 12, 0);
 DateTime loadEnd = new(2026, 11, 4, 9, 40, 0);
+string? CargaAt(TraceFacts facts) => TrazabilidadRules.BuildStations(facts).Single(s2 => s2.Id == TraceStationId.Carga).At;
 
 TraceFacts notLoaded = LoadFacts("");
 Equal(TraceState.Pendiente, StateOf(notLoaded, TraceStationId.Carga), "Sin cargar: carga pendiente");
@@ -146,23 +148,53 @@ Check(TrazabilidadRules.IsLoadPending(notLoaded), "Sin cargar: se puede cargar")
 Sequence(new[] { TraceAction.OpenLoad, TraceAction.OpenRelation, TraceAction.ExitGate },
     TrazabilidadRules.BuildActions(notLoaded, true), "Relación sin cargar: «Cargar mercancía» va primero");
 
-TraceFacts loading = LoadFacts("CARGANDO", f => f.LoadStartedAt = loadStart);
+// La fecha de la estación Carga ya no es el inicio de la carga: es el último escaneo de mercancía (facts.CargaAt, que la
+// llena el servicio con TrazabilidadRules.LoadEventAt). Antes de esa regla se leía de LoadStartedAt/LoadFinishedAt.
+TraceFacts loading = LoadFacts("CARGANDO", f => { f.LoadStartedAt = loadStart; f.CargaAt = loadScan; });
 Equal(TraceState.EnCurso, StateOf(loading, TraceStationId.Carga), "Cargándose: carga en curso");
 Equal(TraceState.Pendiente, StateOf(loading, TraceStationId.Relacion), "Cargándose: relación pendiente");
-Equal("2026-11-04T09:00:00", TrazabilidadRules.BuildStations(loading).Single(s2 => s2.Id == TraceStationId.Carga).At, "En curso: fecha de inicio");
+Equal<string?>("2026-11-04T09:12:00", CargaAt(loading), "En curso: fecha del último escaneo");
+Equal<string?>(null, CargaAt(LoadFacts("CARGANDO", f => f.LoadStartedAt = loadStart)), "En curso sin escaneos: sin fecha (el inicio ya no se enseña)");
 Check(TrazabilidadRules.IsLoadPending(loading), "Cargándose: se puede seguir cargando");
 
 TraceFacts paused = LoadFacts("EN ESPERA", f => f.LoadStartedAt = loadStart);
 Equal(TraceState.EnCurso, StateOf(paused, TraceStationId.Carga), "En espera: carga en curso");
 Equal(TraceAction.OpenLoad, TrazabilidadRules.BuildActions(paused, true).First(), "En espera: se puede reanudar");
 
-TraceFacts loaded = LoadFacts("CARGADA", f => { f.LoadStartedAt = loadStart; f.LoadFinishedAt = loadEnd; });
+TraceFacts loaded = LoadFacts("CARGADA", f => { f.LoadStartedAt = loadStart; f.LoadFinishedAt = loadEnd; f.CargaAt = loadEnd; });
 Equal(TraceState.Hecha, StateOf(loaded, TraceStationId.Carga), "Cargada: carga hecha");
 Equal(TraceState.EnCurso, StateOf(loaded, TraceStationId.Relacion), "Cargada: espera al supervisor");
-Equal("2026-11-04T09:40:00", TrazabilidadRules.BuildStations(loaded).Single(s2 => s2.Id == TraceStationId.Carga).At, "Cargada: fecha de fin");
+Equal<string?>("2026-11-04T09:40:00", CargaAt(loaded), "Cargada: fecha de la carga");
+Equal<string?>(null, CargaAt(LoadFacts("CARGADA", f => f.LoadFinishedAt = loadEnd)), "Sin CargaAt la estación no inventa fecha (la tiene que llenar quien arma los hechos)");
 Check(!TrazabilidadRules.IsLoadPending(loaded), "Cargada: ya no se ofrece cargar");
 Check(!TrazabilidadRules.BuildActions(loaded, true).Contains(TraceAction.OpenLoad), "Cargada: sin «Cargar mercancía»");
 Equal(TraceState.Hecha, StateOf(LoadFacts("DEMASIADO RAPIDO"), TraceStationId.Carga), "Demasiado rápido: la carga se cerró");
+
+// Relación liberada sin cargar (usucargamcia = 'NO REQUERIDO'): la estación no aplica y no lleva fecha.
+Equal(TraceState.NoAplica, StateOf(LoadFacts("", f => f.CargaNoRequerida = true), TraceStationId.Carga), "No requiere carga: la estación no aplica");
+Equal(TraceState.NoAplica, StateOf(LoadFacts("AUTORIZADA", f => f.CargaNoRequerida = true), TraceStationId.Carga), "No requiere carga, aunque esté autorizada: no aplica");
+Equal<string?>(null, CargaAt(LoadFacts("", f => f.CargaNoRequerida = true)), "No requiere carga: sin fecha");
+
+// De dónde sale la fecha de la estación Carga (TrazabilidadRules.LoadEventAt): el último escaneo de mercancía; si no hay,
+// el fin de carga, pero solo cuando la carga ya cerró.
+DateTime lastScan = new(2026, 11, 4, 9, 38, 0);
+Equal<DateTime?>(lastScan, TrazabilidadRules.LoadEventAt(false, lastScan, "CARGANDO", null), "La fecha es el último escaneo aunque la carga siga abierta");
+Equal<DateTime?>(lastScan, TrazabilidadRules.LoadEventAt(false, lastScan, "CARGADA", loadEnd), "El escaneo manda sobre el fin de carga");
+Equal<DateTime?>(loadEnd, TrazabilidadRules.LoadEventAt(false, null, "CARGADA", loadEnd), "Cerrada y sin escaneos: el fin de carga");
+Equal<DateTime?>(loadEnd, TrazabilidadRules.LoadEventAt(false, null, " demasiado rapido ", loadEnd), "El estatus se compara sin mayúsculas ni espacios");
+Equal<DateTime?>(null, TrazabilidadRules.LoadEventAt(false, null, "CARGANDO", loadEnd), "Abierta y sin escaneos: todavía no hay fecha de carga");
+Equal<DateTime?>(null, TrazabilidadRules.LoadEventAt(false, null, null, loadEnd), "Sin estatus: sin fecha");
+Equal<DateTime?>(loadEnd, TrazabilidadRules.LoadEventAt(false, new DateTime(1, 1, 1), "CARGADA", loadEnd), "Un escaneo con fecha cero del sistema viejo se ignora");
+Equal<DateTime?>(null, TrazabilidadRules.LoadEventAt(true, lastScan, "CARGADA", loadEnd), "NO REQUERIDO: sin fecha de carga aunque haya datos");
+
+// Revisión: la estación enseña cuándo terminó la revisión de la entrada.
+TraceFacts reviewed = Facts(f =>
+{
+    f.HasCaja = true; f.CajaArrival = arrived; f.EntradasCount = 1; f.EntradaArrival = arrived;
+    f.ReviewStatuses = new[] { "COMPLETA" }; f.RevisionFinishedAt = new DateTime(2026, 10, 21, 11, 15, 0);
+});
+Equal<string?>("2026-10-21T11:15:00", TrazabilidadRules.BuildStations(reviewed).Single(s2 => s2.Id == TraceStationId.Revision).At, "Revisión: fecha de fin");
+Equal<string?>(null, TrazabilidadRules.BuildStations(Facts(f => { f.HasCaja = true; f.CajaArrival = arrived; f.EntradasCount = 1; })).Single(s2 => s2.Id == TraceStationId.Revision).At, "Revisión sin terminar: sin fecha");
 
 Equal(TraceState.Atencion, StateOf(LoadFacts("BLOQUEO"), TraceStationId.Carga), "Bloqueada: atención");
 Equal(TraceState.Atencion, StateOf(LoadFacts("INCOMPLETA"), TraceStationId.Carga), "Incompleta: atención");

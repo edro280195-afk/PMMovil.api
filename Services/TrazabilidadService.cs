@@ -666,6 +666,9 @@ public sealed class TrazabilidadService
             RelacionDeparture = relacion?.DepartureAt,
             LoadStartedAt = relacion?.LoadStartedAt,
             LoadFinishedAt = relacion is null ? null : LoadEventAt(relacion),
+            // La fecha que enseña la estación Carga. Las reglas la leen de aquí: sin esta línea la estación se quedaba
+            // siempre sin fecha (se las daba el cálculo viejo a partir de LoadStartedAt/LoadFinishedAt, que ya no existe).
+            CargaAt = relacion is null ? null : LoadEventAt(relacion),
             CargaNoRequerida = relacion?.LoadNotRequired ?? false,
             RelacionBusy = relacion is not null && !string.IsNullOrWhiteSpace(relacion.UsuEdit),
             EntradasCount = chain.Entradas.Count,
@@ -687,13 +690,11 @@ public sealed class TrazabilidadService
     }
 
     private static DateTime? LoadEventAt(RelacionRow relacion)
-    {
-        if (relacion.LoadNotRequired) return null;
-        if (TrazabilidadRules.IsRealDate(relacion.LastLoadScanAt)) return relacion.LastLoadScanAt;
-
-        string status = relacion.EstatusCarga.Trim().ToUpperInvariant();
-        return status is "CARGADA" or "DEMASIADO RAPIDO" ? relacion.LoadFinishedAt : null;
-    }
+        => TrazabilidadRules.LoadEventAt(
+            relacion.LoadNotRequired,
+            relacion.LastLoadScanAt,
+            relacion.EstatusCarga,
+            relacion.LoadFinishedAt);
 
     private static List<TraceStation> EmptyStations()
         => TraceStationId.Order
