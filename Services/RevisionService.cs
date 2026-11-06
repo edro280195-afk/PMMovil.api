@@ -1922,6 +1922,14 @@ new { creferencia });
 
     public async Task RegistrarTomaDocumentoAsync(string creferencia, string usuario)
     {
+        // Sin referencia o sin usuario no hay "toma de documento" que registrar. traftiemposrevision tiene DEFAULT ''
+        // y '0000-00-00' en casi todas sus columnas, así que un INSERT con datos vacíos deja una fila en blanco que
+        // las consultas de pendientes cuentan como sesión abierta. Mejor fallar fuerte que guardar basura.
+        if (string.IsNullOrWhiteSpace(creferencia) || string.IsNullOrWhiteSpace(usuario))
+        {
+            throw new ArgumentException("La toma de documentos requiere referencia y usuario.");
+        }
+
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
         using IDbTransaction transaction = conn.BeginTransaction();

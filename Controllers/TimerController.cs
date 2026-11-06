@@ -131,6 +131,13 @@ public class TimerController : ControllerBase
         _ = 7;
         try
         {
+            // Una referencia vacía insertaría una fila en blanco en traftiemposrevision (sus columnas tienen DEFAULT
+            // '' / '0000-00-00') que las consultas de pendientes cuentan como una sesión abierta.
+            if (string.IsNullOrWhiteSpace(creferencia))
+            {
+                return BadRequest(new { success = false, message = "Falta la referencia de la entrada." });
+            }
+
             string usuario = base.User.Identity?.Name ?? "Desconocido";
             using IDbConnection conn = _db.CreateConnection();
 

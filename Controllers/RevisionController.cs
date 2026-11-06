@@ -901,6 +901,11 @@ WHERE inactivo = 0
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(creferencia))
+            {
+                return BadRequest(new { success = false, message = "Falta la referencia de la entrada." });
+            }
+
             string usuario = base.User.Identity?.Name ?? "Desconocido";
             await _revisionService.RegistrarTomaDocumentoAsync(creferencia, usuario);
             return Ok(new
