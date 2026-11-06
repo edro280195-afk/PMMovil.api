@@ -40,13 +40,15 @@ public sealed class MonitorTvRevisionRow
     public string? Cliente { get; init; }
     public DateTime Arribo { get; init; }
     public DateTime? FechaFactura { get; init; }
-    public bool TieneFactura { get; init; }
-    public string? Manejo { get; init; }
-    public string Estatus { get; init; } = string.Empty;
-    public string? Origen { get; init; }
     public string? Revisor { get; init; }
     public DateTime? FechaInicioRevision { get; init; }
     public DateTime? FechaFinRevision { get; init; }
+    public int TotalPartidas { get; init; }
+    public int PartidasFinalizadas { get; init; }
+    public int TotalFacturas { get; init; }
+    public int FacturasFinalizadas { get; init; }
+    public int Discrepancias { get; init; }
+    public string? FacturaEnRevision { get; init; }
 }
 
 public sealed class MonitorTvRevisionesResponse
@@ -73,7 +75,7 @@ public sealed class ImexShiftMetrics
     public List<ImexReviewerShiftScore> ReviewerScores { get; init; } = new();
 }
 
-/// <summary>Trabajo cerrado por un revisor durante el día actual.</summary>
+/// <summary>Revisiones terminadas y actividad registrada por un revisor durante el día actual.</summary>
 public sealed class ImexReviewerShiftScore
 {
     public string Reviewer { get; init; } = string.Empty;
@@ -81,6 +83,7 @@ public sealed class ImexReviewerShiftScore
     public int SameDayArrivalAndInvoiceEntries { get; init; }
     public int Discrepancies { get; init; }
     public int InvoicesReviewed { get; init; }
+    public int LinesReviewed { get; init; }
     public int TimedReviews { get; init; }
     public int? AverageMinutes { get; init; }
 }

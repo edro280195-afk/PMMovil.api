@@ -79,8 +79,15 @@ public class MetricasRevisionService
     private sealed class ImexInvoiceReviewEventRow
     {
         public string Reviewer { get; set; } = string.Empty;
+        public string Reference { get; set; } = string.Empty;
         public string Invoice { get; set; } = string.Empty;
         public bool IsDiscrepancy { get; set; }
+    }
+
+    private sealed class ImexReviewedLinesRow
+    {
+        public string Reviewer { get; set; } = string.Empty;
+        public int LinesReviewed { get; set; }
     }
 
     private sealed class ImexPhotoIdsRow
@@ -482,6 +489,7 @@ public class MetricasRevisionService
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
         const string sql = @"
             SELECT TRIM(usuario) AS Reviewer,
+                   TRIM(creferencia) AS Reference,
                    TRIM(cnofact) AS Invoice,
                    MAX(tipo = @discrepancy) AS IsDiscrepancy
             FROM revision_actividad
@@ -489,7 +497,7 @@ public class MetricasRevisionService
               AND TRIM(usuario) IN @reviewers
               AND tipo IN (@discrepancy, @completed)
               AND COALESCE(TRIM(cnofact), '') <> ''
-            GROUP BY TRIM(usuario), TRIM(cnofact)";
+            GROUP BY TRIM(usuario), TRIM(creferencia), TRIM(cnofact)";
 
         IEnumerable<ImexInvoiceReviewEventRow> rows = await conn.QueryAsync<ImexInvoiceReviewEventRow>(
             new CommandDefinition(sql, new
@@ -499,6 +507,32 @@ public class MetricasRevisionService
                 reviewers = ReviewerRoster.All,
                 discrepancy = RevisionActivityTypes.FacturaDiscrepancia,
                 completed = RevisionActivityTypes.FacturaCompletada
+            }, cancellationToken: cancellationToken));
+        return rows.ToList();
+    }
+
+    private async Task<List<ImexReviewedLinesRow>> GetImexReviewedLinesAsync(
+        DateTime shiftDate,
+        CancellationToken cancellationToken)
+    {
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        const string sql = @"
+            SELECT TRIM(usuario) AS Reviewer,
+                   COUNT(DISTINCT idrevdet) AS LinesReviewed
+            FROM revision_actividad
+            WHERE fecha >= @start AND fecha < @end
+              AND TRIM(usuario) IN @reviewers
+              AND tipo = @reviewed
+              AND idrevdet IS NOT NULL
+            GROUP BY TRIM(usuario)";
+
+        IEnumerable<ImexReviewedLinesRow> rows = await conn.QueryAsync<ImexReviewedLinesRow>(
+            new CommandDefinition(sql, new
+            {
+                start = shiftDate.Date,
+                end = shiftDate.Date.AddDays(1),
+                reviewers = ReviewerRoster.All,
+                reviewed = RevisionActivityTypes.PartidaRevisada
             }, cancellationToken: cancellationToken));
         return rows.ToList();
     }
@@ -683,6 +717,7 @@ public class MetricasRevisionService
         IReadOnlyCollection<ImexShiftClosureRow> closureEvents,
         IReadOnlyCollection<ImexReviewSessionRow> reviewSessions,
         IReadOnlyCollection<ImexInvoiceReviewEventRow> invoiceReviewEvents,
+        IReadOnlyCollection<ImexReviewedLinesRow> reviewedLines,
         DateTime shiftDate,
         IReadOnlyDictionary<string, string> reviewerNames)
     {
@@ -712,10 +747,15 @@ public class MetricasRevisionService
             .Where(row => !string.IsNullOrWhiteSpace(row.Reviewer))
             .GroupBy(row => row.Reviewer.Trim(), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, int> linesByReviewer = reviewedLines
+            .Where(row => !string.IsNullOrWhiteSpace(row.Reviewer))
+            .GroupBy(row => row.Reviewer.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Sum(row => row.LinesReviewed), StringComparer.OrdinalIgnoreCase);
         string[] reviewerKeys = ReviewerRoster.All
             .Concat(closureGroups.Select(group => group.ReviewerKey))
             .Concat(reviewSessions.Select(row => row.Reviewer))
             .Concat(invoiceReviewEvents.Select(row => row.Reviewer))
+            .Concat(reviewedLines.Select(row => row.Reviewer))
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -751,15 +791,9 @@ public class MetricasRevisionService
                     SameDayArrivalAndInvoiceEntries = reviewerRows.Count(row =>
                         row.Row.Arribo.Date == shiftDate.Date
                         && row.Row.FechaPrimeraFactura?.Date == shiftDate.Date),
-                    Discrepancies = reviewerInvoices
-                        .Where(row => row.IsDiscrepancy)
-                        .Select(row => row.Invoice)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .Count(),
-                    InvoicesReviewed = reviewerInvoices
-                        .Select(row => row.Invoice)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .Count(),
+                    Discrepancies = reviewerInvoices.Count(row => row.IsDiscrepancy),
+                    InvoicesReviewed = reviewerInvoices.Length,
+                    LinesReviewed = linesByReviewer.GetValueOrDefault(reviewerKey),
                     TimedReviews = reviewMinutes.Length,
                     AverageMinutes = reviewMinutes.Length > 0
                         ? (int)Math.Round(reviewMinutes.Average())
@@ -1058,21 +1092,25 @@ public class MetricasRevisionService
         List<ImexShiftClosureRow> closureEvents = await GetImexShiftClosuresAsync(shiftDate, cancellationToken);
         Task<List<ImexReviewSessionRow>> reviewSessionsTask = GetImexReviewSessionsAsync(shiftDate, cancellationToken);
         Task<List<ImexInvoiceReviewEventRow>> invoiceReviewEventsTask = GetImexInvoiceReviewEventsAsync(shiftDate, cancellationToken);
-        await Task.WhenAll(reviewSessionsTask, invoiceReviewEventsTask);
+        Task<List<ImexReviewedLinesRow>> reviewedLinesTask = GetImexReviewedLinesAsync(shiftDate, cancellationToken);
+        await Task.WhenAll(reviewSessionsTask, invoiceReviewEventsTask, reviewedLinesTask);
         List<ImexReviewSessionRow> reviewSessions = await reviewSessionsTask;
         List<ImexInvoiceReviewEventRow> invoiceReviewEvents = await invoiceReviewEventsTask;
+        List<ImexReviewedLinesRow> reviewedLines = await reviewedLinesTask;
         Dictionary<string, string> reviewerNames = await GetReviewerNamesAsync(
             conn,
             ReviewerRoster.All
                 .Concat(closureEvents.Select(row => row.Reviewer))
                 .Concat(reviewSessions.Select(row => row.Reviewer))
-                .Concat(invoiceReviewEvents.Select(row => row.Reviewer)),
+                .Concat(invoiceReviewEvents.Select(row => row.Reviewer))
+                .Concat(reviewedLines.Select(row => row.Reviewer)),
             cancellationToken);
         ImexShiftMetrics shiftMetrics = CreateShiftMetrics(
             completedRows,
             closureEvents,
             reviewSessions,
             invoiceReviewEvents,
+            reviewedLines,
             shiftDate,
             reviewerNames);
 

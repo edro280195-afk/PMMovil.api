@@ -70,6 +70,7 @@ public class WarehouseHub : Hub
 
     private readonly RevisionActivityService _activityService;
     private readonly IModulePermissionService _permissionService;
+    private readonly MonitorTvRealtimePublisher _monitorTvRealtimePublisher;
 
     private static readonly ConcurrentDictionary<string, PresenceState> _registry = new ConcurrentDictionary<string, PresenceState>();
 
@@ -78,11 +79,13 @@ public class WarehouseHub : Hub
     public WarehouseHub(
         BaseRepository db,
         RevisionActivityService activityService,
-        IModulePermissionService permissionService)
+        IModulePermissionService permissionService,
+        MonitorTvRealtimePublisher monitorTvRealtimePublisher)
     {
         _db = db;
         _activityService = activityService;
         _permissionService = permissionService;
+        _monitorTvRealtimePublisher = monitorTvRealtimePublisher;
     }
 
     private static void PurgeStaleEntries()
@@ -97,44 +100,103 @@ public class WarehouseHub : Hub
     }
 
     public List<PresenceState> GetPresenciaActiva()
+        => GetActivePresenceSnapshot();
+
+    public static List<PresenceState> GetActivePresenceSnapshot()
     {
         PurgeStaleEntries();
-        return _registry.Values.OrderBy((PresenceState x) => x.Usuario).ToList();
+        return _registry.Values
+            .Select(presence => new PresenceState
+            {
+                Usuario = presence.Usuario,
+                Entry = presence.Entry,
+                Invoice = presence.Invoice,
+                Item = presence.Item,
+                LastSeen = presence.LastSeen,
+            })
+            .OrderBy(presence => presence.Usuario)
+            .ToList();
     }
 
-    public async Task RegistrarActividad(string creferencia, string usuario, string cnofact = "", string item = "")
+    public Task RegistrarActividad(string creferencia, string usuario, string cnofact = "", string item = "")
+        => RegistrarActividadInterna(creferencia, cnofact, item, preservarFacturaVacia: true);
+
+    public Task RegisterCurrentReviewInvoice(string creferencia, string cnofact = "")
+        => RegistrarActividadInterna(creferencia, cnofact, string.Empty, preservarFacturaVacia: false);
+
+    private async Task RegistrarActividadInterna(
+        string creferencia,
+        string cnofact,
+        string item,
+        bool preservarFacturaVacia)
     {
-        string usuarioReal = base.Context.User?.Identity?.Name;
-        if (!string.IsNullOrEmpty(usuarioReal))
+        string? usuarioReal = Context.User?.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(usuarioReal)) return;
+
+        PurgeStaleEntries();
+        _registry.TryGetValue(usuarioReal, out PresenceState? previousPresence);
+
+        bool mismaEntrada = previousPresence != null
+            && string.Equals(previousPresence.Entry, creferencia, StringComparison.OrdinalIgnoreCase);
+        string facturaActual = preservarFacturaVacia
+            && string.IsNullOrWhiteSpace(cnofact)
+            && mismaEntrada
+                ? previousPresence!.Invoice
+                : cnofact ?? string.Empty;
+        bool entradaCambiada = !mismaEntrada;
+        bool facturaCambiada = previousPresence == null
+            || !string.Equals(previousPresence.Invoice, facturaActual, StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(creferencia))
         {
-            PurgeStaleEntries();
-            if (!string.IsNullOrEmpty(creferencia))
+            _registry[usuarioReal] = new PresenceState
             {
-                _registry[usuarioReal] = new PresenceState
-                {
-                    Usuario = usuarioReal,
-                    Entry = creferencia,
-                    Invoice = cnofact,
-                    Item = item,
-                    LastSeen = DateTime.Now
-                };
-            }
-            else
-            {
-                _registry.TryRemove(usuarioReal, out PresenceState _);
-            }
-            // Esta llamada es un latido de presencia, no un movimiento de la
-            // revisión. Se conserva como registro técnico porque la higiene
-            // de sesiones lo usa para detectar actividad, pero la bitácora
-            // visible filtra este detalle para que el usuario conectado no
-            // aparezca como autor de cualquier entrada que consulte.
-            await _activityService.RegistrarAsync(
+                Usuario = usuarioReal,
+                Entry = creferencia,
+                Invoice = facturaActual,
+                Item = item,
+                LastSeen = DateTime.Now
+            };
+        }
+        else
+        {
+            _registry.TryRemove(usuarioReal, out PresenceState _);
+        }
+
+        // Esta llamada es un latido de presencia, no un movimiento de la
+        // revisión. Se conserva como registro técnico porque la higiene
+        // de sesiones lo usa para detectar actividad, pero la bitácora
+        // visible filtra este detalle.
+        await _activityService.RegistrarAsync(
+            creferencia,
+            usuarioReal,
+            RevisionActivityTypes.CambioActividad,
+            facturaActual,
+            detalle: string.IsNullOrWhiteSpace(item) ? "Actividad en revisión" : item);
+        await Clients.All.SendAsync("onActividadRecibida", creferencia, usuarioReal, facturaActual, item);
+
+        if (!entradaCambiada && !facturaCambiada) return;
+
+        if (previousPresence != null
+            && !string.IsNullOrWhiteSpace(previousPresence.Entry)
+            && entradaCambiada)
+        {
+            await _monitorTvRealtimePublisher.RevisionActualizadaAsync(
+                previousPresence.Entry,
+                usuarioReal,
+                "FACTURA_ACTUAL",
+                oficinaOrigen: null,
+                cancellationToken: Context.ConnectionAborted);
+        }
+
+        if (!string.IsNullOrWhiteSpace(creferencia))
+        {
+            await _monitorTvRealtimePublisher.RevisionActualizadaAsync(
                 creferencia,
                 usuarioReal,
-                RevisionActivityTypes.CambioActividad,
-                cnofact,
-                detalle: string.IsNullOrWhiteSpace(item) ? "Actividad en revisión" : item);
-            await base.Clients.All.SendAsync("onActividadRecibida", creferencia, usuarioReal, cnofact, item);
+                "FACTURA_ACTUAL",
+                oficinaOrigen: null,
+                cancellationToken: Context.ConnectionAborted);
         }
     }
 
@@ -147,20 +209,38 @@ public class WarehouseHub : Hub
         }
 
         PurgeStaleEntries();
-        _registry[usuarioReal] = new PresenceState
-        {
-            Usuario = usuarioReal,
-            Entry = creferencia,
-            LastSeen = DateTime.Now
-        };
+        DateTime lastSeen = DateTime.Now;
+        PresenceState presencia = _registry.AddOrUpdate(
+            usuarioReal,
+            _ => new PresenceState
+            {
+                Usuario = usuarioReal,
+                Entry = creferencia,
+                LastSeen = lastSeen
+            },
+            (_, previousPresence) =>
+            {
+                bool mismaEntrada = string.Equals(
+                    previousPresence.Entry,
+                    creferencia,
+                    StringComparison.OrdinalIgnoreCase);
+                return new PresenceState
+                {
+                    Usuario = usuarioReal,
+                    Entry = creferencia,
+                    Invoice = mismaEntrada ? previousPresence.Invoice : string.Empty,
+                    Item = mismaEntrada ? previousPresence.Item : string.Empty,
+                    LastSeen = lastSeen
+                };
+            });
 
         await base.Clients.All.SendAsync("onPresenciaActualizada", new
         {
             usuario = usuarioReal,
             entry = creferencia,
-            invoice = "",
-            item = "",
-            lastSeen = DateTime.Now
+            invoice = presencia.Invoice,
+            item = presencia.Item,
+            lastSeen
         });
     }
 

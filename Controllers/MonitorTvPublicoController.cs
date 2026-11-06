@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+
+using Dapper;
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -10,6 +13,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Logging;
 
+using PMMovil.Api.Data;
+using PMMovil.Api.Hubs;
 using PMMovil.Api.Models;
 using PMMovil.Api.Services;
 
@@ -25,17 +30,20 @@ public sealed class MonitorTvPublicoController : ControllerBase
     private readonly IMonitorTvLinkService _tvLinkService;
     private readonly MetricasRevisionService _metricasService;
     private readonly IRevisionShareService _revisionShareService;
+    private readonly BaseRepository _db;
     private readonly ILogger<MonitorTvPublicoController> _logger;
 
     public MonitorTvPublicoController(
         IMonitorTvLinkService tvLinkService,
         MetricasRevisionService metricasService,
         IRevisionShareService revisionShareService,
+        BaseRepository db,
         ILogger<MonitorTvPublicoController> logger)
     {
         _tvLinkService = tvLinkService;
         _metricasService = metricasService;
         _revisionShareService = revisionShareService;
+        _db = db;
         _logger = logger;
     }
 
@@ -60,7 +68,7 @@ public sealed class MonitorTvPublicoController : ControllerBase
 
         DateTime hoy = GetMatamorosNow().Date;
         DateTime ayer = hoy.AddDays(-1);
-        var items = new List<MonitorTvRevisionRow>();
+        List<MonitorTvRevisionRow> items = new();
         bool truncado = false;
 
         try
@@ -78,22 +86,68 @@ public sealed class MonitorTvPublicoController : ControllerBase
                 cancellationToken: cancellationToken);
 
             truncado = evidencia.Truncado;
-            items.AddRange(evidencia.Items
-                .Where(row => !row.TieneFactura || row.FacturasPendientesRevision > 0)
-                .Select(row => new MonitorTvRevisionRow
+            List<EvidenciaRowDto> activeReviews = evidencia.Items
+                .Where(IsReviewInProgress)
+                .ToList();
+            HashSet<string> references = activeReviews
+                .Select(row => row.Creferencia)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            Dictionary<string, MonitorTvProgressRow> progressByReference = new(StringComparer.OrdinalIgnoreCase);
+            if (references.Count > 0)
             {
-                Creferencia = row.Creferencia,
-                Cliente = row.Cliente,
-                Arribo = row.Arribo,
-                FechaFactura = row.FechaFactura,
-                TieneFactura = row.TieneFactura,
-                Manejo = row.Manejo,
-                Estatus = row.Estatus,
-                Origen = row.Origen,
-                Revisor = row.Revisor,
-                FechaInicioRevision = row.FechaInicioRevision,
-                FechaFinRevision = row.FechaFinRevision,
-            }));
+                using IDbConnection conn = _db.CreateConnection();
+                List<MonitorTvProgressRow> progressRows = (await conn.QueryAsync<MonitorTvProgressRow>(
+                    new CommandDefinition(@"
+                        SELECT
+                            f.cref_agrupada AS Creferencia,
+                            COUNT(DISTINCT f.cnofact) AS TotalFacturas,
+                            COUNT(DISTINCT CASE WHEN COALESCE(f.status_rev, 0) = 1 THEN f.cnofact END) AS FacturasFinalizadas,
+                            COUNT(DISTINCT rd.idrevdet) AS TotalPartidas,
+                            COUNT(DISTINCT CASE WHEN COALESCE(rd.revisada, 0) = 1 THEN rd.idrevdet END) AS PartidasFinalizadas
+                        FROM fact f
+                        LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+                        WHERE f.cref_agrupada IN @references
+                        GROUP BY f.cref_agrupada",
+                        new { references },
+                        cancellationToken: cancellationToken))).ToList();
+
+                progressByReference = progressRows.ToDictionary(row => row.Creferencia, StringComparer.OrdinalIgnoreCase);
+            }
+
+            Dictionary<string, string> currentInvoices = WarehouseHub.GetActivePresenceSnapshot()
+                .Where(presence => references.Contains(presence.Entry)
+                    && !string.IsNullOrWhiteSpace(presence.Invoice))
+                .GroupBy(presence => presence.Entry, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.OrderByDescending(presence => presence.LastSeen)
+                        .Select(presence => presence.Invoice)
+                        .First(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            items = activeReviews.Select(row =>
+            {
+                progressByReference.TryGetValue(row.Creferencia, out MonitorTvProgressRow? progress);
+                currentInvoices.TryGetValue(row.Creferencia, out string? currentInvoice);
+
+                return new MonitorTvRevisionRow
+                {
+                    Creferencia = row.Creferencia,
+                    Cliente = row.Cliente,
+                    Arribo = row.Arribo,
+                    FechaFactura = row.FechaFactura,
+                    Revisor = row.Revisor,
+                    FechaInicioRevision = row.FechaInicioRevision,
+                    FechaFinRevision = row.FechaFinRevision,
+                    TotalPartidas = progress?.TotalPartidas ?? 0,
+                    PartidasFinalizadas = progress?.PartidasFinalizadas ?? 0,
+                    TotalFacturas = progress?.TotalFacturas ?? 0,
+                    FacturasFinalizadas = progress?.FacturasFinalizadas ?? 0,
+                    Discrepancias = row.Discrepancias,
+                    FacturaEnRevision = currentInvoice,
+                };
+            }).ToList();
         }
         catch (Exception exception)
         {
@@ -102,9 +156,7 @@ public sealed class MonitorTvPublicoController : ControllerBase
         }
 
         List<MonitorTvRevisionRow> orderedItems = items
-            .Where(EsPendienteRevisionFisica)
-            .OrderBy(PrioridadMonitorNld)
-            .ThenBy(OrdenSecundarioMonitorNld)
+            .OrderBy(row => row.FechaInicioRevision ?? DateTime.MaxValue)
             .ThenBy(row => row.Creferencia, StringComparer.Ordinal)
             .ToList();
 
@@ -251,24 +303,8 @@ public sealed class MonitorTvPublicoController : ControllerBase
         return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
     }
 
-    private static bool EsPendienteRevisionFisica(MonitorTvRevisionRow row)
-    {
-        string status = row.Estatus.Trim();
-        return status.Equals("PENDIENTE REVISION FISICA", StringComparison.OrdinalIgnoreCase)
-            || status.Equals("PENDIENTE REVISIÓN FÍSICA", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static int PrioridadMonitorNld(MonitorTvRevisionRow row)
-    {
-        if (!row.TieneFactura) return 0;
-        return row.Estatus.StartsWith("PENDIENTE", StringComparison.OrdinalIgnoreCase) ? 1 : 2;
-    }
-
-    private static long OrdenSecundarioMonitorNld(MonitorTvRevisionRow row)
-    {
-        // Dentro de cada prioridad, primero las entradas que llevan más tiempo esperando.
-        return row.Arribo.Ticks;
-    }
+    private static bool IsReviewInProgress(EvidenciaRowDto row)
+        => row.FechaInicioRevision.HasValue && !row.FechaFinRevision.HasValue;
 
     private void SetPublicHeaders()
     {
@@ -276,5 +312,16 @@ public sealed class MonitorTvPublicoController : ControllerBase
         Response.Headers.Pragma = "no-cache";
         Response.Headers["X-Robots-Tag"] = "noindex, nofollow, noarchive";
         Response.Headers["Referrer-Policy"] = "no-referrer";
+    }
+
+    private sealed class MonitorTvProgressRow
+    {
+        public MonitorTvProgressRow() { }
+
+        public string Creferencia { get; set; } = string.Empty;
+        public int TotalPartidas { get; set; }
+        public int PartidasFinalizadas { get; set; }
+        public int TotalFacturas { get; set; }
+        public int FacturasFinalizadas { get; set; }
     }
 }

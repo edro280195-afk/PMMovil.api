@@ -2134,6 +2134,12 @@ new { creferencia });
                 IdRevdet = partida.IdRevdet,
                 Partida = partida
             });
+
+        await _monitorTvRealtimePublisher.RevisionActualizadaAsync(
+            creferencia,
+            usuario,
+            "PARTIDA",
+            oficinaOrigen: null);
     }
 
     private async Task<PartidaRevision?> ObtenerPartidaActualizadaAsync(int id)
