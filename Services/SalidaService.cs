@@ -21,6 +21,10 @@ public class SalidaService
     private readonly ILogger<SalidaService> _logger;
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly IRealtimeNotificationService _notifications;
+    // Temporalmente apagado por omisión. Se puede reactivar después con la configuración
+    // Salida:RequireCasetaQrForEachPackage=true.
+    private bool RequireCasetaQrForEachPackage =>
+        bool.TryParse(_config["Salida:RequireCasetaQrForEachPackage"], out bool required) && required;
     private const string RelacionSelectFields = @"
    relno AS Relno,
    STATUS AS Estatus,
@@ -206,7 +210,11 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
         ValidarCasetaQrRequest request,
         string usuario)
     {
-        var result = new ValidarCasetaQrResult();
+        bool requiereCasetaQr = RequireCasetaQrForEachPackage;
+        var result = new ValidarCasetaQrResult
+        {
+            RequiereCasetaQr = requiereCasetaQr
+        };
         string casetaId = request.CasetaId?.Trim() ?? string.Empty;
         string requestedRelno = request.Relno?.Trim() ?? string.Empty;
         string requestedEntrada = request.Entrada?.Trim() ?? string.Empty;
@@ -219,12 +227,18 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
         }
 
         using IDbConnection conn = _db.CreateConnection();
-        await EnsureAutorizacionCasetaQrAsync(conn);
+        if (requiereCasetaQr)
+        {
+            await EnsureAutorizacionCasetaQrAsync(conn);
+        }
 
         string pendingRelno = string.IsNullOrWhiteSpace(requestedRelno)
             ? requestedEntrada
             : requestedRelno;
-        await InvalidatePendingCasetaQrAsync(conn, pendingRelno, usuario, "NUEVO_INTENTO_QR");
+        if (requiereCasetaQr)
+        {
+            await InvalidatePendingCasetaQrAsync(conn, pendingRelno, usuario, "NUEVO_INTENTO_QR");
+        }
 
         var caseta = await GetCasetaQrAsync(conn, casetaId);
         if (caseta == null)
@@ -292,6 +306,28 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
             }
         }
 
+        result.Success = true;
+        result.Tipo = "CASETA_QR_OK";
+        result.Message = requiereCasetaQr
+            ? $"QR DE CASETA VALIDO. ESCANEA EL BULTO EN {VentanaCasetaQrSegundos} SEGUNDOS"
+            : "QR DE CASETA VALIDO";
+        result.Relno = relno;
+        result.CasetaId = casetaId;
+
+        if (cargaInicial != null)
+        {
+            result.Relacion = cargaInicial.Relacion;
+            result.Etiquetas = cargaInicial.Etiquetas;
+            result.EstatusCarga = cargaInicial.EstatusCarga;
+            result.TotBultos = cargaInicial.TotBultos;
+            result.VersionHoja = cargaInicial.VersionHoja;
+        }
+
+        if (!requiereCasetaQr)
+        {
+            return result;
+        }
+
         string token = Guid.NewGuid().ToString("N");
         // El token real ya NO se guarda en texto plano -- solo su hash (para
         // validar) y un "hint" de 8 caracteres en la columna legacy `token`
@@ -332,22 +368,8 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
             throw;
         }
 
-        result.Success = true;
-        result.Tipo = "CASETA_QR_OK";
-        result.Message = $"QR DE CASETA VALIDO. ESCANEA EL BULTO EN {VentanaCasetaQrSegundos} SEGUNDOS";
-        result.Relno = relno;
-        result.CasetaId = casetaId;
         result.AutorizacionToken = token;
         result.ExpiraEnSegundos = VentanaCasetaQrSegundos;
-
-        if (cargaInicial != null)
-        {
-            result.Relacion = cargaInicial.Relacion;
-            result.Etiquetas = cargaInicial.Etiquetas;
-            result.EstatusCarga = cargaInicial.EstatusCarga;
-            result.TotBultos = cargaInicial.TotBultos;
-            result.VersionHoja = cargaInicial.VersionHoja;
-        }
 
         return result;
     }
@@ -355,7 +377,10 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
 
     public async Task<CargarRelacionResult> CargarRelacionAsync(string rawRelno, string version, string usuario)
     {
-        var result = new CargarRelacionResult();
+        var result = new CargarRelacionResult
+        {
+            RequiereCasetaQr = RequireCasetaQrForEachPackage
+        };
         string relno = rawRelno?.Trim() ?? "";
 
         using IDbConnection conn = _db.CreateConnection();
@@ -916,9 +941,14 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
     public async Task<ScanLabelResult> ScanLabelAsync(ScanLabelRequest request)
     {
-        var result = new ScanLabelResult { Relno = request.Relno };
+        bool requiereCasetaQr = RequireCasetaQrForEachPackage;
+        var result = new ScanLabelResult
+        {
+            Relno = request.Relno,
+            RequiereCasetaQr = requiereCasetaQr
+        };
         using IDbConnection conn = _db.CreateConnection();
-        await EnsureAutorizacionCasetaQrAsync(conn);
+        if (requiereCasetaQr) await EnsureAutorizacionCasetaQrAsync(conn);
         conn.Open();
 
         var (tabla, sufijo) = ResolverTabla(request.Relno);
@@ -955,14 +985,18 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 return result;
             }
 
-            var authorization = await ValidateCasetaQrAuthorizationAsync(
-                conn,
-                transaction,
-                request.Relno,
-                request.AutorizacionToken,
-                request.Usuario);
+            CasetaQrAuthorizationValidation? authorization = null;
+            if (requiereCasetaQr)
+            {
+                authorization = await ValidateCasetaQrAuthorizationAsync(
+                    conn,
+                    transaction,
+                    request.Relno,
+                    request.AutorizacionToken,
+                    request.Usuario);
+            }
 
-            if (!authorization.Valida)
+            if (authorization is { Valida: false })
             {
                 result.Message = authorization.Mensaje;
                 result.Tipo = authorization.Tipo;
@@ -1002,13 +1036,16 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                     request.TextoEtiqueta,
                     request.Usuario,
                     transaction);
-                await ConsumeCasetaQrAuthorizationAsync(
-                    conn,
-                    transaction,
-                    authorization.Id,
-                    "RECHAZADO",
-                    "NO_PERTENECE",
-                    request.TextoEtiqueta);
+                if (authorization != null)
+                {
+                    await ConsumeCasetaQrAuthorizationAsync(
+                        conn,
+                        transaction,
+                        authorization.Id,
+                        "RECHAZADO",
+                        "NO_PERTENECE",
+                        request.TextoEtiqueta);
+                }
                 result.Message = "NO PERTENECE";
                 result.Tipo = "NO_PERTENECE";
                 transaction.Commit();
@@ -1017,13 +1054,16 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
             if (!string.IsNullOrEmpty(etiqueta.Relacion) && etiqueta.Relacion != request.Relno)
             {
-                await ConsumeCasetaQrAuthorizationAsync(
-                    conn,
-                    transaction,
-                    authorization.Id,
-                    "RECHAZADO",
-                    "ETIQUETA_OTRA_RELACION",
-                    request.TextoEtiqueta);
+                if (authorization != null)
+                {
+                    await ConsumeCasetaQrAuthorizationAsync(
+                        conn,
+                        transaction,
+                        authorization.Id,
+                        "RECHAZADO",
+                        "ETIQUETA_OTRA_RELACION",
+                        request.TextoEtiqueta);
+                }
                 result.Message = "ETIQUETA DE OTRA RELACION";
                 result.Tipo = "ETIQUETA_OTRA_RELACION";
                 transaction.Commit();
@@ -1049,13 +1089,16 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 },
                 transaction);
 
-            await ConsumeCasetaQrAuthorizationAsync(
-                conn,
-                transaction,
-                authorization.Id,
-                "CONSUMIDO",
-                "BULTO_OK",
-                request.TextoEtiqueta);
+            if (authorization != null)
+            {
+                await ConsumeCasetaQrAuthorizationAsync(
+                    conn,
+                    transaction,
+                    authorization.Id,
+                    "CONSUMIDO",
+                    "BULTO_OK",
+                    request.TextoEtiqueta);
+            }
 
             transaction.Commit();
         }
@@ -1633,7 +1676,10 @@ new { relno })).ToList();
 
     public async Task<CargarRelacionResult> CargarSinRelacionAsync(string entrada, string usuario)
     {
-        var result = new CargarRelacionResult();
+        var result = new CargarRelacionResult
+        {
+            RequiereCasetaQr = RequireCasetaQrForEachPackage
+        };
 
         if (entrada.Length < 5 || entrada.Length > 15)
         {
@@ -1743,23 +1789,32 @@ new { relno })).ToList();
 
     public async Task<ScanLabelResult> ScanSinRelacionAsync(SinRelacionRequest request)
     {
-        var result = new ScanLabelResult { Relno = request.Entrada };
+        bool requiereCasetaQr = RequireCasetaQrForEachPackage;
+        var result = new ScanLabelResult
+        {
+            Relno = request.Entrada,
+            RequiereCasetaQr = requiereCasetaQr
+        };
 
         using IDbConnection conn = _db.CreateConnection();
-        await EnsureAutorizacionCasetaQrAsync(conn);
+        if (requiereCasetaQr) await EnsureAutorizacionCasetaQrAsync(conn);
         conn.Open();
 
         using var transaction = conn.BeginTransaction();
         try
         {
-            var authorization = await ValidateCasetaQrAuthorizationAsync(
-                conn,
-                transaction,
-                request.Entrada,
-                request.AutorizacionToken,
-                request.Usuario);
+            CasetaQrAuthorizationValidation? authorization = null;
+            if (requiereCasetaQr)
+            {
+                authorization = await ValidateCasetaQrAuthorizationAsync(
+                    conn,
+                    transaction,
+                    request.Entrada,
+                    request.AutorizacionToken,
+                    request.Usuario);
+            }
 
-            if (!authorization.Valida)
+            if (authorization is { Valida: false })
             {
                 result.Message = authorization.Mensaje;
                 result.Tipo = authorization.Tipo;
@@ -1793,13 +1848,16 @@ new { relno })).ToList();
                     request.TextoEtiqueta,
                     request.Usuario,
                     transaction);
-                await ConsumeCasetaQrAuthorizationAsync(
-                    conn,
-                    transaction,
-                    authorization.Id,
-                    "RECHAZADO",
-                    "NO_PERTENECE",
-                    request.TextoEtiqueta);
+                if (authorization != null)
+                {
+                    await ConsumeCasetaQrAuthorizationAsync(
+                        conn,
+                        transaction,
+                        authorization.Id,
+                        "RECHAZADO",
+                        "NO_PERTENECE",
+                        request.TextoEtiqueta);
+                }
                 result.Message = "NO PERTENECE";
                 result.Tipo = "NO_PERTENECE";
                 transaction.Commit();
@@ -1843,13 +1901,16 @@ new { relno })).ToList();
             },
             transaction);
 
-            await ConsumeCasetaQrAuthorizationAsync(
-                conn,
-                transaction,
-                authorization.Id,
-                "CONSUMIDO",
-                "BULTO_OK",
-                request.TextoEtiqueta);
+            if (authorization != null)
+            {
+                await ConsumeCasetaQrAuthorizationAsync(
+                    conn,
+                    transaction,
+                    authorization.Id,
+                    "CONSUMIDO",
+                    "BULTO_OK",
+                    request.TextoEtiqueta);
+            }
 
             transaction.Commit();
         }

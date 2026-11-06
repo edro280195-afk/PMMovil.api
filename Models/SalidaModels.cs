@@ -9,6 +9,7 @@ public class CargarRelacionResult
     public string EstatusCarga { get; set; } = string.Empty;
     public int TotBultos { get; set; }
     public string VersionHoja { get; set; } = string.Empty;
+    public bool RequiereCasetaQr { get; set; }
 }
 
 public class RelacionInfo
@@ -68,7 +69,7 @@ public class ScanLabelResult
     public string EstatusCarga { get; set; } = string.Empty;
     public string BloqueoMotivo { get; set; } = string.Empty;
     public int EtiquetasBloqueadas { get; set; }
-    public bool RequiereCasetaQr { get; set; } = true;
+    public bool RequiereCasetaQr { get; set; }
 }
 
 public class ValidarCasetaQrRequest
@@ -88,6 +89,7 @@ public class ValidarCasetaQrResult
     public string CasetaId { get; set; } = string.Empty;
     public string AutorizacionToken { get; set; } = string.Empty;
     public int ExpiraEnSegundos { get; set; }
+    public bool RequiereCasetaQr { get; set; }
     public RelacionInfo? Relacion { get; set; }
     public List<EtiquetaInfo> Etiquetas { get; set; } = new();
     public string EstatusCarga { get; set; } = string.Empty;
