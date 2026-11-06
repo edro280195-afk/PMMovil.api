@@ -486,6 +486,24 @@ LIMIT @take", new { fromDate, take })).ToList(),
         };
     }
 
+    /// <summary>
+    /// Qué exige el servidor de la mercancía dañada. Siempre: que venga descrita. Las fotos NO viajan dentro del guardado
+    /// (llegan después, por la cola de la app, a POST Entrada/fotos-danio), así que no se pueden contar aquí; en su lugar la
+    /// app AVISA cuántas va a subir (<paramref name="fotosPendientes"/>). Si declara daño y ese aviso suma cero fotos junto
+    /// con las que vengan dentro (<paramref name="fotosInline"/>), se rechaza: es el candado de «declara daño, avisa N».
+    /// Un cliente viejo que no manda el aviso (<c>null</c>) pasa, para no romper las apps ya instaladas; al actualizar
+    /// tampoco se pide (las fotos pueden estar ya guardadas), y ahí no se pasa el aviso. Devuelve el mensaje de error, o
+    /// null si la declaración es válida.
+    /// </summary>
+    public static string? MensajeDanioInvalido(bool danada, string? descripcion, int fotosInline = 0, int? fotosPendientes = null)
+    {
+        if (!danada) return null;
+        if (string.IsNullOrWhiteSpace(descripcion)) return "Si declaras mercancía dañada, describe el daño.";
+        if (fotosPendientes.HasValue && Math.Max(0, fotosInline) + Math.Max(0, fotosPendientes.Value) == 0)
+            return "Si declaras mercancía dañada, agrega al menos una foto del daño.";
+        return null;
+    }
+
     /// <summary><c>traf.crecibio</c> es varchar(30).</summary>
     public const int LongitudMaximaRecibio = 30;
 
@@ -573,15 +591,16 @@ LIMIT @take", new { fromDate, take })).ToList(),
             return resultado;
         }
 
-        if (datos.Danada && string.IsNullOrWhiteSpace(datos.DanadaDescripcion))
+        // Las fotos del daño ya NO viajan dentro de este guardado: la app mantiene el registro liviano y las sube después,
+        // por la cola, a POST Entrada/fotos-danio. Exigirlas aquí rechazaba toda recepción dañada con un falso «agrega al
+        // menos una foto» aunque la foto sí estuviera tomada. El candado es otro: la app AVISA cuántas va a subir
+        // (FotosDanioPendientes) y se rechaza si declara daño y ese aviso suma cero. Los clientes viejos que no avisan
+        // pasan; los que mandan fotos dentro de FotosDanio se siguen guardando igual, más abajo.
+        int fotosDanioInline = datos.FotosDanio?.Count ?? 0;
+        var errorDanio = MensajeDanioInvalido(datos.Danada, datos.DanadaDescripcion, fotosDanioInline, datos.FotosDanioPendientes);
+        if (errorDanio != null)
         {
-            resultado.Message = "Si declaras mercancía dañada, describe el daño.";
-            return resultado;
-        }
-
-        if (datos.Danada && (datos.FotosDanio == null || datos.FotosDanio.Count == 0))
-        {
-            resultado.Message = "Si declaras mercancía dañada, agrega al menos una foto del daño.";
+            resultado.Message = errorDanio;
             return resultado;
         }
 
@@ -802,7 +821,7 @@ LIMIT @take", new { fromDate, take })).ToList(),
             }
 
             // Fotos exclusivas del daño (ntipodocto=103) — misma carpeta, numeracion propia.
-            if (datos.FotosDanio.Count > 0)
+            if (datos.FotosDanio != null && datos.FotosDanio.Count > 0)
             {
                 string? clienteCarpetaDanio = await conn.QueryFirstOrDefaultAsync<string>(
                "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @clienteId LIMIT 1",
@@ -833,6 +852,12 @@ LIMIT @take", new { fromDate, take })).ToList(),
             }
 
             tran.Commit();
+
+            // Ya confirmado el guardado: cuántas fotos de daño se esperan es informativo y tolerante (si falta el script
+            // SQL no debe tumbar nada), por eso va fuera de la transacción.
+            await EntradaDanioSeguimiento.RegistrarEsperadasAsync(
+                _db, _logger, referencia,
+                EntradaDanioSeguimiento.EsperadasAlGuardar(datos.Danada, fotosDanioInline, datos.FotosDanioPendientes));
 
             DebugLog.Write("GUARDAR_ENTRADA_OK", new { idtraf, referencia });
 
@@ -895,10 +920,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
                 return resultado;
             }
 
-            if (datos.Danada && string.IsNullOrWhiteSpace(datos.DanadaDescripcion))
+            var errorDanio = MensajeDanioInvalido(datos.Danada, datos.DanadaDescripcion);
+            if (errorDanio != null)
             {
                 tran.Rollback();
-                resultado.Message = "Si declaras mercancía dañada, describe el daño.";
+                resultado.Message = errorDanio;
                 return resultado;
             }
 
@@ -1065,6 +1091,20 @@ LIMIT @take", new { fromDate, take })).ToList(),
             }
 
             tran.Commit();
+
+            // Cuántas fotos de daño se esperan (informativo y tolerante, fuera de la transacción): sin daño se borra lo que
+            // se esperaba; con daño y fotos por subir, se espera lo que ya hay en fotos más lo que la app va a subir.
+            if (!datos.Danada)
+            {
+                await EntradaDanioSeguimiento.RegistrarEsperadasAsync(_db, _logger, crefOriginal, null);
+            }
+            else if (datos.FotosDanioPendientes is > 0)
+            {
+                int yaGuardadas = await EntradaDanioSeguimiento.ContarFotosDanioAsync(_db, crefOriginal);
+                await EntradaDanioSeguimiento.RegistrarEsperadasAsync(
+                    _db, _logger, crefOriginal,
+                    EntradaDanioSeguimiento.EsperadasAlGuardar(true, 0, datos.FotosDanioPendientes, yaGuardadas));
+            }
 
             DebugLog.Write("ACTUALIZAR_ENTRADA_OK", new { idtraf, cref = crefOriginal });
 
@@ -1349,6 +1389,10 @@ LIMIT @take", new { fromDate, take })).ToList(),
         };
     }
 
+    // SIN USO a propósito (6-nov-2026): PMMovil NO manda la notificación de entrada al cliente; la manda Gladys desde el
+    // sistema PMM (Visual FoxPro), que es quien complementa la información de la entrada. No reactivar: además copia a
+    // Calidad aunque redirija el «Para». Lo que sí existe es un aviso de PRUEBA que llega solo a desarrollo3, en
+    // EntradaAvisoCapturaService.
     private async Task EnviarNotificacionRecibidoAsync(string referencia, GuardarRecepcionRequest datos, string usuario)
     {
         string? destinatarios;

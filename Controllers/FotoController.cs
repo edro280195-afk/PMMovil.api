@@ -446,6 +446,12 @@ public class FotoController : ControllerBase
             string sqlDel = "DELETE FROM fotos WHERE idfotos = @id";
             await conn.ExecuteAsync(sqlDel, new { id });
             string cref = data.Creferencia.Trim();
+            if (ntipodocto == 103)
+            {
+                // Foto de daño (103): baja en uno lo que el enlace de la entrada esperaba, para que no diga «faltan N» por
+                // una foto eliminada a propósito (tolerante a que falte el script SQL opcional).
+                await EntradaDanioSeguimiento.AjustarAlBorrarFotoAsync(_db, _logger, cref);
+            }
             if (puedeBorrarFotoRevision)
             {
                 await NotificarFotosActualizadasAsync(cref, username);

@@ -74,6 +74,14 @@ public class GuardarRecepcionRequest
     public List<DetalleRecepcion> Detalles { get; set; } = new();
     public List<string> Fotos { get; set; } = new();
     public List<string> FotosDanio { get; set; } = new();
+
+    /// <summary>
+    /// Cuántas fotos del daño va a subir la app DESPUÉS de este guardado, por su cola (el registro viaja liviano, sin
+    /// fotos). <c>null</c> = cliente viejo que no avisa. Al guardar, si declara daño y esto (más las fotos que vengan
+    /// dentro de <see cref="FotosDanio"/>) suma cero, se rechaza; además es lo que permite decir «faltan N fotos del daño
+    /// por llegar» en el enlace público.
+    /// </summary>
+    public int? FotosDanioPendientes { get; set; }
 }
 
 public class EntradaFrequentItem

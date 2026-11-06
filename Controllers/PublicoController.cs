@@ -99,7 +99,14 @@ public class PublicoController : ControllerBase
         EntradaShareResumen? resumen = await _shareService.ObtenerResumenAsync(token);
         string html = resumen == null
             ? EntradaShareHtmlRenderer.RenderExpirado()
-            : EntradaShareHtmlRenderer.RenderResumen(resumen, $"/api/publico/entrada/{token}/foto");
+            : EntradaShareHtmlRenderer.RenderResumen(
+                resumen,
+                $"/api/publico/entrada/{token}/foto",
+                $"/api/publico/entrada/{token}/foto-danio",
+                $"/api/publico/entrada/{token}/zip",
+                // La descripción del daño es texto libre de bodega y el enlace puede llegar a clientes: se muestra por
+                // omisión (mockup aprobado) y se apaga con PublicLinks:MostrarDescripcionDanioEntrada=false sin tocar código.
+                _config.GetValue("PublicLinks:MostrarDescripcionDanioEntrada", true));
 
         return new ContentResult
         {
@@ -107,6 +114,49 @@ public class PublicoController : ControllerBase
             ContentType = "text/html; charset=utf-8",
             StatusCode = resumen == null ? 410 : 200
         };
+    }
+
+    [HttpGet("entrada/{token}/foto-danio/{linea:int}")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<IActionResult> VerFotoDanio(string token, int linea)
+    {
+        SetPublicShareHeaders();
+        (string FilePath, string Extension)? foto = await _shareService.ObtenerFotoDanioAsync(token, linea);
+        if (foto == null)
+        {
+            return NotFound();
+        }
+
+        string contentType = foto.Value.Extension.ToLowerInvariant() == "png" ? "image/png" : "image/jpeg";
+        return PhysicalFile(foto.Value.FilePath, contentType);
+    }
+
+    [HttpGet("entrada/{token}/zip")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<IActionResult> DescargarZipEntrada(string token)
+    {
+        SetPublicShareHeaders();
+        (string Cref, List<(string FilePath, string FileName)> Archivos)? datos =
+            await _shareService.ObtenerArchivosParaZipAsync(token);
+        if (datos == null || datos.Value.Archivos.Count == 0)
+        {
+            return NotFound(new { success = false, message = "No hay fotos disponibles para descargar." });
+        }
+
+        var ms = new MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach ((string filePath, string fileName) in datos.Value.Archivos)
+            {
+                var entry = zip.CreateEntry(fileName, System.IO.Compression.CompressionLevel.Optimal);
+                using Stream entryStream = entry.Open();
+                using FileStream sourceStream = System.IO.File.OpenRead(filePath);
+                await sourceStream.CopyToAsync(entryStream);
+            }
+        }
+
+        ms.Position = 0;
+        return File(ms, "application/zip", $"entrada-{System.Text.RegularExpressions.Regex.Replace(datos.Value.Cref, @"[^\w-]", "_")}.zip");
     }
 
     [HttpGet("entrada/{token}/foto/{linea}")]

@@ -1,5 +1,6 @@
 using System.Data;
 using System.IO;
+using System.Text.RegularExpressions;
 
 using Dapper;
 
@@ -14,7 +15,15 @@ public interface IEntradaShareService
 {
     Task<(string Token, DateTime Expira)?> GenerarLinkAsync(string cref, string usuario);
     Task<EntradaShareResumen?> ObtenerResumenAsync(string token);
+
+    /// <summary>Foto de EVIDENCIA de la entrada (ntipodocto 100).</summary>
     Task<(string FilePath, string Extension)?> ObtenerFotoAsync(string token, int linea);
+
+    /// <summary>Foto de DAÑO de la entrada (ntipodocto 103): solo si está marcada como daño de entrada.</summary>
+    Task<(string FilePath, string Extension)?> ObtenerFotoDanioAsync(string token, int linea);
+
+    /// <summary>Archivos para el ZIP, con carpetas «Daño» y «Evidencia». Null si el enlace no existe o no hay fotos.</summary>
+    Task<(string Cref, List<(string FilePath, string FileName)> Archivos)?> ObtenerArchivosParaZipAsync(string token);
 }
 
 /// <summary>
@@ -30,6 +39,11 @@ public interface IEntradaShareService
 /// Si algún día hace falta "Seguimiento de revisión", es una página aparte,
 /// no un campo más aquí.
 ///
+/// Fotos de daño: viven en <c>fotos</c> con <c>ntipodocto = 103</c> («DAÑADA» en <c>tipodocumentos</c>, formulario
+/// PREOP04), el apartado de daño de siempre; no hay tabla aparte. Ojo: Revisión también guarda ahí sus discrepancias sobre
+/// la misma referencia (comparten apartado en el sistema legado). Por eso la página solo muestra y sirve esas fotos cuando
+/// la entrada misma se declaró dañada (<c>traf3.danada = 1</c>); sin esa declaración el 103 no sale en este enlace.
+///
 /// El token vive en pmmutileria (tabla de soporte de la feature, no dato de
 /// negocio) -- todo lo demás (traf/clientes/transpor/fotos) sigue en
 /// pmmtraf, que es donde realmente vive. Ver Controllers/PublicoController.cs.
@@ -37,6 +51,9 @@ public interface IEntradaShareService
 public class EntradaShareService : IEntradaShareService
 {
     private static readonly TimeSpan Vigencia = TimeSpan.FromHours(72);
+
+    private const int TipoEvidencia = 100;
+    private const int TipoDanio = 103;
 
     private readonly BaseRepository _db;
     private readonly ILogger<EntradaShareService> _logger;
@@ -105,10 +122,13 @@ public class EntradaShareService : IEntradaShareService
                      t.cnocaja AS Cnocaja,
                      t.bodega AS Bodega,
                      t.planta AS Planta,
-                     t.fcreatrafico AS Fcreatrafico
+                     t.fcreatrafico AS Fcreatrafico,
+                     CAST(COALESCE(t3.danada, 0) AS SIGNED) AS Danada,
+                     t3.danada_descripcion AS DanadaDescripcion
               FROM traf t
               LEFT JOIN clientes c ON c.cidcte = t.cclienteidtraf
               LEFT JOIN transpor tr ON tr.cidtranspor = t.cidtransportraf
+              LEFT JOIN traf3 t3 ON t3.fk_idtraf = t.idtraf
               WHERE t.creferencia = @cref
               LIMIT 1",
             new { cref });
@@ -118,11 +138,23 @@ public class EntradaShareService : IEntradaShareService
             return null;
         }
 
-        List<EntradaShareFoto> fotos = (await trafConn.QueryAsync<int>(
-            @"SELECT nlineno FROM fotos WHERE creferencia = @cref AND ntipodocto = 100 ORDER BY nlineno",
+        List<EntradaShareFoto> fotos = (await trafConn.QueryAsync<FotoListaRow>(
+            @"SELECT nlineno AS NLineNo, DATE_FORMAT(fcrea, '%H:%i') AS Hora
+              FROM fotos WHERE creferencia = @cref AND ntipodocto = 100 ORDER BY nlineno",
             new { cref }))
-            .Select(n => new EntradaShareFoto { NLineNo = n, Caption = $"Foto {n}" })
+            .Select(f => new EntradaShareFoto { NLineNo = f.NLineNo, Caption = $"Foto {f.NLineNo}", Hora = f.Hora ?? string.Empty })
             .ToList();
+
+        // Daño: solo si la entrada se declaró dañada, y solo las fotos marcadas como daño DE ENTRADA.
+        bool danada = entrada.Danada == 1;
+        List<EntradaShareFoto> fotosDanio = new();
+        int pendientes = 0;
+        if (danada)
+        {
+            fotosDanio = await ListarFotosDanioAsync(trafConn, cref);
+            int? esperadas = await EntradaDanioSeguimiento.LeerEsperadasAsync(_db, _logger, cref);
+            pendientes = EntradaDanioSeguimiento.Faltantes(true, esperadas, fotosDanio.Count);
+        }
 
         return new EntradaShareResumen
         {
@@ -137,11 +169,29 @@ public class EntradaShareService : IEntradaShareService
                 : null,
             GeneradoEn = link.Value.GeneradoEn,
             Expira = link.Value.Expira,
-            Fotos = fotos
+            Fotos = fotos,
+            Danada = danada,
+            DanadaDescripcion = entrada.DanadaDescripcion?.Trim() ?? string.Empty,
+            FotosDanio = fotosDanio,
+            FotosDanioPendientes = pendientes
         };
     }
 
-    /// <summary>Fila cruda de traf/clientes/transpor para ObtenerResumenAsync -- solo uso interno.</summary>
+    /// <summary>
+    /// Fotos de daño de la entrada: las de <c>fotos</c> con <c>ntipodocto = 103</c> («DAÑADA» en <c>tipodocumentos</c>), el
+    /// mismo criterio que ya usa FotoController. Solo se llama si la entrada se declaró dañada.
+    /// </summary>
+    private static async Task<List<EntradaShareFoto>> ListarFotosDanioAsync(IDbConnection conn, string cref)
+    {
+        return (await conn.QueryAsync<FotoListaRow>(
+            @"SELECT nlineno AS NLineNo, DATE_FORMAT(fcrea, '%H:%i') AS Hora
+              FROM fotos WHERE creferencia = @cref AND ntipodocto = 103 ORDER BY nlineno",
+            new { cref }))
+            .Select(f => new EntradaShareFoto { NLineNo = f.NLineNo, Caption = $"Daño {f.NLineNo}", Hora = f.Hora ?? string.Empty })
+            .ToList();
+    }
+
+    /// <summary>Fila cruda de traf/clientes/transpor/traf3 para ObtenerResumenAsync -- solo uso interno.</summary>
     private class EntradaResumenRow
     {
         public string Creferencia { get; set; } = string.Empty;
@@ -151,9 +201,24 @@ public class EntradaShareService : IEntradaShareService
         public string? Bodega { get; set; }
         public string? Planta { get; set; }
         public DateTime? Fcreatrafico { get; set; }
+        public int Danada { get; set; }
+        public string? DanadaDescripcion { get; set; }
     }
 
-    public async Task<(string FilePath, string Extension)?> ObtenerFotoAsync(string token, int linea)
+    /// <summary>Número de línea y hora de subida de una foto -- solo uso interno.</summary>
+    private class FotoListaRow
+    {
+        public int NLineNo { get; set; }
+        public string? Hora { get; set; }
+    }
+
+    public Task<(string FilePath, string Extension)?> ObtenerFotoAsync(string token, int linea)
+        => ObtenerFotoPorTipoAsync(token, linea, TipoEvidencia);
+
+    public Task<(string FilePath, string Extension)?> ObtenerFotoDanioAsync(string token, int linea)
+        => ObtenerFotoPorTipoAsync(token, linea, TipoDanio);
+
+    private async Task<(string FilePath, string Extension)?> ObtenerFotoPorTipoAsync(string token, int linea, int tipoDocto)
     {
         (string Cref, DateTime GeneradoEn, DateTime Expira)? link = await ResolverAsync(token);
         if (link == null)
@@ -164,33 +229,51 @@ public class EntradaShareService : IEntradaShareService
 
         using IDbConnection trafConn = _db.CreateConnection();
 
-        // Clase tipada (no dynamic) a propósito -- ver el comentario en
-        // FotoController.VerFoto sobre por qué QueryFirstOrDefaultAsync<object>
-        // ya causó fallos silenciosos en este proyecto por mayúsculas/
-        // minúsculas de columnas sin alias.
-        FotoVerInfo? foto = await trafConn.QueryFirstOrDefaultAsync<FotoVerInfo>(
-            @"SELECT TRIM(f.creferencia) AS Creferencia,
-                     f.cextension AS CExtension,
-                     f.nlineno AS NLineNo,
-                     f.ntipodocto AS NTipoDocto,
-                     t.cclienteidtraf AS Cidcte
-              FROM fotos f
-              JOIN traf t ON t.creferencia = f.creferencia
-              WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = 100
-              LIMIT 1",
-            new { cref, linea });
+        // El tipo 103 («DAÑADA») solo se sirve si la entrada misma se declaró dañada (traf3.danada = 1), igual que la página
+        // solo lo lista en ese caso: así este enlace no entrega fotos 103 de una entrada que no declaró daño.
+        // Clase tipada (no dynamic) a propósito -- ver el comentario en FotoController.VerFoto sobre por qué
+        // QueryFirstOrDefaultAsync<object> ya causó fallos silenciosos en este proyecto por mayúsculas/minúsculas.
+        string sql = tipoDocto == TipoDanio
+            ? @"SELECT TRIM(f.creferencia) AS Creferencia,
+                       f.cextension AS CExtension,
+                       f.nlineno AS NLineNo,
+                       f.ntipodocto AS NTipoDocto,
+                       t.cclienteidtraf AS Cidcte
+                FROM fotos f
+                JOIN traf t ON t.creferencia = f.creferencia
+                JOIN traf3 t3 ON t3.fk_idtraf = t.idtraf AND t3.danada = 1
+                WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = 103
+                LIMIT 1"
+            : @"SELECT TRIM(f.creferencia) AS Creferencia,
+                       f.cextension AS CExtension,
+                       f.nlineno AS NLineNo,
+                       f.ntipodocto AS NTipoDocto,
+                       t.cclienteidtraf AS Cidcte
+                FROM fotos f
+                JOIN traf t ON t.creferencia = f.creferencia
+                WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = 100
+                LIMIT 1";
+
+        FotoVerInfo? foto = await trafConn.QueryFirstOrDefaultAsync<FotoVerInfo>(sql, new { cref, linea });
 
         if (foto == null)
         {
             return null;
         }
 
-        // Misma construcción de ruta que FotoController.VerFotoEntradaCore --
-        // no se toca esa lógica, solo se replica para no acoplar el
-        // controlador público al autenticado.
+        return await ResolverArchivoAsync(trafConn, foto);
+    }
+
+    /// <summary>
+    /// Misma construcción de ruta que FotoController.VerFotoEntradaCore --
+    /// no se toca esa lógica, solo se replica para no acoplar el
+    /// controlador público al autenticado.
+    /// </summary>
+    private async Task<(string FilePath, string Extension)?> ResolverArchivoAsync(IDbConnection conn, FotoVerInfo foto)
+    {
         string cidcte = (foto.Cidcte ?? "").Trim();
         string sqlCte = "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1";
-        string carpeta = ((await trafConn.ExecuteScalarAsync<string>(sqlCte, new { id = cidcte })) ?? cidcte).Trim();
+        string carpeta = ((await conn.ExecuteScalarAsync<string>(sqlCte, new { id = cidcte })) ?? cidcte).Trim();
 
         string ext = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
         string? filePath = PhotoFileNameResolver.FindExistingPath(
@@ -203,6 +286,42 @@ public class EntradaShareService : IEntradaShareService
 
         return filePath == null ? null : (filePath, ext);
     }
+
+    public async Task<(string Cref, List<(string FilePath, string FileName)> Archivos)?> ObtenerArchivosParaZipAsync(string token)
+    {
+        EntradaShareResumen? resumen = await ObtenerResumenAsync(token);
+        if (resumen == null)
+        {
+            return null;
+        }
+
+        string referenciaArchivo = Regex.Replace(resumen.CrefAgrupada, @"[^\w-]", "_");
+        var archivos = new List<(string FilePath, string FileName)>();
+
+        foreach (EntradaShareFoto foto in resumen.FotosDanio)
+        {
+            (string FilePath, string Extension)? archivo = await ObtenerFotoDanioAsync(token, foto.NLineNo);
+            if (archivo != null)
+            {
+                archivos.Add((archivo.Value.FilePath, $"{CarpetaZipDanio}/danio-{referenciaArchivo}-{foto.NLineNo:D4}.{archivo.Value.Extension}"));
+            }
+        }
+
+        foreach (EntradaShareFoto foto in resumen.Fotos)
+        {
+            (string FilePath, string Extension)? archivo = await ObtenerFotoAsync(token, foto.NLineNo);
+            if (archivo != null)
+            {
+                archivos.Add((archivo.Value.FilePath, $"{CarpetaZipEvidencia}/evidencia-{referenciaArchivo}-{foto.NLineNo:D4}.{archivo.Value.Extension}"));
+            }
+        }
+
+        return archivos.Count == 0 ? null : (resumen.CrefAgrupada, archivos);
+    }
+
+    /// <summary>Nombres de las carpetas dentro del ZIP (visibles en la descarga: «Daño» y «Evidencia»).</summary>
+    public const string CarpetaZipDanio = "Daño";
+    public const string CarpetaZipEvidencia = "Evidencia";
 
     /// <summary>Valida el token contra pmmutileria y regresa el cref_agrupada, o null si venció/no existe.</summary>
     private async Task<(string Cref, DateTime GeneradoEn, DateTime Expira)?> ResolverAsync(string token)

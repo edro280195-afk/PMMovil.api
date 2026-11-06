@@ -16,13 +16,38 @@ public class EntradaController : ControllerBase
 {
     private readonly EntradaService _entradaService;
     private readonly IEntradaShareService _shareService;
+    private readonly EntradaAvisoCapturaService _avisoCapturaService;
     private readonly ILogger<EntradaController> _logger;
 
-    public EntradaController(EntradaService entradaService, IEntradaShareService shareService, ILogger<EntradaController> logger)
+    public EntradaController(
+        EntradaService entradaService,
+        IEntradaShareService shareService,
+        EntradaAvisoCapturaService avisoCapturaService,
+        ILogger<EntradaController> logger)
     {
         _entradaService = entradaService;
         _shareService = shareService;
+        _avisoCapturaService = avisoCapturaService;
         _logger = logger;
+    }
+
+    // Aviso de PRUEBA al terminar la captura en el teléfono: un correo que llega SOLO a desarrollo3 (ver
+    // EntradaAvisoCaptura). PMMovil no manda la notificación de entrada al cliente: la manda el sistema PMM (VFP).
+    // Se llama desde la app, en segundo plano, cuando las fotos ya terminaron de subir.
+    [HttpPost("{cref}/aviso-captura")]
+    public async Task<IActionResult> AvisoCaptura(string cref, [FromQuery] bool edicion = false)
+    {
+        try
+        {
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            (bool ok, string mensaje) = await _avisoCapturaService.EnviarAsync(cref, usuario, edicion, $"{Request.Scheme}://{Request.Host}");
+            return Ok(new { success = ok, message = mensaje });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al mandar el aviso de prueba de la entrada {Cref}", cref);
+            return StatusCode(500, new { success = false, message = "Error al mandar el aviso de prueba" });
+        }
     }
 
     [HttpGet("consecutivo")]
