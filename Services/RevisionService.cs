@@ -192,6 +192,8 @@ public class RevisionService
                 && rel.Item2 == 0;
         }
 
+        // «¿Quién trae la 123?»: si alguien tomó la carpeta, el resultado de la búsqueda lo dice.
+        await CarpetaTomaService.AdjuntarTomasAsync(conn, baseData);
 
         return baseData
             .GroupBy(e => e.CrefAgrupada, StringComparer.OrdinalIgnoreCase)
@@ -404,6 +406,7 @@ public class RevisionService
             }
         }
 
+        await CarpetaTomaService.AdjuntarTomasAsync(conn, baseData);
 
         List<EntradaPendiente> sorted = baseData
             .OrderByDescending(x => x.UsuarioRevisando != null ? 1 : 0)
@@ -569,6 +572,7 @@ new { creferencia });
 
         item.TodasRelacionCompleta = relRow.Total > 0 && relRow.Pendientes == 0;
 
+        await CarpetaTomaService.AdjuntarTomasAsync(conn, new[] { item });
 
         return item;
     }
@@ -775,6 +779,7 @@ new { creferencia });
                 && rel.Pendientes == 0;
         }
 
+        await CarpetaTomaService.AdjuntarTomasAsync(conn, items);
 
         return items
             .OrderByDescending(i => (i.EsAsignada ?? false) ? (i.AsignPrioridad.GetValueOrDefault() + 10) : 0)

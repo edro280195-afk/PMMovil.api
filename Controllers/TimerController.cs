@@ -430,7 +430,7 @@ public class TimerController : ControllerBase
                     // ahí para siempre aunque la revisión ya hubiera
                     // terminado.
                     await conn.ExecuteAsync(
-                        "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW() WHERE cref_agrupada = @cref AND usuario_asignado = @usuario AND estatus IN (0, 1)",
+                        "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW(), fecha_asignacion = fecha_asignacion WHERE cref_agrupada = @cref AND usuario_asignado = @usuario AND estatus IN (0, 1)",
                         new { cref = creferencia, usuario },
                         transaction);
                 }

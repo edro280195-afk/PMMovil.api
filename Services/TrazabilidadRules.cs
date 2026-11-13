@@ -536,7 +536,12 @@ public static class TrazabilidadRules
             case TraceKind.Carpeta:
             case TraceKind.Bulto:
                 bool reviewPending = facts.ReviewStatuses.Any(status => !IsCompleteStatus(status));
-                if (reviewPending) Add(TraceAction.ReviewEntry);
+                if (reviewPending)
+                {
+                    Add(TraceAction.ReviewEntry);
+                    // Una carpeta que todavía se revisa también se puede solo «tomar»: quedar a nombre de quien la trae.
+                    Add(TraceAction.TakeFolder);
+                }
                 Add(TraceAction.OpenEntry);
                 Add(TraceAction.ReviewEntry);
                 Add(TraceAction.ShowOnMap);

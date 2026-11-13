@@ -141,7 +141,7 @@ public class AutoFinalizerService : BackgroundService
                     {
                         await completionService.SincronizarSistemaLegadoAsync(conn, cref, transaction);
                         asignacionesCerradas = await conn.ExecuteAsync(
-                            "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW() WHERE cref_agrupada = @cref AND estatus IN (0, 1)",
+                            "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW(), fecha_asignacion = fecha_asignacion WHERE cref_agrupada = @cref AND estatus IN (0, 1)",
                             new { cref },
                             transaction);
                     }

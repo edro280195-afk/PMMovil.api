@@ -187,6 +187,53 @@ public class AsignacionesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// «Tomar carpeta»: el revisador registra que agarró la carpeta física de la entrada, sin abrir la revisión ni
+    /// arrancar el cronómetro. <c>confirmar=true</c> la pasa a su nombre si otra persona ya la tenía tomada.
+    /// </summary>
+    [HttpPost("tomar/{crefAgrupada}")]
+    [RequiereModulo(MobileModuleIds.Review, "Modificar")]
+    public async Task<IActionResult> Tomar(
+        string crefAgrupada,
+        [FromQuery] bool confirmar,
+        [FromServices] CarpetaTomaService tomaService)
+    {
+        try
+        {
+            string usuario = base.User.Identity?.Name ?? "";
+            TomarCarpetaResultado resultado = await tomaService.TomarAsync(crefAgrupada, usuario, confirmar);
+            return Ok(resultado);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error tomando la carpeta {Cref}", crefAgrupada);
+            return StatusCode(500, new
+            {
+                success = false,
+                codigo = "ERROR",
+                mensaje = "No se pudo tomar la carpeta."
+            });
+        }
+    }
+
+    /// <summary>El revisador devuelve una carpeta que tomó por error (solo las suyas, nunca una asignación del supervisor).</summary>
+    [HttpPost("soltar/{crefAgrupada}")]
+    [RequiereModulo(MobileModuleIds.Review, "Modificar")]
+    public async Task<IActionResult> Soltar(string crefAgrupada, [FromServices] CarpetaTomaService tomaService)
+    {
+        try
+        {
+            string usuario = base.User.Identity?.Name ?? "";
+            bool soltada = await tomaService.SoltarAsync(crefAgrupada, usuario);
+            return Ok(new { success = soltada });
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error soltando la carpeta {Cref}", crefAgrupada);
+            return StatusCode(500, new { success = false, mensaje = "No se pudo devolver la carpeta." });
+        }
+    }
+
     [HttpGet("mis-asignaciones")]
     public async Task<IActionResult> MisAsignaciones()
     {
@@ -262,7 +309,9 @@ public class AsignacionesController : ControllerBase
             return Ok(new
             {
                 success = true,
-                cambio = (await conn.ExecuteAsync(" UPDATE asignaciones_revision SET fecha_visto = CURRENT_TIMESTAMP,   estatus     = 1 WHERE id_asignacion = @id AND usuario_asignado = @usuario AND estatus = 0", new
+                // fecha_asignacion = fecha_asignacion: en producción esa columna es TIMESTAMP con ON UPDATE CURRENT_TIMESTAMP y,
+                // sin nombrarla, abrir una carpeta tomada a las 9:30 reiniciaba su hora de toma a «ahora».
+                cambio = (await conn.ExecuteAsync(" UPDATE asignaciones_revision SET fecha_visto = CURRENT_TIMESTAMP,   estatus     = 1, fecha_asignacion = fecha_asignacion WHERE id_asignacion = @id AND usuario_asignado = @usuario AND estatus = 0", new
                 {
                     id = idAsignacion,
                     usuario = usuario
@@ -302,7 +351,7 @@ public class AsignacionesController : ControllerBase
                     message = "Asignación no encontrada"
                 });
             }
-            await conn.ExecuteAsync(" UPDATE asignaciones_revision SET estatus = 3 WHERE id_asignacion = @id", new
+            await conn.ExecuteAsync(" UPDATE asignaciones_revision SET estatus = 3, fecha_asignacion = fecha_asignacion WHERE id_asignacion = @id", new
             {
                 id = idAsignacion
             });
@@ -375,7 +424,7 @@ public class AsignacionesController : ControllerBase
             return Ok(new
             {
                 success = true,
-                actualizadas = await conn.ExecuteAsync("UPDATE asignaciones_revision SET estatus = 2,   fecha_completada = CURRENT_TIMESTAMP WHERE cref_agrupada    = @cref AND usuario_asignado = @usuario AND estatus IN (0, 1)", new
+                actualizadas = await conn.ExecuteAsync("UPDATE asignaciones_revision SET estatus = 2,   fecha_completada = CURRENT_TIMESTAMP, fecha_asignacion = fecha_asignacion WHERE cref_agrupada    = @cref AND usuario_asignado = @usuario AND estatus IN (0, 1)", new
                 {
                     cref = crefAgrupada,
                     usuario = usuario
@@ -403,7 +452,9 @@ public class AsignacionesController : ControllerBase
             return Ok(new
             {
                 success = true,
-                items = await conn.QueryAsync<object>("SELECT id_asignacion AS idAsignacion, cref_agrupada AS crefAgrupada, usuario_asignado AS usuarioAsignado, prioridad, estatus FROM asignaciones_revision WHERE estatus IN (0, 1) ORDER BY fecha_asignacion DESC")
+                // Las carpetas que el propio revisador tomó (usuario_asigna = usuario_asignado) NO son asignaciones del
+                // supervisor: tienen su propia sección en el Monitor (GET Monitor/carpetas-tomadas).
+                items = await conn.QueryAsync<object>("SELECT id_asignacion AS idAsignacion, cref_agrupada AS crefAgrupada, usuario_asignado AS usuarioAsignado, prioridad, estatus FROM asignaciones_revision WHERE estatus IN (0, 1) AND usuario_asigna <> usuario_asignado ORDER BY fecha_asignacion DESC")
             });
         }
         catch (Exception exception)

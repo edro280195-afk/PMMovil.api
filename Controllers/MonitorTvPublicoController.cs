@@ -169,6 +169,37 @@ public sealed class MonitorTvPublicoController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// «Carpetas tomadas sin iniciar» para la TV de operación: quién tomó una carpeta, desde qué hora y cuánto lleva sin
+    /// iniciar la revisión. Mismo contrato que <c>GET api/Monitor/carpetas-tomadas</c>, con el token de la pantalla.
+    /// </summary>
+    [HttpGet("carpetas-tomadas")]
+    [EnableRateLimiting("PublicoLinksPolicy")]
+    public async Task<IActionResult> GetCarpetasTomadas(
+        [FromHeader(Name = "X-Monitor-TV-Token")] string? token,
+        [FromServices] CarpetaTomaService tomaService,
+        CancellationToken cancellationToken)
+    {
+        SetPublicHeaders();
+        if (!TokenValido(token)) return Unauthorized(new { success = false });
+
+        MonitorTvLinkAccess? access = await _tvLinkService.ResolverAsync(token!, cancellationToken);
+        if (access == null || access.TipoPantalla != "OPERACION_NLD")
+        {
+            return Unauthorized(new { success = false });
+        }
+
+        try
+        {
+            return Ok(await tomaService.ListarSinIniciarAsync());
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "No se pudieron cargar las carpetas tomadas para el monitor de la TV.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false });
+        }
+    }
+
     [HttpGet("imex/revisiones")]
     [EnableRateLimiting("PublicoLinksPolicy")]
     public async Task<IActionResult> GetRevisionesImex(

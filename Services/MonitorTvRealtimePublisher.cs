@@ -86,4 +86,32 @@ public sealed class MonitorTvRealtimePublisher
             fecha = DateTime.UtcNow.ToString("O")
         }, cancellationToken);
     }
+
+    /// <summary>Alguien tomó una carpeta (la TV agrega su renglón a «Carpetas tomadas sin iniciar»).</summary>
+    public Task CarpetaTomadaAsync(
+        string creferencia,
+        string usuario,
+        string tomadaEn,
+        CancellationToken cancellationToken = default)
+    {
+        return _hub.Clients.Group(MonitorTvHub.Group).SendAsync("onCarpetaTomada", new
+        {
+            creferencia,
+            usuario,
+            tomadaEn
+        }, cancellationToken);
+    }
+
+    /// <summary>El revisador devolvió la carpeta sin revisarla.</summary>
+    public Task CarpetaSoltadaAsync(
+        string creferencia,
+        string usuario,
+        CancellationToken cancellationToken = default)
+    {
+        return _hub.Clients.Group(MonitorTvHub.Group).SendAsync("onCarpetaSoltada", new
+        {
+            creferencia,
+            usuario
+        }, cancellationToken);
+    }
 }

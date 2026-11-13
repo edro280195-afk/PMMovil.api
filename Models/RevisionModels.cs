@@ -22,6 +22,17 @@ namespace PMMovil.Api.Models
         public int? AsignPrioridad { get; set; }
         public bool? EsAsignada { get; set; }
         public int? IdAsignacion { get; set; }
+
+        /// <summary>
+        /// Quién trae la carpeta (la tomó con «Tomar carpeta» y todavía no la termina). Responde a «¿quién trae la 123?».
+        /// </summary>
+        public string? TomadaPor { get; set; }
+
+        /// <summary>Cuándo la tomó (ISO, hora del servidor).</summary>
+        public string? TomadaDesde { get; set; }
+
+        /// <summary>Segundos desde la toma, medidos por el servidor.</summary>
+        public long? SegundosDesdeToma { get; set; }
     }
 
     /// <summary>Una coincidencia de la búsqueda rápida: la entrada con su estado real y si salió por tolerancia a un error de tecleo.</summary>

@@ -189,6 +189,25 @@ public class MonitorController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Carpetas que un revisador tomó (agarró la carpeta física) y todavía no empieza a revisar, con el tiempo que llevan así.
+    /// Es lo que el supervisor mira para preguntar «¿por qué no la has empezado?» en lugar de la libreta.
+    /// </summary>
+    [HttpGet("carpetas-tomadas")]
+    [RequiereModulo(MobileModuleIds.SystemsMonitor)]
+    public async Task<IActionResult> GetCarpetasTomadas([FromServices] CarpetaTomaService tomaService)
+    {
+        try
+        {
+            return Ok(await tomaService.ListarSinIniciarAsync());
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en GetCarpetasTomadas");
+            return StatusCode(500, new { success = false, message = "Error al obtener las carpetas tomadas" });
+        }
+    }
+
     [HttpGet("revisores")]
     [RequiereModulo(MobileModuleIds.SystemsMonitor)]
     public async Task<IActionResult> GetRevisoresActivos()

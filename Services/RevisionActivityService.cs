@@ -17,6 +17,8 @@ public static class RevisionActivityTypes
     public const string CambioActividad = "CAMBIO_ACTIVIDAD";
     public const string InicioRevision = "INICIO_REVISION";
     public const string TomaDocumentos = "TOMA_DOCUMENTOS";
+    public const string CarpetaTomada = "CARPETA_TOMADA";
+    public const string CarpetaSoltada = "CARPETA_SOLTADA";
     public const string CampoFactura = "CAMPO_FACTURA";
     public const string ObservacionGeneral = "OBSERVACION_GENERAL";
     public const string CampoPartida = "CAMPO_PARTIDA";

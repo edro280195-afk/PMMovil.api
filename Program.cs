@@ -170,6 +170,7 @@ try
     builder.Services.AddScoped<RevisionNormalCompletionService>();
     builder.Services.AddScoped<TrazabilidadService>();
     builder.Services.AddScoped<HomeSummaryService>();
+    builder.Services.AddScoped<CarpetaTomaService>();
     builder.Services.AddScoped<RevisionReportPdfService>();
     builder.Services.AddScoped<WarehouseLayoutService>();
     builder.Services.AddScoped<ClaseModelService>();

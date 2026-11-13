@@ -94,6 +94,13 @@ public static class TraceAction
     public const string OpenLoad = "OPEN_LOAD";
     public const string OpenEntry = "OPEN_ENTRY";
     public const string ReviewEntry = "REVIEW_ENTRY";
+
+    /// <summary>
+    /// «Tomar carpeta»: registrar que el revisador agarró la carpeta física, sin abrir la revisión ni arrancar el cronómetro.
+    /// Es una acción que ESCRIBE (<c>POST Asignaciones/tomar/{cref}</c>): la app la ejecuta al tocarla, no navega. Una app
+    /// anterior que no la conoce simplemente no la muestra.
+    /// </summary>
+    public const string TakeFolder = "TAKE_FOLDER";
     public const string ShowOnMap = "SHOW_ON_MAP";
     public const string RegisterPreRegistro = "REGISTER_PREREGISTRO";
 }

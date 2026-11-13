@@ -301,7 +301,7 @@ Sequence(new[] { TraceAction.OpenRelation, TraceAction.ExitGate }, TrazabilidadR
 
 // Carpeta y bulto: la revisión pendiente sugiere revisar; terminada, abrir.
 TraceFacts pendingReview = Facts(f => { f.Kind = TraceKind.Carpeta; f.EntradasCount = 1; f.ReviewStatuses = new[] { "EN_PROGRESO" }; });
-Sequence(new[] { TraceAction.ReviewEntry, TraceAction.OpenEntry, TraceAction.ShowOnMap }, TrazabilidadRules.BuildActions(pendingReview, true), "Carpeta en revisión: revisar primero");
+Sequence(new[] { TraceAction.ReviewEntry, TraceAction.TakeFolder, TraceAction.OpenEntry, TraceAction.ShowOnMap }, TrazabilidadRules.BuildActions(pendingReview, true), "Carpeta en revisión: revisar primero y poder tomarla");
 TraceFacts doneReview = Facts(f => { f.Kind = TraceKind.Bulto; f.EntradasCount = 1; f.ReviewStatuses = new[] { "COMPLETA" }; f.HasRelacion = true; f.RelacionStatus = "AUTORIZADA"; });
 Sequence(new[] { TraceAction.OpenEntry, TraceAction.ReviewEntry, TraceAction.ShowOnMap, TraceAction.OpenRelation }, TrazabilidadRules.BuildActions(doneReview, true), "Bulto revisado: abrir primero");
 Check(!TrazabilidadRules.BuildFlags(pendingReview).Contains(TraceFlag.SinEntradaVinculada), "Una carpeta es la entrada: no aplica «sin entrada»");
@@ -325,11 +325,11 @@ Check(TrazabilidadRules.BuildActions(fresh, false).Count == 0, "No encontrado: s
 
 // Nombres de acción: son los mismos de ScanActionId en la app (CreateEntry → CREATE_ENTRY…).
 Sequence(
-    new[] { "CREATE_ENTRY", "EXIT_GATE", "FIND_IN_YARD", "OPEN_RELATION", "OPEN_LOAD", "OPEN_ENTRY", "REVIEW_ENTRY", "SHOW_ON_MAP", "REGISTER_PREREGISTRO" },
+    new[] { "CREATE_ENTRY", "EXIT_GATE", "FIND_IN_YARD", "OPEN_RELATION", "OPEN_LOAD", "OPEN_ENTRY", "REVIEW_ENTRY", "TAKE_FOLDER", "SHOW_ON_MAP", "REGISTER_PREREGISTRO" },
     new[]
     {
         TraceAction.CreateEntry, TraceAction.ExitGate, TraceAction.FindInYard, TraceAction.OpenRelation, TraceAction.OpenLoad,
-        TraceAction.OpenEntry, TraceAction.ReviewEntry, TraceAction.ShowOnMap, TraceAction.RegisterPreRegistro
+        TraceAction.OpenEntry, TraceAction.ReviewEntry, TraceAction.TakeFolder, TraceAction.ShowOnMap, TraceAction.RegisterPreRegistro
     },
     "Los nombres de las acciones no cambian sin avisar a la app");
 

@@ -113,6 +113,22 @@ public class RevisionHygieneService : BackgroundService
             reportService,
             monitorTvPublisher,
             stoppingToken);
+
+        // 4. Carpetas tomadas de entradas que ya se revisaron (las terminó otra persona o el cierre automático): si no se
+        // cierran, la toma se queda pegada en «Carpetas tomadas sin iniciar» para siempre.
+        try
+        {
+            CarpetaTomaService tomaService = scope.ServiceProvider.GetRequiredService<CarpetaTomaService>();
+            int cerradas = await tomaService.CerrarTomasDeEntradasRevisadasAsync();
+            if (cerradas > 0)
+            {
+                _logger.LogInformation("RevisionHygieneService: {Cerradas} toma(s) de carpetas ya revisadas cerradas.", cerradas);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RevisionHygieneService: no se pudieron cerrar las tomas de carpetas revisadas.");
+        }
     }
 
     private static async Task<int> LeerMinutosInactividadAsync(BaseRepository db)
@@ -360,7 +376,7 @@ public class RevisionHygieneService : BackgroundService
                 {
                     await completionService.SincronizarSistemaLegadoAsync(conn, cref, transaction);
                     await conn.ExecuteAsync(
-                        "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW() WHERE cref_agrupada = @cref AND estatus IN (0, 1)",
+                        "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW(), fecha_asignacion = fecha_asignacion WHERE cref_agrupada = @cref AND estatus IN (0, 1)",
                         new { cref },
                         transaction);
                 }
