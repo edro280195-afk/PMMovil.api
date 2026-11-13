@@ -555,7 +555,7 @@ public class AsignacionesController : ControllerBase
                 });
             }
             using IDbConnection conn = _db.CreateConnection();
-            dynamic entradaInfo = await conn.QueryFirstOrDefaultAsync<object>(" SELECT  f.cclienteid,  MAX(c.cnombre) AS nombreCliente,  COUNT(DISTINCT f.cnofact) AS totalFacturas,  COUNT(DISTINCT r.idrevdet) AS totalPartidas  FROM fact f  LEFT JOIN clientes c ON c.cidcte = f.cclienteid  LEFT JOIN revdet r ON r.cnofact = f.cnofact  WHERE f.cref_agrupada = @cref  GROUP BY f.cclienteid", new
+            dynamic entradaInfo = await conn.QueryFirstOrDefaultAsync<object>(" SELECT  f.cclienteid,  MAX(c.cnombre) AS nombreCliente,  COUNT(DISTINCT f.cnofact) AS totalFacturas,  COUNT(DISTINCT r.idrevdet) AS totalPartidas  FROM fact f  LEFT JOIN clientes c ON c.cidcte = f.cclienteid  LEFT JOIN revdet r ON r.idfactura = f.idfactura  WHERE f.cref_agrupada = @cref  GROUP BY f.cclienteid", new
             {
                 cref = crefAgrupada
             });

@@ -106,7 +106,7 @@ public sealed class MonitorTvPublicoController : ControllerBase
                             COUNT(DISTINCT rd.idrevdet) AS TotalPartidas,
                             COUNT(DISTINCT CASE WHEN COALESCE(rd.revisada, 0) = 1 THEN rd.idrevdet END) AS PartidasFinalizadas
                         FROM fact f
-                        LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+                        LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
                         WHERE f.cref_agrupada IN @references
                         GROUP BY f.cref_agrupada",
                         new { references },

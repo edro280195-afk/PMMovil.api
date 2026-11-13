@@ -143,7 +143,7 @@ public class BarcodeController : ControllerBase
             }
             if (string.IsNullOrWhiteSpace(cidprov))
             {
-                cidprov = await conn.ExecuteScalarAsync<string>("SELECT rd.cprovid FROM revdet rd INNER JOIN fact f ON rd.cnofact = f.cnofact WHERE f.creferencia = @cref AND NULLIF(rd.cprovid,'') IS NOT NULL LIMIT 1", new
+                cidprov = await conn.ExecuteScalarAsync<string>("SELECT rd.cprovid FROM revdet rd INNER JOIN fact f ON rd.idfactura = f.idfactura WHERE f.creferencia = @cref AND NULLIF(rd.cprovid,'') IS NOT NULL LIMIT 1", new
                 {
                     cref = crefAgrupada
                 });

@@ -120,7 +120,7 @@ public class RevisionService
                 MAX(cl.cnombre) AS NombreCliente
             FROM fact f
             LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid AND cl.inactivo = 0
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
             WHERE f.cref_agrupada IN @refs
             GROUP BY f.cref_agrupada", new { refs }, cancellationToken: ct))).ToList();
 
@@ -191,6 +191,7 @@ public class RevisionService
                 && rel.Item1 > 0
                 && rel.Item2 == 0;
         }
+
 
         return baseData
             .GroupBy(e => e.CrefAgrupada, StringComparer.OrdinalIgnoreCase)
@@ -293,7 +294,7 @@ public class RevisionService
                 MAX(cl.cnombre) AS NombreCliente 
             FROM fact f 
             LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid 
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact 
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura 
             WHERE f.cref_agrupada IN @finalIds 
             GROUP BY f.cref_agrupada";
 
@@ -403,6 +404,7 @@ public class RevisionService
             }
         }
 
+
         List<EntradaPendiente> sorted = baseData
             .OrderByDescending(x => x.UsuarioRevisando != null ? 1 : 0)
             .ThenByDescending(x => x.InicioRevision ?? "0000")
@@ -434,7 +436,7 @@ public class RevisionService
             FROM traf t
             LEFT JOIN clientes c ON c.cidcte = t.cclienteidtraf
             LEFT JOIN fact f ON f.cref_agrupada = t.creferencia
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
             WHERE t.creferencia = @creferencia
             GROUP BY t.creferencia, t.cclienteidtraf",
 new { creferencia });
@@ -457,7 +459,7 @@ new { creferencia });
                     COUNT(DISTINCT CASE WHEN rd.revisada = 1 THEN rd.idrevdet END) AS PartidasRevisadas
                 FROM fact f
                 LEFT JOIN clientes c ON c.cidcte = f.cclienteid AND c.inactivo = 0
-                LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+                LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
                 WHERE f.cref_agrupada = @creferencia
                 GROUP BY f.cref_agrupada",
                 new { creferencia });
@@ -566,6 +568,7 @@ new { creferencia });
 new { creferencia });
 
         item.TodasRelacionCompleta = relRow.Total > 0 && relRow.Pendientes == 0;
+
 
         return item;
     }
@@ -721,7 +724,7 @@ new { creferencia });
                 COUNT(DISTINCT CASE WHEN rd.revisada = 1 THEN rd.idrevdet END) AS PartidasRevisadas 
             FROM fact f 
             LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid AND cl.inactivo = 0 
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact 
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura 
             WHERE f.cref_agrupada IN @refs 
             GROUP BY f.cref_agrupada";
 
@@ -772,6 +775,7 @@ new { creferencia });
                 && rel.Pendientes == 0;
         }
 
+
         return items
             .OrderByDescending(i => (i.EsAsignada ?? false) ? (i.AsignPrioridad.GetValueOrDefault() + 10) : 0)
             .ThenByDescending(i => i.InicioRevision)
@@ -813,7 +817,7 @@ new { creferencia });
             LEFT JOIN (
                 SELECT rd.cnofact, rd.cprovid
                 FROM revdet rd
-                INNER JOIN fact f2 ON f2.cnofact = rd.cnofact
+                INNER JOIN fact f2 ON f2.idfactura = rd.idfactura
                 WHERE f2.cref_agrupada = @cref
                 GROUP BY rd.cnofact, rd.cprovid
             ) prov_map ON prov_map.cnofact = f.cnofact
@@ -834,9 +838,18 @@ new { creferencia });
         return await conn.QueryAsync<FacturaRevision>(sql, new { cref = cref_agrupada });
     }
 
-    public async Task<FacturaRevision?> GetRevisionFacturaAsync(string cnofact)
+    public async Task<FacturaRevision?> GetRevisionFacturaAsync(
+        string cnofact,
+        string? crefAgrupada = null,
+        string? usuario = null)
     {
         using IDbConnection conn = _db.CreateConnection();
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return null;
+        }
+
         string sql = @"
             SELECT
                 f.creferencia,
@@ -877,13 +890,15 @@ new { creferencia });
                 AND cl.inactivo = 0
             -- Resolver proveedor en 1 solo lookup: cogemos el cprovid de la primera
             -- partida de la factura (subquery que se cachea como derived table).
+            -- Las partidas son las de ESTA factura (revdet.idfactura), no las de cualquier factura con el mismo número.
             LEFT JOIN (
-                SELECT cnofact, cprovid
-                FROM revdet
-                WHERE cnofact = @cnofact
-                ORDER BY idrevdet ASC
+                SELECT rd0.idfactura, rd0.cprovid
+                FROM revdet rd0
+                WHERE rd0.idfactura IN (
+                    SELECT idfactura FROM fact WHERE cnofact = @cnofact AND cref_agrupada = @entrada)
+                ORDER BY rd0.idrevdet ASC
                 LIMIT 1
-            ) prov_lookup ON prov_lookup.cnofact = f.cnofact
+            ) prov_lookup ON prov_lookup.idfactura = f.idfactura
             LEFT JOIN provs p
                 ON p.cidprov = prov_lookup.cprovid
                 AND p.inactivo = 0
@@ -895,15 +910,15 @@ new { creferencia });
                     SUM(CASE WHEN COALESCE(r.STATUS, '') != 'COMPLETA' THEN 1 ELSE 0 END) AS pendientes
                 FROM traf2 tf2
                 LEFT JOIN relacion r ON tf2.nrelacion = r.relno
-                WHERE tf2.CREF_ORIGEN = (SELECT cref_agrupada FROM fact WHERE cnofact = @cnofact LIMIT 1)
+                WHERE tf2.CREF_ORIGEN = @entrada
                 GROUP BY tf2.CREF_ORIGEN
             ) rel_count ON rel_count.cref_origen = f.cref_agrupada
-            WHERE f.cnofact = @cnofact
+            WHERE f.cnofact = @cnofact AND f.cref_agrupada = @entrada
             ORDER BY
                 CASE WHEN TRIM(COALESCE(f.usurev, '')) != '' THEN 0 ELSE 1 END,
                 f.fmodi DESC
             LIMIT 1";
-        return await conn.QueryFirstOrDefaultAsync<FacturaRevision>(sql, new { cnofact });
+        return await conn.QueryFirstOrDefaultAsync<FacturaRevision>(sql, new { cnofact, entrada });
     }
 
     public async Task<IEnumerable<PartidaRevision>> GetPartidasEntradaAsync(string cref_agrupada)
@@ -943,8 +958,7 @@ new { creferencia });
                 COALESCE(rd.cclienteid, '')    AS Cclienteid,
                 {optionalColumns}
             FROM fact f
-            INNER JOIN revdet rd ON rd.cnofact = f.cnofact
-                AND rd.cref_agrupada = f.cref_agrupada
+            INNER JOIN revdet rd ON rd.idfactura = f.idfactura
             WHERE f.cref_agrupada = @cref
             ORDER BY f.cnofact, rd.idrevdet";
         return await conn.QueryAsync<PartidaRevision>(sql, new { cref = cref_agrupada });
@@ -1102,7 +1116,12 @@ new { creferencia });
         return true;
     }
 
-    public async Task<bool> GuardarCampoFacturaAsync(string cnofact, string campo, string valor, string usuario)
+    public async Task<bool> GuardarCampoFacturaAsync(
+        string cnofact,
+        string campo,
+        string valor,
+        string usuario,
+        string? crefAgrupada = null)
     {
         var columnMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -1124,7 +1143,17 @@ new { creferencia });
         }
 
         using IDbConnection conn = _db.CreateConnection();
+
+        // El número de factura se repite entre entradas: todo UPDATE se acota a la entrada de la petición para no
+        // tocar las facturas de otras entradas que comparten el número (ver RevisionFacturaAlcance).
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return false;
+        }
+
         string colUsurev = (campo.ToLower() == "status_rev") ? ", usurev = @usuario" : "";
+        const string soloEstaFactura = "WHERE cnofact = @cnofact AND cref_agrupada = @entrada";
 
         // Replica la validación del formulario VFP original:
         // - libras siempre recalcula kg con ROUND(lb * .4536, 3);
@@ -1136,29 +1165,29 @@ new { creferencia });
         if (columna.Equals("obsrev", StringComparison.OrdinalIgnoreCase))
         {
             string? observacionApp = CrearObservacionApp(valor);
-            parameters = new { valor, observacionApp, usuario, cnofact };
-            sql = $"UPDATE fact SET obsrev = @valor, {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
+            parameters = new { valor, observacionApp, usuario, cnofact, entrada };
+            sql = $"UPDATE fact SET obsrev = @valor, {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() {soloEstaFactura}";
         }
         else if (columna.Equals("npesolbs", StringComparison.OrdinalIgnoreCase) &&
             decimal.TryParse(valor, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal libras) &&
             libras != 0)
         {
             decimal kilos = Math.Round(libras * 0.4536m, 3);
-            parameters = new { libras, kilos, usuario, cnofact };
-            sql = $"UPDATE fact SET npesolbs = @libras, npesokgs = @kilos{colUsurev}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
+            parameters = new { libras, kilos, usuario, cnofact, entrada };
+            sql = $"UPDATE fact SET npesolbs = @libras, npesokgs = @kilos{colUsurev}, usumodi = @usuario, fmodi = NOW() {soloEstaFactura}";
         }
         else if (columna.Equals("npesokgs", StringComparison.OrdinalIgnoreCase) &&
             decimal.TryParse(valor, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal kilosCapturados) &&
             kilosCapturados != 0)
         {
             decimal librasCalculadas = Math.Round(kilosCapturados / 0.4536m, 3);
-            parameters = new { valor = kilosCapturados, librasCalculadas, usuario, cnofact };
-            sql = $"UPDATE fact SET npesokgs = @valor, npesolbs = IF(COALESCE(npesolbs, 0) = 0 AND @valor <> 0, @librasCalculadas, npesolbs){colUsurev}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
+            parameters = new { valor = kilosCapturados, librasCalculadas, usuario, cnofact, entrada };
+            sql = $"UPDATE fact SET npesokgs = @valor, npesolbs = IF(COALESCE(npesolbs, 0) = 0 AND @valor <> 0, @librasCalculadas, npesolbs){colUsurev}, usumodi = @usuario, fmodi = NOW() {soloEstaFactura}";
         }
         else
         {
-            parameters = new { valor, usuario, cnofact };
-            sql = $"UPDATE fact SET {columna} = @valor{colUsurev}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
+            parameters = new { valor, usuario, cnofact, entrada };
+            sql = $"UPDATE fact SET {columna} = @valor{colUsurev}, usumodi = @usuario, fmodi = NOW() {soloEstaFactura}";
         }
 
         int rows = await conn.ExecuteAsync(sql, parameters);
@@ -1166,31 +1195,31 @@ new { creferencia });
 
         if (rows > 0)
         {
-            string? crefActividad = await ObtenerCrefFacturaAsync(conn, cnofact);
+            // La entrada ya es conocida: antes se buscaba con "WHERE cnofact = ... LIMIT 1", que con un número
+            // repetido devolvía la entrada de OTRA factura (o vacía) y el evento se perdía en silencio.
             string tipoActividad = campo.Equals("status_rev", StringComparison.OrdinalIgnoreCase)
                 ? valor == "1" ? RevisionActivityTypes.FacturaCompletada : valor == "2" ? RevisionActivityTypes.FacturaDiscrepancia : RevisionActivityTypes.CampoFactura
                 : RevisionActivityTypes.CampoFactura;
             activityEventId = await _activityService.RegistrarAsync(
-                crefActividad ?? string.Empty,
+                entrada,
                 usuario,
                 tipoActividad,
                 cnofact,
                 detalle: $"Campo actualizado: {campo}");
-            if (!string.IsNullOrWhiteSpace(crefActividad))
-            {
-                await _hub.Clients.All.SendAsync(
-                    "onActividadRecibida",
-                    crefActividad,
-                    usuario,
-                    cnofact,
-                    $"Campo actualizado: {campo}");
-                await NotificarFacturaActualizadaAsync(cnofact, usuario);
-            }
+            await _hub.Clients.All.SendAsync(
+                "onActividadRecibida",
+                entrada,
+                usuario,
+                cnofact,
+                $"Campo actualizado: {campo}");
+            await NotificarFacturaActualizadaAsync(cnofact, usuario, entrada);
         }
 
         if (rows > 0 && campo.ToLower() == "status_rev" && valor == "2")
         {
-            dynamic data = await conn.QueryFirstOrDefaultAsync<object>("SELECT cref_agrupada, usurev, discrepancias FROM fact WHERE cnofact = @cnofact", new { cnofact });
+            dynamic data = await conn.QueryFirstOrDefaultAsync<object>(
+                "SELECT cref_agrupada, usurev, discrepancias FROM fact WHERE cnofact = @cnofact AND cref_agrupada = @entrada LIMIT 1",
+                new { cnofact, entrada });
             if (data != null)
             {
                 string cref = (string)data.cref_agrupada;
@@ -1258,9 +1287,10 @@ new { creferencia });
 
                     if (!string.IsNullOrWhiteSpace(cnofact))
                     {
+                        // Acotado a la entrada: el mismo número de factura existe en otras entradas.
                         await conn.ExecuteAsync(
-                            $"UPDATE fact SET {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact",
-                            new { observacionApp, usuario, cnofact },
+                            $"UPDATE fact SET {Obsrev2DesdeAppSql}, usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact AND cref_agrupada = @cref",
+                            new { observacionApp, usuario, cnofact, cref = crefAgrupada },
                             transaction);
                     }
                 }
@@ -1526,12 +1556,26 @@ new { creferencia });
     public async Task<int> AgregarProductoAsync(string cnofact, string cref, string usuario)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sql = @"
+        conn.Open();
+
+        // La partida nueva cuelga de la factura de ESTA entrada. Antes tomaba el idfactura de "la primera factura con
+        // ese número", que con un número repetido era la de otra entrada: la partida quedaba pegada a una factura
+        // ajena y el sistema de escritorio (que carga las partidas por idfactura) nunca la mostraba.
+        string entrada = (cref ?? string.Empty).Trim();
+        if (entrada.Length == 0)
+        {
+            return 0;
+        }
+
+        // Se mide el efecto del INSERT: LAST_INSERT_ID() devuelve el último id de la conexión, así que si el INSERT no
+        // insertó nada (factura que no existe en esa entrada) devolvía un id viejo y la app creía tener la partida.
+        int insertadas = await conn.ExecuteAsync(@"
             INSERT INTO revdet (cnofact, cref_agrupada, idfactura, cdescripcion, revisada, ncantfactura, ncantout, usucrea, fcrea)
-            SELECT @cnofact, @cref, idfactura, '— Nueva Partida —', 0, 0, 0, @usuario, NOW()
-            FROM fact WHERE cnofact = @cnofact LIMIT 1;
-            SELECT LAST_INSERT_ID();";
-        int id = await conn.ExecuteScalarAsync<int>(sql, new { cnofact, cref, usuario });
+            SELECT @cnofact, @entrada, idfactura, '— Nueva Partida —', 0, 0, 0, @usuario, NOW()
+            FROM fact WHERE cnofact = @cnofact AND cref_agrupada = @entrada
+            ORDER BY idfact DESC LIMIT 1",
+            new { cnofact, entrada, usuario });
+        int id = insertadas > 0 ? await conn.ExecuteScalarAsync<int>("SELECT LAST_INSERT_ID()") : 0;
         if (id > 0)
         {
             await _activityService.RegistrarAsync(
@@ -1581,50 +1625,63 @@ new { creferencia });
         return rows > 0;
     }
 
-    public async Task<bool> AclararDiscrepanciasAsync(string cnofact, string usuario)
+    public async Task<bool> AclararDiscrepanciasAsync(string cnofact, string usuario, string? crefAgrupada = null)
     {
         using IDbConnection conn = _db.CreateConnection();
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return false;
+        }
+
         string sql = @"
-            UPDATE fact 
-            SET obsrev2 = IF(TRIM(COALESCE(obsrev2,'')) = '', 
-                             CONCAT(COALESCE(discrepancias,''), ' AUTORIZO: ', @usuario), 
-                             CONCAT(TRIM(obsrev2), ' | ', COALESCE(discrepancias,''), ' AUTORIZO: ', @usuario)), 
-                discrepancias = '', 
-                usumodi = @usuario, 
-                fmodi = NOW() 
-            WHERE cnofact = @cnofact";
-        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact });
+            UPDATE fact
+            SET obsrev2 = IF(TRIM(COALESCE(obsrev2,'')) = '',
+                             CONCAT(COALESCE(discrepancias,''), ' AUTORIZO: ', @usuario),
+                             CONCAT(TRIM(obsrev2), ' | ', COALESCE(discrepancias,''), ' AUTORIZO: ', @usuario)),
+                discrepancias = '',
+                usumodi = @usuario,
+                fmodi = NOW()
+            WHERE cnofact = @cnofact AND cref_agrupada = @entrada";
+        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact, entrada });
         if (rows > 0)
         {
-            string crefActividad = await ObtenerCrefFacturaAsync(conn, cnofact) ?? string.Empty;
             await _activityService.RegistrarAsync(
-                crefActividad,
+                entrada,
                 usuario,
                 RevisionActivityTypes.DiscrepanciasAclaradas,
                 cnofact,
                 detalle: "Discrepancias aclaradas");
-            if (!string.IsNullOrWhiteSpace(crefActividad))
-            {
-                await _hub.Clients.All.SendAsync("onActividadRecibida", crefActividad, usuario, cnofact, "Discrepancias aclaradas");
-                await NotificarFacturaActualizadaAsync(cnofact, usuario);
-            }
+            await _hub.Clients.All.SendAsync("onActividadRecibida", entrada, usuario, cnofact, "Discrepancias aclaradas");
+            await NotificarFacturaActualizadaAsync(cnofact, usuario, entrada);
         }
         return rows > 0;
     }
 
-    public async Task<IEnumerable<dynamic>> ValidarHojasSeguridadAsync(string cnofact)
+    public async Task<IEnumerable<dynamic>> ValidarHojasSeguridadAsync(
+        string cnofact,
+        string? crefAgrupada = null,
+        string? usuario = null)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sqlPartes = @"
-            SELECT rd.idrevdet, rd.cnoparte, rd.lhazmat, p.idparte 
-            FROM revdet rd 
-            LEFT JOIN products p ON rd.cclienteid = p.cclienteid 
-                                AND rd.cprovid = p.cprovid 
-                                AND rd.cnoparte = p.cidproduct 
-                                AND p.lconstancia = 1 
-            WHERE rd.cnofact = @cnofact AND (rd.lhazmat = 'S' OR rd.lhazmat = 1)";
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return new List<object>();
+        }
 
-        IEnumerable<dynamic> partes = await conn.QueryAsync<object>(sqlPartes, new { cnofact });
+        // Partidas de la factura de esta entrada (revdet.idfactura), no de cualquier factura con ese número.
+        string sqlPartes = @"
+            SELECT rd.idrevdet, rd.cnoparte, rd.lhazmat, p.idparte
+            FROM revdet rd
+            LEFT JOIN products p ON rd.cclienteid = p.cclienteid
+                                AND rd.cprovid = p.cprovid
+                                AND rd.cnoparte = p.cidproduct
+                                AND p.lconstancia = 1
+            WHERE rd.idfactura IN (SELECT idfactura FROM fact WHERE cnofact = @cnofact AND cref_agrupada = @entrada)
+              AND (rd.lhazmat = 'S' OR rd.lhazmat = 1)";
+
+        IEnumerable<dynamic> partes = await conn.QueryAsync<object>(sqlPartes, new { cnofact, entrada });
         List<object> problemList = new List<object>();
 
         foreach (dynamic p in partes)
@@ -1897,18 +1954,24 @@ new { creferencia });
 
         foreach (string cnofact in cnofacts)
         {
-            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+            await NotificarFacturaActualizadaAsync(cnofact, usuario, creferencia);
         }
     }
 
-    public async Task<bool> LimpiarUsurevAsync(string cnofact, string usuario)
+    public async Task<bool> LimpiarUsurevAsync(string cnofact, string usuario, string? crefAgrupada = null)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sql = "UPDATE fact SET usurev = '', usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact";
-        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact });
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return false;
+        }
+
+        string sql = "UPDATE fact SET usurev = '', usumodi = @usuario, fmodi = NOW() WHERE cnofact = @cnofact AND cref_agrupada = @entrada";
+        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact, entrada });
         if (rows > 0)
         {
-            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+            await NotificarFacturaActualizadaAsync(cnofact, usuario, entrada);
         }
         return rows > 0;
     }
@@ -2011,11 +2074,54 @@ new { creferencia });
         }
     }
 
-    private static async Task<string?> ObtenerCrefFacturaAsync(IDbConnection conn, string cnofact)
+    /// <summary>
+    /// Entrada (cref_agrupada) a la que se refiere una petición que trae el número de factura. Si la app manda la
+    /// entrada, esa es; si no (versiones anteriores), se deduce con <see cref="RevisionFacturaAlcance"/>. Nunca se
+    /// escribe con solo el número: el mismo número existe en otras entradas.
+    /// </summary>
+    private async Task<string?> ResolverEntradaDeFacturaAsync(
+        IDbConnection conn,
+        string cnofact,
+        string? crefIndicado,
+        string? usuario)
     {
-        return await conn.ExecuteScalarAsync<string?>(
-            "SELECT cref_agrupada FROM fact WHERE cnofact = @cnofact LIMIT 1",
-            new { cnofact });
+        if (!string.IsNullOrWhiteSpace(crefIndicado))
+        {
+            return crefIndicado.Trim();
+        }
+
+        List<string> candidatas = (await conn.QueryAsync<string>(@"
+            SELECT TRIM(cref_agrupada)
+            FROM fact
+            WHERE cnofact = @cnofact AND TRIM(COALESCE(cref_agrupada, '')) <> ''
+            GROUP BY TRIM(cref_agrupada)
+            ORDER BY MAX(idfact) DESC",
+            new { cnofact })).ToList();
+
+        string? entradaActiva = null;
+        if (candidatas.Count > 1 && !string.IsNullOrWhiteSpace(usuario))
+        {
+            entradaActiva = await conn.ExecuteScalarAsync<string?>(@"
+                SELECT creferencia
+                FROM traftiemposrevision
+                WHERE usuario = @usuario
+                ORDER BY idtiemposrevision DESC
+                LIMIT 1",
+                new { usuario });
+        }
+
+        string? entrada = RevisionFacturaAlcance.ElegirEntrada(null, candidatas, entradaActiva);
+        if (candidatas.Count > 1)
+        {
+            _logger.LogWarning(
+                "La factura {Cnofact} existe en {Candidatas} entradas y la petición de {Usuario} no indicó cuál; se usó {Entrada}. La app debe mandar crefAgrupada.",
+                cnofact,
+                candidatas.Count,
+                usuario,
+                entrada);
+        }
+
+        return entrada;
     }
 
     private static async Task<(string? Cref, string? Cnofact)> ObtenerPartidaActividadAsync(IDbConnection conn, int id)
@@ -2023,7 +2129,7 @@ new { creferencia });
         dynamic? row = await conn.QueryFirstOrDefaultAsync<object>(@"
             SELECT f.cref_agrupada AS Cref, rd.cnofact AS Cnofact
             FROM revdet rd
-            INNER JOIN fact f ON f.cnofact = rd.cnofact
+            INNER JOIN fact f ON f.idfactura = rd.idfactura
             WHERE rd.idrevdet = @id
             LIMIT 1", new { id });
 
@@ -2032,28 +2138,40 @@ new { creferencia });
             : ((string?)row.Cref, (string?)row.Cnofact);
     }
 
-    public async Task<bool> RegistrarEditorFacturaAsync(string cnofact, string usuario)
+    public async Task<bool> RegistrarEditorFacturaAsync(string cnofact, string usuario, string? crefAgrupada = null)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sql = "UPDATE fact SET usuedit = @usuario WHERE cnofact = @cnofact";
-        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact });
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return false;
+        }
+
+        string sql = "UPDATE fact SET usuedit = @usuario WHERE cnofact = @cnofact AND cref_agrupada = @entrada";
+        int rows = await conn.ExecuteAsync(sql, new { usuario, cnofact, entrada });
         if (rows > 0)
         {
             await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaEnUso", new { cnofact, usuario });
-            await NotificarFacturaActualizadaAsync(cnofact, usuario);
+            await NotificarFacturaActualizadaAsync(cnofact, usuario, entrada);
         }
         return rows > 0;
     }
 
-    public async Task<bool> LimpiarEditorFacturaAsync(string cnofact)
+    public async Task<bool> LimpiarEditorFacturaAsync(string cnofact, string? crefAgrupada = null, string? usuario = null)
     {
         using IDbConnection conn = _db.CreateConnection();
-        string sql = "UPDATE fact SET usuedit = '' WHERE cnofact = @cnofact";
-        int rows = await conn.ExecuteAsync(sql, new { cnofact });
+        string? entrada = await ResolverEntradaDeFacturaAsync(conn, cnofact, crefAgrupada, usuario);
+        if (entrada == null)
+        {
+            return false;
+        }
+
+        string sql = "UPDATE fact SET usuedit = '' WHERE cnofact = @cnofact AND cref_agrupada = @entrada";
+        int rows = await conn.ExecuteAsync(sql, new { cnofact, entrada });
         if (rows > 0)
         {
             await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaLiberada", new { cnofact });
-            await NotificarFacturaActualizadaAsync(cnofact, string.Empty);
+            await NotificarFacturaActualizadaAsync(cnofact, string.Empty, entrada);
         }
         return rows > 0;
     }
@@ -2081,9 +2199,9 @@ new { creferencia });
         }
     }
 
-    private async Task NotificarFacturaActualizadaAsync(string cnofact, string usuario)
+    private async Task NotificarFacturaActualizadaAsync(string cnofact, string usuario, string crefAgrupada)
     {
-        FacturaRevision? factura = await GetRevisionFacturaAsync(cnofact);
+        FacturaRevision? factura = await GetRevisionFacturaAsync(cnofact, crefAgrupada, usuario);
         if (factura == null)
         {
             return;
@@ -2179,7 +2297,7 @@ new { creferencia });
                 COALESCE(rd.cclienteid, '') AS Cclienteid,
                 {optionalColumns}
             FROM revdet rd
-            INNER JOIN fact f ON f.cnofact = rd.cnofact
+            INNER JOIN fact f ON f.idfactura = rd.idfactura
             WHERE rd.idrevdet = @id
             LIMIT 1", new { id });
     }

@@ -321,18 +321,35 @@ public class TimerController : ControllerBase
                 cref = creferencia,
                 usuario = usuario
             });
-            if (sesionAbierta == null)
+            bool haySesionAbierta = sesionAbierta != null;
+            if (!haySesionAbierta && !req.EsFinal)
             {
+                // Pausar sin sesión abierta: la desconexión ya la cerró, no hay
+                // nada más que hacer.
                 return Ok(new
                 {
                     success = true
                 });
             }
 
+            // Terminar SIN sesión abierta (caso 01C263614350000, 10-nov): el hub
+            // cierra las sesiones de un usuario cuando se le cae la conexión
+            // (WarehouseHub.OnDisconnectedAsync, estatus_final = 0). Si después
+            // el revisor toca "Terminar", aquí ya no hay fila abierta. Antes se
+            // respondía success=true sin hacer nada -- la app celebraba, pero
+            // traf.status se quedaba en 1, traf3 sin tiempos y sin correo.
+            // Ahora el cierre se completa igual, tomando como sesiones del
+            // usuario las que ya quedaron cerradas sin finalizar (estatus_final
+            // distinto de 1 y 2). Los tiempos reales NO se tocan: ffinrevision
+            // conserva la hora de la desconexión.
             RevisionNormalCompletionState completionState =
                 await _normalCompletionService.ObtenerEstadoAsync(conn, creferencia);
 
-            DateTime? inicioRevision = sesionAbierta.finiciorevision as DateTime?;
+            DateTime? inicioRevision = null;
+            if (sesionAbierta != null)
+            {
+                inicioRevision = sesionAbierta.finiciorevision as DateTime?;
+            }
             if (inicioRevision.HasValue && inicioRevision.Value > DateTime.Now)
             {
                 return BadRequest(new
@@ -344,12 +361,24 @@ public class TimerController : ControllerBase
             // Cierra todas las filas abiertas del usuario en esta entrada,
             // no solo la última. Así los duplicados creados por versiones
             // anteriores no vuelven a aparecer como sesiones fantasma.
-            string sqlCerrar = @"
+            string sqlCerrar = haySesionAbierta
+                ? @"
                 UPDATE traftiemposrevision
                 SET ffinrevision = NOW(), estatus_final = @status, usurevisa = @usuario
                 WHERE creferencia = @cref
                   AND usuario = @usuario
                   AND (ffinrevision IS NULL OR YEAR(ffinrevision) < 2000)
+                  AND (
+                        (finiciorevision IS NOT NULL AND YEAR(finiciorevision) >= 2000)
+                     OR (ftomadocumento IS NOT NULL AND YEAR(ftomadocumento) >= 2000)
+                  )"
+                : @"
+                UPDATE traftiemposrevision
+                SET estatus_final = @status, usurevisa = @usuario
+                WHERE creferencia = @cref
+                  AND usuario = @usuario
+                  AND ffinrevision IS NOT NULL AND YEAR(ffinrevision) >= 2000
+                  AND COALESCE(estatus_final, 0) NOT IN (1, 2)
                   AND (
                         (finiciorevision IS NOT NULL AND YEAR(finiciorevision) >= 2000)
                      OR (ftomadocumento IS NOT NULL AND YEAR(ftomadocumento) >= 2000)
@@ -361,6 +390,11 @@ public class TimerController : ControllerBase
             using IDbTransaction transaction = conn.BeginTransaction();
             try
             {
+                // Candado sobre la entrada: dos "Terminar" a la vez (doble toque, dos dispositivos) se serializan, y el
+                // segundo ya ve la entrada marcada, así que no vuelve a mandar el correo.
+                bool entradaYaMarcada = req.EsFinal
+                    && await _normalCompletionService.ObtenerStatusEntradaAsync(conn, creferencia, transaction) >= 2;
+
                 int rowsCerradas = await conn.ExecuteAsync(sqlCerrar, new
                 {
                     cref = creferencia,
@@ -368,7 +402,26 @@ public class TimerController : ControllerBase
                     usuario
                 }, transaction);
 
-                if (rowsCerradas > 0 && req.EsFinal)
+                if (rowsCerradas > 0 && !haySesionAbierta)
+                {
+                    _logger.LogWarning(
+                        "FinalizarTimer {Cref}: {Usuario} terminó una entrada cuya sesión ya estaba cerrada (desconexión); se completó el cierre sobre {Filas} fila(s) ya cerradas.",
+                        creferencia,
+                        usuario,
+                        rowsCerradas);
+                }
+
+                // El cierre ante el sistema de escritorio (traf.status = 2, traf3.finicia/ffin_revision) depende del
+                // ESTADO de la entrada, no de que esta llamada haya cambiado una fila de sesión: si la entrada está
+                // completa y no está marcada, se marca aunque las sesiones ya estuvieran cerradas (caso: un cierre
+                // anterior que se hizo con la entrada "incompleta" y luego se completó, o una sesión que la
+                // desconexión ya había cerrado).
+                bool converge = req.EsFinal
+                    && completionState.PuedeEnviarCorreo
+                    && rowsCerradas == 0
+                    && !entradaYaMarcada;
+
+                if (req.EsFinal && (rowsCerradas > 0 || converge))
                 {
                     // Se acabó de trabajar en esta entrada (bien o con
                     // pendientes) -- ya no debe seguir apareciendo en
@@ -380,25 +433,53 @@ public class TimerController : ControllerBase
                         "UPDATE asignaciones_revision SET estatus = 2, fecha_completada = NOW() WHERE cref_agrupada = @cref AND usuario_asignado = @usuario AND estatus IN (0, 1)",
                         new { cref = creferencia, usuario },
                         transaction);
+                }
 
-                    if (completionState.PuedeEnviarCorreo)
-                    {
-                        LegacyRevisionSyncResult legacySync =
-                            await _normalCompletionService.SincronizarSistemaLegadoAsync(
-                                conn,
-                                creferencia,
-                                transaction);
-                        _logger.LogInformation(
-                            "Cierre normal {Cref} sincronizado con legado: traf={TrafRows}, traf3={Traf3Rows}.",
+                if (converge)
+                {
+                    // La última sesión del usuario quedó con el estatus de aquel cierre (0 o 2); se alinea con el real.
+                    await conn.ExecuteAsync(@"
+                        UPDATE traftiemposrevision
+                        SET estatus_final = @status, usurevisa = @usuario
+                        WHERE idtiemposrevision = (
+                            SELECT ultimo FROM (
+                                SELECT MAX(idtiemposrevision) AS ultimo
+                                FROM traftiemposrevision
+                                WHERE creferencia = @cref
+                                  AND usuario = @usuario
+                                  AND ffinrevision IS NOT NULL AND YEAR(ffinrevision) >= 2000
+                            ) u)
+                          AND COALESCE(estatus_final, 0) <> @status",
+                        new { cref = creferencia, status = statusFinal, usuario },
+                        transaction);
+                }
+
+                if (req.EsFinal && completionState.PuedeEnviarCorreo)
+                {
+                    LegacyRevisionSyncResult legacySync =
+                        await _normalCompletionService.SincronizarSistemaLegadoAsync(
+                            conn,
                             creferencia,
-                            legacySync.TrafRows,
-                            legacySync.Traf3Rows);
-                    }
+                            transaction);
+                    _logger.LogInformation(
+                        "Cierre normal {Cref} sincronizado con legado: traf={TrafRows}, traf3={Traf3Rows}, convergencia={Converge}.",
+                        creferencia,
+                        legacySync.TrafRows,
+                        legacySync.Traf3Rows,
+                        converge);
+                }
+                else if (req.EsFinal)
+                {
+                    _logger.LogWarning(
+                        "FinalizarTimer {Cref}: {Usuario} terminó pero la entrada NO quedó marcada como revisada: {Motivo}",
+                        creferencia,
+                        usuario,
+                        completionState.MotivoIncompleto);
                 }
 
                 transaction.Commit();
 
-                if (rowsCerradas > 0)
+                if (rowsCerradas > 0 || converge)
                 {
                     if (req.EsFinal)
                     {
@@ -414,7 +495,13 @@ public class TimerController : ControllerBase
                         creferencia,
                         usuario,
                         req.EsFinal ? RevisionActivityTypes.Finalizada : RevisionActivityTypes.Pausada,
-                        detalle: req.EsFinal ? "Revisión finalizada" : "Revisión pausada");
+                        detalle: !req.EsFinal
+                            ? "Revisión pausada"
+                            : converge
+                                ? "Revisión finalizada (se completó el cierre de una revisión que ya estaba cerrada)"
+                                : haySesionAbierta
+                                    ? "Revisión finalizada"
+                                    : "Revisión finalizada (la sesión ya se había cerrado por desconexión)");
                     await _hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onRevisionEstadoCambiado", new
                     {
                         creferencia,
@@ -460,7 +547,13 @@ public class TimerController : ControllerBase
             {
                 success = true,
                 estatusFinal = req.EsFinal ? completionState.EstatusFinal : req.StatusFinal,
-                revisionCompleta = req.EsFinal && completionState.PuedeEnviarCorreo
+                revisionCompleta = req.EsFinal && completionState.PuedeEnviarCorreo,
+                // La sesión se cierra siempre, pero la entrada solo queda marcada como revisada físicamente cuando está
+                // completa. La app ya no puede tratar "se cerró" y "quedó revisada" como lo mismo: estos campos le
+                // dicen cuál de las dos pasó y por qué (antes respondía solo success=true y la app celebraba).
+                facturasIncompletas = completionState.FacturasIncompletas,
+                facturasConPartidasPendientes = completionState.FacturasConPartidasIncompletas,
+                message = req.EsFinal ? completionState.MotivoIncompleto : null
             });
         }
         catch (Exception exception)

@@ -145,7 +145,7 @@ public class RevisionReportService : IRevisionReportService
     AND " + RevisionTimeRules.ClosedSessionPredicate() + @") AS segundosTotales
   FROM fact f
   LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
-  LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+  LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
   LEFT JOIN provs p ON p.cidprov = rd.cprovid
   WHERE f.cref_agrupada = @cref
   GROUP BY f.cref_agrupada";
@@ -168,7 +168,7 @@ public class RevisionReportService : IRevisionReportService
  COUNT(rd.idrevdet) AS totalPartidas,
  SUM(rd.revisada) AS partidasRevisadas
   FROM fact f
-  LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+  LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
   WHERE f.cref_agrupada = @cref
   GROUP BY f.cnofact";
 

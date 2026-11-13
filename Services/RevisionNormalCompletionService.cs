@@ -54,7 +54,7 @@ public sealed class RevisionNormalCompletionService
                 SUM(CASE WHEN EXISTS (
                         SELECT 1
                         FROM revdet rd
-                        WHERE rd.cnofact = f.cnofact
+                        WHERE rd.idfactura = f.idfactura
                           AND COALESCE(rd.revisada, 0) <> 1
                     ) THEN 1 ELSE 0 END) AS FacturasConPartidasIncompletas
             FROM fact f
@@ -93,11 +93,11 @@ public sealed class RevisionNormalCompletionService
                 COUNT(DISTINCT CASE WHEN EXISTS (
                     SELECT 1
                     FROM revdet pending
-                    WHERE pending.cnofact = f.cnofact
+                    WHERE pending.idfactura = f.idfactura
                       AND COALESCE(pending.revisada, 0) <> 1
                 ) THEN f.cnofact END) AS FacturasConPartidasIncompletas
             FROM fact f
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
             WHERE f.cref_agrupada IN @Referencias
             GROUP BY f.cref_agrupada";
 
@@ -122,40 +122,67 @@ public sealed class RevisionNormalCompletionService
     }
 
     /// <summary>
+    /// Estado actual de la entrada en el sistema legado (<c>traf.status</c>); 2 o más = ya se revisó físicamente.
+    /// Dentro de una transacción se bloquea la fila para que dos "Terminar" simultáneos (doble toque, dos
+    /// dispositivos) se serialicen y solo el primero dispare el correo.
+    /// </summary>
+    public async Task<int> ObtenerStatusEntradaAsync(
+        IDbConnection connection,
+        string creferencia,
+        IDbTransaction? transaction = null)
+    {
+        string bloqueo = transaction == null ? string.Empty : " FOR UPDATE";
+        return await connection.ExecuteScalarAsync<int>(
+            $"SELECT COALESCE(MAX(status), 0) FROM traf WHERE creferencia = @cref{bloqueo}",
+            new { cref = creferencia },
+            transaction);
+    }
+
+    /// <summary>
     /// Sincroniza el cierre completo con las columnas que utiliza
     /// <c>frmopera_bodega</c>: <c>traf.status = 2</c>,
     /// <c>traf3.finicia_revision</c> y <c>traf3.ffin_revision</c>.
+    /// Es idempotente: se puede ejecutar las veces que haga falta y converge siempre al mismo resultado.
     /// </summary>
     public async Task<LegacyRevisionSyncResult> SincronizarSistemaLegadoAsync(
         IDbConnection connection,
         string creferencia,
         IDbTransaction? transaction = null)
     {
+        // Solo se sube a 2: una entrada que ya avanzó (3 en adelante: con relación, en salida...) no debe regresar a
+        // "revisada" porque alguien volvió a terminar su revisión después de un desbloqueo.
         int trafRows = await connection.ExecuteAsync(
             @"
                 UPDATE traf
                 SET status = 2
-                WHERE creferencia = @cref",
+                WHERE creferencia = @cref
+                  AND COALESCE(status, 0) < 2",
             new { cref = creferencia },
             transaction);
 
+        // El inicio cae a la toma de documentos cuando la sesión nunca arrancó el cronómetro (finiciorevision vacío):
+        // antes esas entradas quedaban con traf3.finicia_revision en blanco aunque sí se revisaron. Y si no hay
+        // ninguna sesión válida se conserva lo que ya tenía traf3 en vez de borrarlo.
         int traf3Rows = await connection.ExecuteAsync(
             @"
                 UPDATE traf3
-                SET finicia_revision = (
-                        SELECT MIN(t.finiciorevision)
+                SET finicia_revision = COALESCE((
+                        SELECT MIN(CASE
+                                     WHEN t.finiciorevision IS NOT NULL AND YEAR(t.finiciorevision) >= 2000
+                                         THEN t.finiciorevision
+                                     WHEN t.ftomadocumento IS NOT NULL AND YEAR(t.ftomadocumento) >= 2000
+                                         THEN t.ftomadocumento
+                                   END)
                         FROM traftiemposrevision t
                         WHERE t.creferencia = @cref
-                          AND t.finiciorevision IS NOT NULL
-                          AND YEAR(t.finiciorevision) >= 2000
-                    ),
-                    ffin_revision = (
+                    ), finicia_revision),
+                    ffin_revision = COALESCE((
                         SELECT MAX(t.ffinrevision)
                         FROM traftiemposrevision t
                         WHERE t.creferencia = @cref
                           AND t.ffinrevision IS NOT NULL
                           AND YEAR(t.ffinrevision) >= 2000
-                    )
+                    ), ffin_revision)
                 WHERE creferencia = @cref",
             new { cref = creferencia },
             transaction);
@@ -187,6 +214,41 @@ public sealed record RevisionNormalCompletionState(
         FacturasConDiscrepancia > 0
             ? 2
             : 1;
+
+    /// <summary>
+    /// Por qué la entrada no se puede marcar como revisada físicamente, en el lenguaje del revisor, o
+    /// <c>null</c> si sí se puede. La app lo muestra: terminar sin que la entrada quede cerrada no debe verse
+    /// igual que terminar bien.
+    /// </summary>
+    public string? MotivoIncompleto
+    {
+        get
+        {
+            if (PuedeEnviarCorreo)
+            {
+                return null;
+            }
+
+            if (!TieneFacturas)
+            {
+                return "La entrada no tiene facturas para revisar.";
+            }
+
+            var partes = new List<string>();
+            if (FacturasIncompletas > 0)
+            {
+                partes.Add($"{FacturasIncompletas} factura(s) sin completar");
+            }
+
+            if (FacturasConPartidasIncompletas > 0)
+            {
+                partes.Add($"{FacturasConPartidasIncompletas} factura(s) con partidas sin revisar");
+            }
+
+            return "La revisión se cerró, pero la entrada no quedó marcada como revisada físicamente: faltan " +
+                   string.Join(" y ", partes) + ".";
+        }
+    }
 }
 
 /// <summary>Indicadores de avance más el estado calculado con la regla de cierre normal.</summary>

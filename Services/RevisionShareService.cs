@@ -111,7 +111,7 @@ public class RevisionShareService : IRevisionShareService
                   COUNT(DISTINCT CASE WHEN rd.revisada = 1 THEN rd.idrevdet END) AS partidas_revisadas
               FROM fact f
               LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
-              LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+              LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
               WHERE f.cref_agrupada = @cref
               GROUP BY f.cref_agrupada",
             new { cref });

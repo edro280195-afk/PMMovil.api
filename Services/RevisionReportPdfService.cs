@@ -97,7 +97,7 @@ public class RevisionReportPdfService
                  ORDER BY tc.ffinrevision DESC LIMIT 1) AS supervisorCierre
             FROM fact f
             LEFT JOIN clientes cl ON cl.cidcte = f.cclienteid
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
             LEFT JOIN provs p ON p.cidprov = rd.cprovid
             LEFT JOIN trafdet td ON td.creferencia = f.cref_agrupada
             WHERE f.cref_agrupada = @cref
@@ -129,7 +129,7 @@ public class RevisionReportPdfService
                 COUNT(rd.idrevdet) AS totalPartidas,
                 SUM(rd.revisada) AS partidasRevisadas
             FROM fact f
-            LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+            LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
             WHERE f.cref_agrupada = @cref
             GROUP BY f.cnofact",
             new { cref = creferencia })).ToList();

@@ -261,7 +261,7 @@ public class MonitorController : ControllerBase
                            COUNT(DISTINCT rd.idrevdet) AS total_partidas,
                            COUNT(DISTINCT CASE WHEN rd.revisada = 1 THEN rd.idrevdet END) AS partidas_revisadas
                     FROM fact f
-                    LEFT JOIN revdet rd ON rd.cnofact = f.cnofact
+                    LEFT JOIN revdet rd ON rd.idfactura = f.idfactura
                     WHERE f.cref_agrupada IN @referencias
                     GROUP BY f.cref_agrupada";
                 IEnumerable<dynamic> partidaRows = await conn.QueryAsync<dynamic>(sqlPartidas, new { referencias });
@@ -798,7 +798,7 @@ public class MonitorController : ControllerBase
             //
             // El DISTINCT sobre idtiemposrevision evita que los JOIN de filtro dupliquen
             // una misma sesion cuando la referencia tiene varias facturas o partidas.
-            string sql = "\nSELECT DISTINCT\n    t.idtiemposrevision AS id,\n    t.usurevisa AS usuario,\n    TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision) AS mins\nFROM traftiemposrevision t" + ((!string.IsNullOrEmpty(cidcte) || !string.IsNullOrEmpty(cidprov)) ? "\nJOIN fact f ON f.cref_agrupada = t.creferencia\nJOIN revdet rd ON rd.cnofact = f.cnofact" : "") + "\nWHERE t.finiciorevision IS NOT NULL AND YEAR(t.finiciorevision) >= 2000\n  AND t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000\n  AND TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision) BETWEEN 1 AND 240\n  AND DATE(t.ffinrevision) BETWEEN @fi AND @ff\n  AND t.usurevisa IS NOT NULL AND t.usurevisa <> ''" + ((!string.IsNullOrEmpty(cidcte)) ? "\n  AND f.cclienteid = @cidcte" : "") + ((!string.IsNullOrEmpty(cidprov)) ? "\n  AND rd.cprovid = @cidprov" : "");
+            string sql = "\nSELECT DISTINCT\n    t.idtiemposrevision AS id,\n    t.usurevisa AS usuario,\n    TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision) AS mins\nFROM traftiemposrevision t" + ((!string.IsNullOrEmpty(cidcte) || !string.IsNullOrEmpty(cidprov)) ? "\nJOIN fact f ON f.cref_agrupada = t.creferencia\nJOIN revdet rd ON rd.idfactura = f.idfactura" : "") + "\nWHERE t.finiciorevision IS NOT NULL AND YEAR(t.finiciorevision) >= 2000\n  AND t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000\n  AND TIMESTAMPDIFF(MINUTE, t.finiciorevision, t.ffinrevision) BETWEEN 1 AND 240\n  AND DATE(t.ffinrevision) BETWEEN @fi AND @ff\n  AND t.usurevisa IS NOT NULL AND t.usurevisa <> ''" + ((!string.IsNullOrEmpty(cidcte)) ? "\n  AND f.cclienteid = @cidcte" : "") + ((!string.IsNullOrEmpty(cidprov)) ? "\n  AND rd.cprovid = @cidprov" : "");
             var sesiones = await conn.QueryAsync<VelocidadSesionRow>(sql, new
             {
                 fi = fi.ToString("yyyy-MM-dd"),
@@ -852,7 +852,7 @@ public class MonitorController : ControllerBase
             dynamic metaRow = await conn.QueryFirstOrDefaultAsync<object>("SELECT valor FROM monitor_config WHERE clave = 'meta_diaria'");
             int meta = ((metaRow != null) ? int.Parse((string)metaRow.valor) : 50);
 
-            string joinFilter = ((!string.IsNullOrEmpty(cidcte) || !string.IsNullOrEmpty(cidprov)) ? "\nJOIN fact f ON f.cref_agrupada = t.creferencia\nJOIN revdet rd ON rd.cnofact = f.cnofact" : "");
+            string joinFilter = ((!string.IsNullOrEmpty(cidcte) || !string.IsNullOrEmpty(cidprov)) ? "\nJOIN fact f ON f.cref_agrupada = t.creferencia\nJOIN revdet rd ON rd.idfactura = f.idfactura" : "");
             string whereCte = ((!string.IsNullOrEmpty(cidcte)) ? " AND f.cclienteid = @cidcte" : "");
             string whereProv = ((!string.IsNullOrEmpty(cidprov)) ? " AND rd.cprovid = @cidprov" : "");
 
@@ -1100,7 +1100,7 @@ public class MonitorController : ControllerBase
             using IDbConnection conn = _db.CreateConnection();
             DateTime fi = (string.IsNullOrEmpty(fechaInicio) ? DateTime.Today : DateTime.Parse(fechaInicio));
             DateTime ff = (string.IsNullOrEmpty(fechaFin) ? DateTime.Today : DateTime.Parse(fechaFin));
-            string sql = "\nSELECT\n    COALESCE(MAX(c.cnombre), 'Sin cliente') AS cliente,\n    COUNT(DISTINCT t.creferencia) AS cantidad\nFROM traftiemposrevision t\nLEFT JOIN fact f ON f.cref_agrupada = t.creferencia\nLEFT JOIN clientes c ON c.cidcte = f.cclienteid AND c.inactivo = 0" + ((!string.IsNullOrEmpty(cidprov)) ? "\nJOIN revdet rd ON rd.cnofact = f.cnofact" : "") + "\nWHERE t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000\n  AND DATE(t.ffinrevision) BETWEEN @fi AND @ff" + ((!string.IsNullOrEmpty(cidcte)) ? "\n  AND f.cclienteid = @cidcte" : "") + ((!string.IsNullOrEmpty(cidprov)) ? "\n  AND rd.cprovid = @cidprov" : "") + "\nGROUP BY f.cclienteid\nORDER BY cantidad DESC\nLIMIT 10";
+            string sql = "\nSELECT\n    COALESCE(MAX(c.cnombre), 'Sin cliente') AS cliente,\n    COUNT(DISTINCT t.creferencia) AS cantidad\nFROM traftiemposrevision t\nLEFT JOIN fact f ON f.cref_agrupada = t.creferencia\nLEFT JOIN clientes c ON c.cidcte = f.cclienteid AND c.inactivo = 0" + ((!string.IsNullOrEmpty(cidprov)) ? "\nJOIN revdet rd ON rd.idfactura = f.idfactura" : "") + "\nWHERE t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000\n  AND DATE(t.ffinrevision) BETWEEN @fi AND @ff" + ((!string.IsNullOrEmpty(cidcte)) ? "\n  AND f.cclienteid = @cidcte" : "") + ((!string.IsNullOrEmpty(cidprov)) ? "\n  AND rd.cprovid = @cidprov" : "") + "\nGROUP BY f.cclienteid\nORDER BY cantidad DESC\nLIMIT 10";
             var result = (await conn.QueryAsync<object>(sql, new
             {
                 fi = fi.ToString("yyyy-MM-dd"),
@@ -1138,7 +1138,7 @@ public class MonitorController : ControllerBase
             using IDbConnection conn = _db.CreateConnection();
             DateTime fi = (string.IsNullOrEmpty(fechaInicio) ? DateTime.Today.AddDays(-6.0) : DateTime.Parse(fechaInicio));
             DateTime ff = (string.IsNullOrEmpty(fechaFin) ? DateTime.Today : DateTime.Parse(fechaFin));
-            string joinProv = ((!string.IsNullOrEmpty(cidprov)) ? "\nJOIN revdet rd ON rd.cnofact = f.cnofact" : "");
+            string joinProv = ((!string.IsNullOrEmpty(cidprov)) ? "\nJOIN revdet rd ON rd.idfactura = f.idfactura" : "");
             string whereCte = ((!string.IsNullOrEmpty(cidcte)) ? "\n  AND f.cclienteid = @cidcte" : "");
             string whereProv = ((!string.IsNullOrEmpty(cidprov)) ? "\n  AND rd.cprovid = @cidprov" : "");
             string sql = $"\nSELECT\n    DATE(f.dfecha) AS fecha_dia,\n    COUNT(DISTINCT f.cref_agrupada) AS total,\n    COUNT(DISTINCT CASE WHEN t.ffinrevision IS NOT NULL AND YEAR(t.ffinrevision) >= 2000 THEN t.creferencia END) AS completadas\nFROM fact f\nLEFT JOIN traftiemposrevision t ON t.creferencia = f.cref_agrupada{joinProv}\nWHERE DATE(f.dfecha) BETWEEN @fi AND @ff{whereCte}{whereProv}\nGROUP BY DATE(f.dfecha)\nORDER BY fecha_dia ASC";

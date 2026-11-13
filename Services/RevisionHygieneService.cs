@@ -266,9 +266,11 @@ public class RevisionHygieneService : BackgroundService
         {
             if (stoppingToken.IsCancellationRequested) return;
 
+            // Acotado a la entrada de la factura huérfana: el mismo número existe en otras entradas y una de ellas
+            // puede estar siendo editada ahora mismo por la misma persona.
             int rows = await conn.ExecuteAsync(
-                "UPDATE fact SET usuedit = '' WHERE cnofact = @cnofact AND usuedit = @usuedit",
-                new { cnofact, usuedit });
+                "UPDATE fact SET usuedit = '' WHERE cnofact = @cnofact AND usuedit = @usuedit AND cref_agrupada = @crefAgrupada",
+                new { cnofact, usuedit, crefAgrupada });
             if (rows == 0) continue;
 
             await hub.Clients.Group(WarehouseHub.RevisionGroup).SendAsync("onFacturaLiberada", new { cnofact });

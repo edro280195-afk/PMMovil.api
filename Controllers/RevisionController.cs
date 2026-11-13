@@ -331,11 +331,12 @@ public class RevisionController : ControllerBase
     }
 
     [HttpGet("factura/{cnofact}")]
-    public async Task<IActionResult> GetRevisionFactura(string cnofact)
+    public async Task<IActionResult> GetRevisionFactura(string cnofact, [FromQuery] string? cref = null)
     {
         try
         {
-            var data = await _revisionService.GetRevisionFacturaAsync(cnofact);
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            var data = await _revisionService.GetRevisionFacturaAsync(cnofact, cref, usuario);
             if (data == null)
             {
                 return NotFound(new
@@ -450,7 +451,7 @@ public class RevisionController : ControllerBase
             string valor = NormalizarValorCampo(payload.valor);
             string usuario = base.User.Identity?.Name ?? "Desconocido";
 
-            bool success = await _revisionService.GuardarCampoFacturaAsync(cnofact, campo, valor, usuario);
+            bool success = await _revisionService.GuardarCampoFacturaAsync(cnofact, campo, valor, usuario, payload.crefAgrupada);
             return Ok(new { success });
         }
         catch (ArgumentException argEx)
@@ -580,6 +581,13 @@ public class RevisionController : ControllerBase
             string usuario = base.User.Identity?.Name ?? "Desconocido";
 
             int id = await _revisionService.AgregarProductoAsync(cnofact, cref, usuario);
+            if (id <= 0)
+            {
+                // No se insertó nada: la factura no existe en esa entrada. Antes se respondía success con un id
+                // viejo (LAST_INSERT_ID de otra operación) y la app creía tener la partida.
+                return NotFound(new { success = false, message = "La factura ya no existe en esta entrada." });
+            }
+
             return Ok(new { success = true, id });
         }
         catch (Exception exception)
@@ -614,7 +622,7 @@ public class RevisionController : ControllerBase
             string cnofact = payload.cnofact;
             string usuario = base.User.Identity?.Name ?? "Desconocido";
 
-            bool success = await _revisionService.AclararDiscrepanciasAsync(cnofact, usuario);
+            bool success = await _revisionService.AclararDiscrepanciasAsync(cnofact, usuario, payload.crefAgrupada);
             return Ok(new { success });
         }
         catch (Exception exception)
@@ -629,11 +637,12 @@ public class RevisionController : ControllerBase
     }
 
     [HttpGet("factura/validar-hazmat/{cnofact}")]
-    public async Task<IActionResult> ValidarHojasSeguridad(string cnofact)
+    public async Task<IActionResult> ValidarHojasSeguridad(string cnofact, [FromQuery] string? cref = null)
     {
         try
         {
-            var problemas = await _revisionService.ValidarHojasSeguridadAsync(cnofact);
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            var problemas = await _revisionService.ValidarHojasSeguridadAsync(cnofact, cref, usuario);
             return Ok(new
             {
                 success = true,
@@ -854,7 +863,7 @@ WHERE inactivo = 0
         {
             string cnofact = payload.cnofact;
             string usuario = base.User.Identity?.Name ?? "Desconocido";
-            bool success = await _revisionService.LimpiarUsurevAsync(cnofact, usuario);
+            bool success = await _revisionService.LimpiarUsurevAsync(cnofact, usuario, payload.crefAgrupada);
             return Ok(new
             {
                 success
@@ -940,7 +949,7 @@ WHERE inactivo = 0
         {
             string cnofact = payload.cnofact;
             string usuario = base.User.Identity?.Name ?? "Desconocido";
-            bool success = await _revisionService.RegistrarEditorFacturaAsync(cnofact, usuario);
+            bool success = await _revisionService.RegistrarEditorFacturaAsync(cnofact, usuario, payload.crefAgrupada);
             return Ok(new
             {
                 success
@@ -964,7 +973,8 @@ WHERE inactivo = 0
         try
         {
             string cnofact = payload.cnofact;
-            bool success = await _revisionService.LimpiarEditorFacturaAsync(cnofact);
+            string usuario = base.User.Identity?.Name ?? "Desconocido";
+            bool success = await _revisionService.LimpiarEditorFacturaAsync(cnofact, payload.crefAgrupada, usuario);
             return Ok(new
             {
                 success

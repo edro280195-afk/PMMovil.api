@@ -5,6 +5,12 @@ namespace PMMovil.Api.Models;
 public class AccionFacturaDto
 {
     public string cnofact { get; set; } = "";
+
+    /// <summary>
+    /// Entrada (cref_agrupada) de la factura. El número de factura se repite entre entradas, así que la app lo
+    /// manda siempre; las versiones anteriores no lo mandan y el API lo deduce (ver RevisionFacturaAlcance).
+    /// </summary>
+    public string? crefAgrupada { get; set; }
 }
 
 public class AgregarProductoDto
@@ -16,6 +22,10 @@ public class AgregarProductoDto
 public class GuardarCampoFacturaDto
 {
     public string cnofact { get; set; } = "";
+
+    /// <summary>Entrada (cref_agrupada) de la factura; ver <see cref="AccionFacturaDto.crefAgrupada"/>.</summary>
+    public string? crefAgrupada { get; set; }
+
     public string campo { get; set; } = "";
     public JsonElement valor { get; set; }
 }
