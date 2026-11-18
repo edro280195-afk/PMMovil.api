@@ -287,6 +287,28 @@ public partial class CasetaService
             decodificadas.Add((indice, bytes));
         }
 
+        return await GuardarLoteFotosSalidaAsync(limpio, decodificadas, usuario, ct);
+    }
+
+    /// <summary>
+    /// Igual que <see cref="SubirFotosSalidaAsync"/>, pero las fotos llegaron como archivos (multipart) y no como texto
+    /// base64: viajan ~25 % más ligeras por el internet de la oficina.
+    /// </summary>
+    public async Task<ConfirmarResult> SubirFotosSalidaArchivosAsync(
+        string relno, int indiceInicial, IReadOnlyList<byte[]>? fotos, string usuario, CancellationToken ct = default)
+    {
+        string limpio = (relno ?? string.Empty).Trim();
+        if (limpio.Length == 0) return new ConfirmarResult { Success = false, Message = "La relación es obligatoria." };
+        string? error = CasetaFotosRecibidas.ValidarLoteSalida(indiceInicial, fotos, MaxFotosPorLoteSalida, MaxFotosSalida);
+        if (error != null) return new ConfirmarResult { Success = false, Message = error };
+
+        var decodificadas = fotos!.Select((bytes, i) => (Indice: indiceInicial + i, Bytes: bytes)).ToList();
+        return await GuardarLoteFotosSalidaAsync(limpio, decodificadas, usuario, ct);
+    }
+
+    private async Task<ConfirmarResult> GuardarLoteFotosSalidaAsync(
+        string limpio, List<(int Indice, byte[] Bytes)> decodificadas, string usuario, CancellationToken ct)
+    {
         var (tabla, _) = ResolverTabla(limpio);
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
@@ -1259,7 +1281,7 @@ LIMIT 1", new { casetaId });
         if (uploads.Select(x => x.Indice).Distinct().Count() != uploads.Count)
             return new CasetaEntradaFotosResult { Success = false, Message = "No se permiten indices de foto repetidos." };
 
-        var decoded = new List<(CasetaEntradaFotoUpload Upload, byte[] Bytes)>();
+        var decoded = new List<(int Indice, byte[] Bytes)>();
         foreach (CasetaEntradaFotoUpload upload in uploads)
         {
             if (string.IsNullOrWhiteSpace(upload.Base64Image))
@@ -1269,9 +1291,46 @@ LIMIT 1", new { casetaId });
             if (bytes == null || bytes.Length == 0)
                 return new CasetaEntradaFotosResult { Success = false, Message = $"La foto {upload.Indice} no es valida." };
 
-            decoded.Add((upload, bytes));
+            decoded.Add((upload.Indice, bytes));
         }
 
+        return await GuardarLoteFotosEntradaAsync(casetaId, cleanCasetaId, decoded, request!.Finalizar, request.Actualizado, usuarioActual, ct);
+    }
+
+    /// <summary>
+    /// Igual que <see cref="SubirFotosEntradaCasetaAsync"/>, pero las fotos llegaron como archivos (multipart) y no como
+    /// texto base64: viajan ~25 % más ligeras. <paramref name="indices"/> va en el mismo orden que <paramref name="fotos"/>.
+    /// </summary>
+    public async Task<CasetaEntradaFotosResult> SubirFotosEntradaCasetaArchivosAsync(
+        string casetaId,
+        IReadOnlyList<int>? indices,
+        IReadOnlyList<byte[]>? fotos,
+        bool finalizar,
+        bool actualizado,
+        string usuarioActual,
+        CancellationToken ct = default)
+    {
+        string cleanCasetaId = NormalizeCasetaId(casetaId);
+        if (string.IsNullOrWhiteSpace(cleanCasetaId))
+            return new CasetaEntradaFotosResult { Success = false, Message = "CasetaId es obligatorio." };
+
+        string? error = CasetaFotosRecibidas.ValidarLoteEntrada(indices, fotos);
+        if (error != null)
+            return new CasetaEntradaFotosResult { Success = false, Message = error };
+
+        var decoded = indices!.Zip(fotos!, (indice, bytes) => (Indice: indice, Bytes: bytes)).ToList();
+        return await GuardarLoteFotosEntradaAsync(casetaId, cleanCasetaId, decoded, finalizar, actualizado, usuarioActual, ct);
+    }
+
+    private async Task<CasetaEntradaFotosResult> GuardarLoteFotosEntradaAsync(
+        string casetaId,
+        string cleanCasetaId,
+        List<(int Indice, byte[] Bytes)> decoded,
+        bool finalizar,
+        bool actualizado,
+        string usuarioActual,
+        CancellationToken ct)
+    {
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
         using var tx = conn.BeginTransaction();
@@ -1287,7 +1346,7 @@ LIMIT 1", new { casetaId });
                     "No existe el registro de caseta al subir fotos. Folio recibido={CasetaIdRaw}, folio normalizado={CasetaId}, indices={Indices}",
                     casetaId,
                     cleanCasetaId,
-                    string.Join(",", uploads.Select(x => x.Indice)));
+                    string.Join(",", decoded.Select(x => x.Indice)));
                 return new CasetaEntradaFotosResult { Success = false, Message = "El registro de caseta no existe." };
             }
 
@@ -1296,9 +1355,9 @@ SELECT nlineno FROM fotos
 WHERE creferencia = @casetaId AND ntipodocto = 106",
                 new { casetaId = cleanCasetaId }, tx, cancellationToken: ct))).ToHashSet();
 
-            foreach ((CasetaEntradaFotoUpload upload, byte[] bytes) in decoded)
+            foreach ((int indiceFoto, byte[] bytes) in decoded)
             {
-                if (existingIndexes.Contains(upload.Indice))
+                if (existingIndexes.Contains(indiceFoto))
                 {
                     await conn.ExecuteAsync(new CommandDefinition(@"
 UPDATE fotos
@@ -1307,7 +1366,7 @@ WHERE creferencia = @casetaId AND ntipodocto = 106 AND nlineno = @indice",
                         new
                         {
                             casetaId = cleanCasetaId,
-                            indice = upload.Indice,
+                            indice = indiceFoto,
                             usuario = FirstNonEmpty(usuarioActual, caseta.Usucrea),
                             ahora = DateTime.Now
                         }, tx, cancellationToken: ct));
@@ -1320,14 +1379,14 @@ VALUES (@indice, @casetaId, 106, 'jpg', @usuario, @ahora)",
                         new
                         {
                             casetaId = cleanCasetaId,
-                            indice = upload.Indice,
+                            indice = indiceFoto,
                             usuario = FirstNonEmpty(usuarioActual, caseta.Usucrea),
                             ahora = DateTime.Now
                         }, tx, cancellationToken: ct));
-                    existingIndexes.Add(upload.Indice);
+                    existingIndexes.Add(indiceFoto);
                 }
 
-                string fileName = _photoStorage.GetFileName(cleanCasetaId, upload.Indice);
+                string fileName = _photoStorage.GetFileName(cleanCasetaId, indiceFoto);
                 staged.Add(await _photoStorage.StageAsync(bytes, fileName, ct));
             }
 
@@ -1341,7 +1400,7 @@ VALUES (@indice, @casetaId, 106, 'jpg', @usuario, @ahora)",
             bool completas = pendiente != null && CorreoEntradaDiferido.Completas(pendiente.IndicesEsperados, existingIndexes);
             MotivoCorreoDiferido motivo = CorreoEntradaDiferido.Decidir(
                 hayPendiente: pendiente != null,
-                finalizar: request.Finalizar,
+                finalizar: finalizar,
                 fotosCompletas: completas,
                 yaAvisado: _diferido.YaAvisado(cleanCasetaId));
 
@@ -1353,7 +1412,7 @@ VALUES (@indice, @casetaId, 106, 'jpg', @usuario, @ahora)",
                 if (pendiente == null || tomado != null)
                 {
                     // La verdad de si es una actualizacion la dejo anotada el guardado, no la bandera de este lote.
-                    caseta.Actualizado = tomado?.Actualizado ?? request.Actualizado;
+                    caseta.Actualizado = tomado?.Actualizado ?? actualizado;
                     caseta.CasetaId = cleanCasetaId;
                     var photoInfo = await LeerFotosEntradaCasetaAsync(conn, cleanCasetaId, incluirBase64: false);
                     var emailPhotos = photoInfo.Info

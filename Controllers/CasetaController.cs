@@ -344,6 +344,50 @@ public class CasetaController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Igual que <c>entrada/{casetaId}/fotos</c>, pero las fotos llegan como archivos (multipart: campos <c>fotos</c> e
+    /// <c>indices</c> en el mismo orden) y no como texto base64: ~25 % menos datos por el internet de la oficina. Un API
+    /// anterior no tiene esta ruta (404) y la app vuelve a mandar base64.
+    /// </summary>
+    [HttpPost("entrada/{casetaId}/fotos/archivos")]
+    [RequiereModulo(MobileModuleIds.Gate, "Agregar")]
+    public async Task<IActionResult> SubirFotosEntradaCasetaArchivos(
+        string casetaId,
+        [FromForm] List<int>? indices,
+        [FromForm] List<IFormFile>? fotos,
+        [FromForm] bool finalizar,
+        [FromForm] bool actualizado,
+        CancellationToken ct)
+    {
+        try
+        {
+            (List<byte[]> bytes, string? error) = await CasetaFotosRecibidas.LeerAsync(fotos, ct);
+            CasetaEntradaFotosResult result = error != null
+                ? new CasetaEntradaFotosResult { Success = false, Message = error }
+                : await _casetaService.SubirFotosEntradaCasetaArchivosAsync(
+                    casetaId, indices, bytes, finalizar, actualizado, ObtenerUsuario(), ct);
+            if (!result.Success)
+            {
+                _logger.LogWarning(
+                    "Subida de fotos (archivos) de entrada caseta rechazada. CasetaId={CasetaId}, Motivo={Message}",
+                    casetaId,
+                    result.Message);
+                return BadRequest(result);
+            }
+
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al subir fotos (archivos) de entrada caseta {CasetaId}", casetaId);
+            return StatusCode(500, new CasetaEntradaFotosResult
+            {
+                Success = false,
+                Message = "Error al subir fotos de caseta."
+            });
+        }
+    }
+
     [HttpGet("entrada/buscar-por-caja/{nequipo}")]
     [RequiereModulo(MobileModuleIds.Gate, "Lectura")]
     public async Task<IActionResult> BuscarEntradaPorCaja(string nequipo, CancellationToken ct)
@@ -550,6 +594,36 @@ public class CasetaController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error al subir fotos de salida caseta {Relno}", relno);
+            return Ok(new ConfirmarResult { Success = false, Message = "Error al subir las fotos de salida." });
+        }
+    }
+
+    /// <summary>
+    /// Igual que <c>{relno}/salida-fotos</c>, pero las fotos llegan como archivos (multipart: <c>indiceInicial</c> y los
+    /// archivos <c>fotos</c> en orden) y no como texto base64: ~25 % menos datos. La app las manda en cuanto el guardia
+    /// las toma; un API anterior no tiene esta ruta (404) y la app vuelve a mandar base64.
+    /// </summary>
+    [HttpPost("{relno}/salida-fotos/archivos")]
+    [RequiereModulo(MobileModuleIds.GateRelationExit, "Agregar", true)]
+    public async Task<IActionResult> SubirFotosSalidaArchivos(
+        string relno,
+        [FromForm] int indiceInicial,
+        [FromForm] List<IFormFile>? fotos,
+        CancellationToken ct)
+    {
+        try
+        {
+            (List<byte[]> bytes, string? error) = await CasetaFotosRecibidas.LeerAsync(fotos, ct);
+            if (error != null)
+                return Ok(new ConfirmarResult { Success = false, Message = error });
+
+            var result = await _casetaService.SubirFotosSalidaArchivosAsync(
+                CasetaFolio.Normalizar(relno), indiceInicial, bytes, ObtenerUsuario(), ct);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al subir fotos (archivos) de salida caseta {Relno}", relno);
             return Ok(new ConfirmarResult { Success = false, Message = "Error al subir las fotos de salida." });
         }
     }

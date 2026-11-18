@@ -246,6 +246,33 @@ async Task PruebasAsync()
     Check(CasetaFotoCache.CacheControl("", "") == CasetaFotoCache.Preguntar, "Sin fila en la base se pregunta.");
     Check(CasetaFotoCache.Tamano("mini") == CasetaFotoTamano.Mini && CasetaFotoCache.Tamano(" VISTA ") == CasetaFotoTamano.Vista, "mini y vista se reconocen.");
     Check(CasetaFotoCache.Tamano(null) == CasetaFotoTamano.Original && CasetaFotoCache.Tamano("otra") == CasetaFotoTamano.Original, "Cualquier otra cosa es el original.");
+
+    // 16) Fotos que llegan como archivo (multipart): mismas reglas que las de base64.
+    byte[] f1 = FotoJpeg(400, 300, 401), f2 = FotoJpeg(400, 300, 402);
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(1, [f1, f2], 6, 40) == null, "Un lote de salida normal pasa.");
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(1, [], 6, 40) == "No llegó ninguna foto.", "Salida sin fotos se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(1, Enumerable.Repeat(f1, 7).ToList(), 6, 40)!.Contains("Máximo 6"), "Salida con más de 6 por envío se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(0, [f1], 6, 40)!.Contains("hasta 40"), "Salida desde la posición 0 se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(40, [f1, f2], 6, 40)!.Contains("hasta 40"), "Salida que pasa de 40 fotos se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteSalida(3, [f1, Array.Empty<byte>()], 6, 40) == "La foto 4 llegó vacía.", "Una foto vacía dice su posición.");
+    Check(CasetaFotosRecibidas.ValidarLoteEntrada([2, 5], [f1, f2]) == null, "Un lote de entrada normal pasa.");
+    Check(CasetaFotosRecibidas.ValidarLoteEntrada([2], [f1, f2]) == "Cada foto debe llevar su indice.", "Entrada con índices incompletos se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteEntrada([1, 2, 3, 4, 5], Enumerable.Repeat(f1, 5).ToList())!.Contains("4 fotos"), "Entrada con más de 4 por lote se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteEntrada([16], [f1])!.Contains("entre 1 y 15"), "Entrada con índice 16 se rechaza.");
+    Check(CasetaFotosRecibidas.ValidarLoteEntrada([3, 3], [f1, f2]) == "No se permiten indices de foto repetidos.", "Entrada con índices repetidos se rechaza.");
+
+    var archivos = new List<Microsoft.AspNetCore.Http.IFormFile>
+    {
+        new Microsoft.AspNetCore.Http.FormFile(new MemoryStream(f1), 0, f1.Length, "fotos", "1.jpg"),
+        new Microsoft.AspNetCore.Http.FormFile(new MemoryStream(f2), 0, f2.Length, "fotos", "2.jpg")
+    };
+    (List<byte[]> leidas, string? errorLectura) = await CasetaFotosRecibidas.LeerAsync(archivos, CancellationToken.None);
+    Check(errorLectura == null && leidas.Count == 2 && leidas[0].SequenceEqual(f1) && leidas[1].SequenceEqual(f2), "Los archivos se leen completos y en orden.");
+    (_, string? vacio) = await CasetaFotosRecibidas.LeerAsync(
+        [new Microsoft.AspNetCore.Http.FormFile(new MemoryStream(), 0, 0, "fotos", "x.jpg")], CancellationToken.None);
+    Check(vacio == "Una foto llegó vacía.", "Un archivo vacío se rechaza.");
+    (List<byte[]> ninguna, string? sinArchivos) = await CasetaFotosRecibidas.LeerAsync(null, CancellationToken.None);
+    Check(ninguna.Count == 0 && sinArchivos == null, "Sin archivos no truena (la validación del lote lo rechaza).");
 }
 
 // ── Medición contra el 23 real (solo lectura) ───────────────────────────────────────────────────────────────────────
