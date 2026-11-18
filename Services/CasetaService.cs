@@ -324,7 +324,7 @@ public partial class CasetaService
             return new ConfirmarResult { Success = false, Message = "La relación ya salió o no tiene carga autorizada. Actualiza la ficha." };
 
         using var tx = conn.BeginTransaction();
-        var staged = new List<CasetaPhotoStage>();
+        var staged = new List<FotoPreparada>();
         try
         {
             var existentes = (await conn.QueryAsync<int>(new CommandDefinition(
@@ -371,7 +371,7 @@ public partial class CasetaService
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
         using var tx = conn.BeginTransaction();
-        var fotosStaged = new List<CasetaPhotoStage>();
+        var fotosStaged = new List<FotoPreparada>();
         var fotosSobrantes = new List<int>();
         bool committed = false;
 
@@ -1106,7 +1106,7 @@ LIMIT 1", new { casetaId });
         using var tx = conn.BeginTransaction();
 
         var idsGenerados = new List<string>();
-        var fotosStaged = new List<CasetaPhotoStage>();
+        var fotosStaged = new List<FotoPreparada>();
         var fotosParaEliminar = new List<string>();
         bool transaccionConfirmada = false;
 
@@ -1334,7 +1334,7 @@ LIMIT 1", new { casetaId });
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
         using var tx = conn.BeginTransaction();
-        var staged = new List<CasetaPhotoStage>();
+        var staged = new List<FotoPreparada>();
 
         try
         {
@@ -2591,7 +2591,7 @@ ORDER BY Nombre
    IDbTransaction tx,
    CasetaEntradaRegistro caseta,
    List<CasetaEntradaFoto> listaFotos,
-   List<CasetaPhotoStage> fotosStaged,
+   List<FotoPreparada> fotosStaged,
    List<string> fotosParaEliminar,
    IReadOnlyCollection<int> indicesFotosEliminar,
    CancellationToken ct)
@@ -2650,7 +2650,7 @@ WHERE casetaid = @CasetaId",
    IDbTransaction tx,
    CasetaEntradaRegistro caseta,
    List<CasetaEntradaFoto> listaFotos,
-   List<CasetaPhotoStage> fotosStaged,
+   List<FotoPreparada> fotosStaged,
    CancellationToken ct)
     {
         string? casetaId = await conn.ExecuteScalarAsync<string>(new CommandDefinition(@"
@@ -2708,7 +2708,7 @@ VALUES (
    IDbTransaction tx,
    CasetaEntradaRegistro caseta,
    List<CasetaEntradaFoto> listaFotos,
-   List<CasetaPhotoStage> fotosStaged,
+   List<FotoPreparada> fotosStaged,
    List<string> fotosParaEliminar,
    IReadOnlyCollection<int> indicesFotosEliminar,
    CancellationToken ct)
@@ -2822,7 +2822,7 @@ ORDER BY nlineno, idfotos", new { casetaId }))
             string nombre = _photoStorage.GetCandidateFileNames(casetaId, indice, extension).FirstOrDefault()
            ?? _photoStorage.GetFileName(casetaId, indice);
             // La misma versión que usa Foto/caseta/ver: con ella la tableta guarda la foto y no la vuelve a pedir.
-            string version = CasetaFotoCache.Version(Convert.ToInt64(row.IdFotos ?? 0), Convert.ToInt64(row.FcreaUnix ?? 0));
+            string version = FotoCache.Version(Convert.ToInt64(row.IdFotos ?? 0), Convert.ToInt64(row.FcreaUnix ?? 0));
             byIndex[indice] = (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre, Version = version }, extension);
         }
 

@@ -1,14 +1,14 @@
 namespace PMMovil.Api.Services;
 
 /// <summary>
-/// Reglas para que la tableta guarde las fotos de caseta y no las vuelva a pedir.
+/// Reglas para que la tableta guarde las fotos (Caseta, Entrada Bodega y Revisión) y no las vuelva a pedir.
 ///
 /// Cada foto tiene una versión (su <c>idfotos</c> y la hora de su último guardado, <c>fcrea</c>, que se actualiza al
 /// reemplazarla). La app la recibe en el detalle y la pone en la dirección (<c>&amp;v=...</c>): una dirección con la versión
 /// vigente nunca cambia de contenido, así que se puede guardar para siempre. Sin versión, o con una vieja, la tableta
 /// pregunta cada vez si cambió (respuesta 304 de unos cuantos bytes si no).
 /// </summary>
-public static class CasetaFotoCache
+public static class FotoCache
 {
     public const string ParaSiempre = "private, max-age=31536000, immutable";
     public const string Preguntar = "private, no-cache";
@@ -28,13 +28,13 @@ public static class CasetaFotoCache
     }
 
     /// <summary>"mini" y "vista"; cualquier otra cosa (o nada, como piden las versiones anteriores de la app) es el original.</summary>
-    public static CasetaFotoTamano Tamano(string? tam)
+    public static FotoTamano Tamano(string? tam)
     {
         return (tam ?? string.Empty).Trim().ToLowerInvariant() switch
         {
-            "mini" => CasetaFotoTamano.Mini,
-            "vista" => CasetaFotoTamano.Vista,
-            _ => CasetaFotoTamano.Original
+            "mini" => FotoTamano.Mini,
+            "vista" => FotoTamano.Vista,
+            _ => FotoTamano.Original
         };
     }
 }

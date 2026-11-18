@@ -38,37 +38,45 @@ public class FotoController : ControllerBase
 
     private readonly IModulePermissionService _permissionService;
     private readonly IHubContext<WarehouseHub> _hub;
-    private readonly IFotoMejoraCola _mejora;
+
+    // Fotos de Revisión y de Entrada Bodega (carpeta del cliente en el 23): se escriben, leen y borran por aquí.
+    private readonly ClientePhotoStorage _clientePhotos;
 
     public FotoController(
         BaseRepository db,
         IConfiguration config,
         ILogger<FotoController> logger,
         CasetaPhotoStorage casetaPhotoStorage,
+        ClientePhotoStorage clientePhotos,
         IModulePermissionService permissionService,
-        IHubContext<WarehouseHub> hub,
-        IFotoMejoraCola mejora)
+        IHubContext<WarehouseHub> hub)
     {
-        _mejora = mejora;
         _db = db;
         _config = config;
         _logger = logger;
         _basePath = _config["PhotoSettings:BasePath"] ?? "F:\\Trafico\\fotos";
         _casetaPhotoStorage = casetaPhotoStorage;
+        _clientePhotos = clientePhotos;
         _permissionService = permissionService;
         _hub = hub;
     }
 
+    /// <summary>
+    /// Foto de revisión (107) o de discrepancia (103) por su idfotos. <paramref name="tam"/>: "mini" (cuadrículas),
+    /// "vista" (pantalla) o nada para el original; <paramref name="v"/>: la versión que dio la lista (ver <see cref="FotoCache"/>).
+    /// </summary>
     [HttpGet("ver/{id}")]
     [RequiereModulo(MobileModuleIds.Review, "Lectura", true, MobileModuleIds.SystemsMonitor)]
-    public async Task<IActionResult> VerFoto(int id)
+    public async Task<IActionResult> VerFoto(int id, [FromQuery] string? tam = null, [FromQuery] string? v = null)
     {
 
         try
         {
             using IDbConnection conn = _db.CreateConnection();
             string sql = @"
-				SELECT TRIM(f.creferencia) AS Creferencia,
+				SELECT f.idfotos AS IdFotos,
+					   CAST(IFNULL(UNIX_TIMESTAMP(f.fcrea), 0) AS SIGNED) AS FcreaUnix,
+					   TRIM(f.creferencia) AS Creferencia,
 					   f.cextension AS CExtension,
 					   f.nlineno AS NLineNo,
 					   f.ntipodocto AS NTipoDocto,
@@ -111,17 +119,10 @@ public class FotoController : ControllerBase
             int line = data.NLineNo;
             int tipoDocto = data.NTipoDocto;
             string fileName = PhotoFileNameResolver.Build(cref, tipoDocto, line, ext);
-            string? filePath = PhotoFileNameResolver.FindExistingPath(
-                _basePath,
-                folder,
-                cref,
-                tipoDocto,
-                line,
-                ext);
-            _logger.LogInformation("VerFoto: ID {id}, Referencia {cref}, Carpeta {folder}, Path {path}", id, cref, folder, filePath ?? fileName);
-            if (filePath == null)
+            var foto = new FotoCliente(data.IdFotos > 0 ? data.IdFotos : id, folder, cref, tipoDocto, line, ext);
+            return await ServirFotoClienteAsync(foto, data.FcreaUnix, tam, v, () =>
             {
-                _logger.LogWarning("VerFoto: Archivo no encontrado. Nombre esperado {fileName}", fileName);
+                _logger.LogWarning("VerFoto: Archivo no encontrado. ID {id}, carpeta {folder}, nombre esperado {fileName}", id, folder, fileName);
                 return NotFound(new
                 {
                     message = "Archivo de imagen no encontrado en disco",
@@ -129,8 +130,11 @@ public class FotoController : ControllerBase
                     path = Path.Combine(_basePath, folder, fileName),
                     basePath = _basePath
                 });
-            }
-            return PhysicalFile(filePath, ext.ToLower() == "png" ? "image/png" : "image/jpeg");
+            });
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            return new EmptyResult();
         }
         catch (Exception exception)
         {
@@ -152,7 +156,7 @@ public class FotoController : ControllerBase
             // ntipodocto IN (107, 103): 107 = evidencia normal de revisión,
             // 103 = evidencia de discrepancia (mismo tipo que daño de Entrada
             // Bodega). Se traen juntas; el cliente las distingue por NTipoDocto.
-            string sql = "SELECT idfotos AS IdFotos, nlineno AS nLineNo, cextension AS cExtension, usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea, ntipodocto AS NTipoDocto FROM fotos WHERE creferencia = @cref AND ntipodocto IN (107, 103) ORDER BY nlineno";
+            string sql = "SELECT idfotos AS IdFotos, nlineno AS nLineNo, cextension AS cExtension, usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea, CAST(IFNULL(UNIX_TIMESTAMP(fcrea), 0) AS SIGNED) AS FcreaUnix, ntipodocto AS NTipoDocto FROM fotos WHERE creferencia = @cref AND ntipodocto IN (107, 103) ORDER BY nlineno";
             return Ok(new
             {
                 success = true,
@@ -182,7 +186,8 @@ public class FotoController : ControllerBase
             using IDbConnection conn = _db.CreateConnection();
             string sql = @"
 				SELECT idfotos AS IdFotos, nlineno AS nLineNo, cextension AS cExtension,
-					   usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea
+					   usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea,
+					   CAST(IFNULL(UNIX_TIMESTAMP(fcrea), 0) AS SIGNED) AS FcreaUnix
 				FROM fotos
 				WHERE creferencia = @cref AND ntipodocto = 100
 				ORDER BY nlineno";
@@ -196,11 +201,20 @@ public class FotoController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Foto de evidencia de Entrada Bodega (100). <paramref name="tam"/>: "mini", "vista" o nada para el original;
+    /// <paramref name="v"/>: la versión que dio la lista. Ojo: la línea se reusa (borrar la última y tomar otra), por eso
+    /// la versión lleva el idfotos y sin ella la tableta pregunta cada vez si cambió.
+    /// </summary>
     [HttpGet("entrada/ver/{creferencia}/{linea}")]
     [RequiereModulo(MobileModuleIds.WarehouseOperations)]
-    public async Task<IActionResult> VerFotoEntrada(string creferencia, int linea)
+    public async Task<IActionResult> VerFotoEntrada(
+        string creferencia,
+        int linea,
+        [FromQuery] string? tam = null,
+        [FromQuery] string? v = null)
     {
-        return await VerFotoEntradaCore(creferencia, linea, ntipodocto: 100);
+        return await VerFotoEntradaCore(creferencia, linea, ntipodocto: 100, tam, v);
     }
 
     [HttpGet("entrada-danio/{creferencia}")]
@@ -212,7 +226,8 @@ public class FotoController : ControllerBase
             using IDbConnection conn = _db.CreateConnection();
             string sql = @"
 				SELECT idfotos AS IdFotos, nlineno AS nLineNo, cextension AS cExtension,
-					   usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea
+					   usucrea AS UsuCrea, DATE_FORMAT(fcrea, '%Y-%m-%d %H:%i:%s') AS fCrea,
+					   CAST(IFNULL(UNIX_TIMESTAMP(fcrea), 0) AS SIGNED) AS FcreaUnix
 				FROM fotos
 				WHERE creferencia = @cref AND ntipodocto = 103
 				ORDER BY nlineno";
@@ -226,47 +241,50 @@ public class FotoController : ControllerBase
         }
     }
 
+    /// <summary>Foto de daño de Entrada Bodega (103). Mismos <paramref name="tam"/> y <paramref name="v"/> que la de evidencia.</summary>
     [HttpGet("entrada-danio/ver/{creferencia}/{linea}")]
     [RequiereModulo(MobileModuleIds.WarehouseOperations)]
-    public async Task<IActionResult> VerFotoEntradaDanio(string creferencia, int linea)
+    public async Task<IActionResult> VerFotoEntradaDanio(
+        string creferencia,
+        int linea,
+        [FromQuery] string? tam = null,
+        [FromQuery] string? v = null)
     {
-        return await VerFotoEntradaCore(creferencia, linea, ntipodocto: 103);
+        return await VerFotoEntradaCore(creferencia, linea, ntipodocto: 103, tam, v);
     }
 
-    private async Task<IActionResult> VerFotoEntradaCore(string creferencia, int linea, int ntipodocto)
+    private async Task<IActionResult> VerFotoEntradaCore(string creferencia, int linea, int ntipodocto, string? tam, string? v)
     {
         try
         {
             using IDbConnection conn = _db.CreateConnection();
-            var data = await conn.QueryFirstOrDefaultAsync(@"
-				SELECT f.cextension, f.nlineno,
-					   COALESCE(NULLIF(cl.carpeta,''), cl.cidcte) AS carpeta
+            // La más reciente si hubiera dos filas con la misma línea (su archivo en el 23 es el mismo).
+            FotoEntradaFila? data = await conn.QueryFirstOrDefaultAsync<FotoEntradaFila>(@"
+				SELECT f.idfotos AS IdFotos,
+					   CAST(IFNULL(UNIX_TIMESTAMP(f.fcrea), 0) AS SIGNED) AS FcreaUnix,
+					   f.cextension AS CExtension,
+					   f.nlineno AS NLineNo,
+					   COALESCE(NULLIF(cl.carpeta,''), cl.cidcte) AS Carpeta
 				FROM fotos f
 				JOIN traf t ON t.creferencia = f.creferencia
 				JOIN clientes cl ON cl.cidcte = t.cclienteidtraf
 				WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = @ntipodocto
+				ORDER BY f.idfotos DESC
 				LIMIT 1", new { cref = creferencia, linea, ntipodocto });
 
             if (data == null)
                 return NotFound(new { message = "Foto no encontrada" });
 
-            string carpeta = ((string)data.carpeta).Trim();
-            string ext = PhotoFileNameResolver.NormalizeExtension((string?)data.cextension);
-            int nLineNo = (int)data.nlineno;
-            string fileName = PhotoFileNameResolver.Build(creferencia, ntipodocto, nLineNo, ext);
-            string? filePath = PhotoFileNameResolver.FindExistingPath(
-                _basePath,
-                carpeta,
-                creferencia,
-                ntipodocto,
-                nLineNo,
-                ext);
-
-            if (filePath == null)
-                return NotFound(new { message = $"Archivo no encontrado: {Path.Combine(_basePath, carpeta, fileName)}" });
-
-            string contentType = ext.ToLower() == "png" ? "image/png" : "image/jpeg";
-            return PhysicalFile(filePath, contentType);
+            string carpeta = (data.Carpeta ?? string.Empty).Trim();
+            string ext = PhotoFileNameResolver.NormalizeExtension(data.CExtension);
+            string fileName = PhotoFileNameResolver.Build(creferencia, ntipodocto, data.NLineNo, ext);
+            var foto = new FotoCliente(data.IdFotos, carpeta, creferencia, ntipodocto, data.NLineNo, ext);
+            return await ServirFotoClienteAsync(foto, data.FcreaUnix, tam, v,
+                () => NotFound(new { message = $"Archivo no encontrado: {Path.Combine(_basePath, carpeta, fileName)}" }));
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            return new EmptyResult();
         }
         catch (Exception ex)
         {
@@ -329,36 +347,37 @@ public class FotoController : ControllerBase
                     cref = creferencia,
                     tipo = ntipodocto
                 });
-                string sqlIns = "INSERT INTO fotos (creferencia, nlineno, ntipodocto, cextension, fcrea, usucrea) VALUES (@cref, @line, @tipo, @ext, NOW(), @usu); SELECT LAST_INSERT_ID();";
-                int fotoId = await conn.ExecuteScalarAsync<int>(sqlIns, new
+
+                // Primero la foto (en la cola local: milisegundos, ya no la copia lenta al 23 dentro de la petición) y luego
+                // su fila; si la fila no entra, la foto se descarta. La copia al 23 y la mejora corren en segundo plano.
+                FotoClientePreparada preparada = await _clientePhotos.PrepararAsync(
+                    imageBytes, folder, creferencia, ntipodocto, nextLine, extension, HttpContext.RequestAborted);
+                int fotoId;
+                try
                 {
-                    cref = creferencia,
-                    line = nextLine,
-                    tipo = ntipodocto,
-                    ext = extension,
-                    usu = usuario
-                });
-                string finalPath = Path.Combine(_basePath, folder);
-                if (!Directory.Exists(finalPath))
-                {
-                    Directory.CreateDirectory(finalPath);
+                    string sqlIns = "INSERT INTO fotos (creferencia, nlineno, ntipodocto, cextension, fcrea, usucrea) VALUES (@cref, @line, @tipo, @ext, NOW(), @usu); SELECT LAST_INSERT_ID();";
+                    fotoId = await conn.ExecuteScalarAsync<int>(sqlIns, new
+                    {
+                        cref = creferencia,
+                        line = nextLine,
+                        tipo = ntipodocto,
+                        ext = extension,
+                        usu = usuario
+                    });
                 }
-                string fileName = PhotoFileNameResolver.Build(
-                    creferencia,
-                    ntipodocto,
-                    nextLine,
-                    extension);
-                string fullFilePath = Path.Combine(finalPath, fileName);
-                _logger.LogInformation("SubirFoto: Guardando en {path}", fullFilePath);
-                await System.IO.File.WriteAllBytesAsync(fullFilePath, imageBytes);
-                // La foto original ya quedó guardada y se responde de inmediato; la mejora corre después en segundo plano.
-                _mejora.Encolar(fullFilePath, payload.EsDiscrepancia ? "revision-discrepancia" : "revision");
+                catch
+                {
+                    _clientePhotos.Descartar(preparada);
+                    throw;
+                }
+
+                _clientePhotos.Activar(preparada, fotoId);
                 await NotificarFotosActualizadasAsync(creferencia, usuario);
                 return Ok(new
                 {
                     success = true,
                     id = fotoId,
-                    fileName = fileName
+                    fileName = preparada.Archivo
                 });
             }
             finally
@@ -456,21 +475,9 @@ public class FotoController : ControllerBase
             {
                 await NotificarFotosActualizadasAsync(cref, username);
             }
+            // Lo local se quita en el acto y la copia del 23 también; si el 23 no contesta, el almacén lo reintenta solo.
             string ext = PhotoFileNameResolver.NormalizeExtension(data.CExtension);
-            int line = data.NLineNo;
-            foreach (string filePath in PhotoFileNameResolver.GetCandidatePaths(
-                         _basePath,
-                         folder,
-                         cref,
-                         ntipodocto,
-                         line,
-                         ext))
-            {
-                if (System.IO.File.Exists(filePath))
-                {
-                    System.IO.File.Delete(filePath);
-                }
-            }
+            _clientePhotos.Borrar(new FotoCliente(id, folder, cref, ntipodocto, data.NLineNo, ext));
             return Ok(new { success = true });
         }
         catch (Exception exception)
@@ -500,7 +507,7 @@ public class FotoController : ControllerBase
     /// <summary>
     /// Foto de entrada a caseta. <paramref name="tam"/>: "mini" (cuadrículas, ~14 KB), "vista" (pantalla, ~130 KB) o
     /// nada para el original. <paramref name="v"/>: la versión que dio el detalle; con la vigente, la tableta la guarda
-    /// para siempre (ver <see cref="CasetaFotoCache"/>).
+    /// para siempre (ver <see cref="FotoCache"/>).
     /// </summary>
     [HttpGet("caseta/ver")]
     [RequiereModulo(MobileModuleIds.WarehouseOperations)]
@@ -541,26 +548,17 @@ public class FotoController : ControllerBase
 				ORDER BY idfotos DESC
 				LIMIT 1", new { casetaId, indice });
 
-            CasetaFotoTamano tamano = CasetaFotoCache.Tamano(tam);
+            FotoTamano tamano = FotoCache.Tamano(tam);
             CancellationToken ct = HttpContext.RequestAborted;
-            CasetaFotoArchivo? archivo = await _casetaPhotoStorage.ResolverAsync(casetaId, indice, fila?.Extension, tamano, ct);
+            FotoArchivo? archivo = await _casetaPhotoStorage.ResolverAsync(casetaId, indice, fila?.Extension, tamano, ct);
             // Si la limpieza o una publicación lo movió entre la búsqueda y ahora, se vuelve a buscar una vez.
             if (archivo != null && !System.IO.File.Exists(archivo.Ruta))
                 archivo = await _casetaPhotoStorage.ResolverAsync(casetaId, indice, fila?.Extension, tamano, ct);
             if (archivo == null)
                 return NotFound(new { message = "Foto no encontrada" });
 
-            string version = fila == null ? string.Empty : CasetaFotoCache.Version(fila.IdFotos, fila.FcreaUnix);
-            Response.Headers.CacheControl = CasetaFotoCache.CacheControl(v, version);
-            var etiqueta = string.IsNullOrEmpty(version)
-                ? null
-                : new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{version}-{tamano.ToString().ToLowerInvariant()}\"");
-
-            return PhysicalFile(
-                archivo.Ruta,
-                archivo.EsVariante ? "image/jpeg" : GetImageContentType(archivo.Ruta, fila?.Extension),
-                new DateTimeOffset(DateTime.SpecifyKind(archivo.ModificadaUtc, DateTimeKind.Utc)),
-                etiqueta);
+            string version = fila == null ? string.Empty : FotoCache.Version(fila.IdFotos, fila.FcreaUnix);
+            return ServirArchivo(archivo, version, v, tamano, fila?.Extension);
         }
         catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
         {
@@ -573,11 +571,61 @@ public class FotoController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Sirve una foto de la carpeta del cliente (Revisión o Entrada Bodega) desde el almacén: la copia local si la hay
+    /// (recién subida o consultada en las últimas 48 h), si no la del 23, y en el tamaño pedido.
+    /// </summary>
+    private async Task<IActionResult> ServirFotoClienteAsync(
+        FotoCliente foto,
+        long fcreaUnix,
+        string? tam,
+        string? v,
+        Func<IActionResult> noEncontrada)
+    {
+        FotoTamano tamano = FotoCache.Tamano(tam);
+        CancellationToken ct = HttpContext.RequestAborted;
+        FotoArchivo? archivo = await _clientePhotos.ResolverAsync(foto, tamano, ct);
+        // Si la limpieza o una publicación lo movió entre la búsqueda y ahora, se vuelve a buscar una vez.
+        if (archivo != null && !System.IO.File.Exists(archivo.Ruta))
+            archivo = await _clientePhotos.ResolverAsync(foto, tamano, ct);
+        if (archivo == null)
+            return noEncontrada();
+
+        return ServirArchivo(archivo, FotoCache.Version(foto.IdFotos, fcreaUnix), v, tamano, foto.Extension);
+    }
+
+    /// <summary>
+    /// Con la versión vigente en la dirección la tableta guarda la foto para siempre; sin ella (o con otra) pregunta cada vez
+    /// y la etiqueta (ETag) le contesta «no cambió» con unos cuantos bytes. Ver <see cref="FotoCache"/>.
+    /// </summary>
+    private IActionResult ServirArchivo(FotoArchivo archivo, string version, string? versionPedida, FotoTamano tamano, string? extension)
+    {
+        Response.Headers.CacheControl = FotoCache.CacheControl(versionPedida, version);
+        var etiqueta = string.IsNullOrEmpty(version)
+            ? null
+            : new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{version}-{tamano.ToString().ToLowerInvariant()}\"");
+
+        return PhysicalFile(
+            archivo.Ruta,
+            archivo.EsVariante ? "image/jpeg" : GetImageContentType(archivo.Ruta, extension),
+            new DateTimeOffset(DateTime.SpecifyKind(archivo.ModificadaUtc, DateTimeKind.Utc)),
+            etiqueta);
+    }
+
     private sealed class CasetaFotoFila
     {
         public string Extension { get; set; } = "jpg";
         public long IdFotos { get; set; }
         public long FcreaUnix { get; set; }
+    }
+
+    private sealed class FotoEntradaFila
+    {
+        public long IdFotos { get; set; }
+        public long FcreaUnix { get; set; }
+        public string? CExtension { get; set; }
+        public int NLineNo { get; set; }
+        public string? Carpeta { get; set; }
     }
 
     private static string GetImageContentType(string path, string? extension)

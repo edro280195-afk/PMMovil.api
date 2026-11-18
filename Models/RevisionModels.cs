@@ -128,6 +128,17 @@ namespace PMMovil.Api.Models
         public string fCrea { get; set; } = string.Empty;
         /// <summary>107 = evidencia normal de revisión, 103 = evidencia de discrepancia (mismo tipo que daño de Entrada Bodega).</summary>
         public int NTipoDocto { get; set; } = 107;
+
+        /// <summary><c>fcrea</c> en segundos Unix (lo llena la consulta); con él se arma <see cref="Version"/>.</summary>
+        [JsonIgnore]
+        public long FcreaUnix { get; set; }
+
+        /// <summary>
+        /// Versión de la foto para la dirección (<c>&amp;v=</c>): con ella la tableta la guarda para siempre y no la vuelve a
+        /// pedir (ver <see cref="PMMovil.Api.Services.FotoCache"/>). La app nueva la usa también para saber que el servidor
+        /// ya sirve miniatura y vista: uno anterior no la manda.
+        /// </summary>
+        public string Version => PMMovil.Api.Services.FotoCache.Version(IdFotos, FcreaUnix);
     }
 
     public class CatalogoItem
@@ -164,6 +175,12 @@ namespace PMMovil.Api.Models
     /// </summary>
     public class FotoVerInfo
     {
+        /// <summary>La fila de <c>fotos</c>: identifica la copia local en el almacén (ver ClientePhotoStorage).</summary>
+        public long IdFotos { get; set; }
+
+        /// <summary><c>fcrea</c> en segundos Unix, para la versión de la foto (cuando la consulta lo trae).</summary>
+        public long FcreaUnix { get; set; }
+
         public string Creferencia { get; set; } = string.Empty;
         public string CExtension { get; set; } = string.Empty;
         public int NLineNo { get; set; }

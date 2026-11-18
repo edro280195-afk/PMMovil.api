@@ -57,13 +57,15 @@ public class EntradaShareService : IEntradaShareService
 
     private readonly BaseRepository _db;
     private readonly ILogger<EntradaShareService> _logger;
-    private readonly string _basePath;
 
-    public EntradaShareService(BaseRepository db, IConfiguration config, ILogger<EntradaShareService> logger)
+    // Las fotos se leen por el almacén: una recién subida aún no está en el 23 y el enlace debe mostrarla igual.
+    private readonly ClientePhotoStorage _fotos;
+
+    public EntradaShareService(BaseRepository db, IConfiguration config, ILogger<EntradaShareService> logger, ClientePhotoStorage fotos)
     {
         _db = db;
         _logger = logger;
-        _basePath = config["PhotoSettings:BasePath"] ?? "F:\\Trafico\\fotos";
+        _fotos = fotos;
     }
 
     public async Task<(string Token, DateTime Expira)?> GenerarLinkAsync(string cref, string usuario)
@@ -234,7 +236,8 @@ public class EntradaShareService : IEntradaShareService
         // Clase tipada (no dynamic) a propósito -- ver el comentario en FotoController.VerFoto sobre por qué
         // QueryFirstOrDefaultAsync<object> ya causó fallos silenciosos en este proyecto por mayúsculas/minúsculas.
         string sql = tipoDocto == TipoDanio
-            ? @"SELECT TRIM(f.creferencia) AS Creferencia,
+            ? @"SELECT f.idfotos AS IdFotos,
+                       TRIM(f.creferencia) AS Creferencia,
                        f.cextension AS CExtension,
                        f.nlineno AS NLineNo,
                        f.ntipodocto AS NTipoDocto,
@@ -243,8 +246,10 @@ public class EntradaShareService : IEntradaShareService
                 JOIN traf t ON t.creferencia = f.creferencia
                 JOIN traf3 t3 ON t3.fk_idtraf = t.idtraf AND t3.danada = 1
                 WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = 103
+                ORDER BY f.idfotos DESC
                 LIMIT 1"
-            : @"SELECT TRIM(f.creferencia) AS Creferencia,
+            : @"SELECT f.idfotos AS IdFotos,
+                       TRIM(f.creferencia) AS Creferencia,
                        f.cextension AS CExtension,
                        f.nlineno AS NLineNo,
                        f.ntipodocto AS NTipoDocto,
@@ -252,6 +257,7 @@ public class EntradaShareService : IEntradaShareService
                 FROM fotos f
                 JOIN traf t ON t.creferencia = f.creferencia
                 WHERE f.creferencia = @cref AND f.nlineno = @linea AND f.ntipodocto = 100
+                ORDER BY f.idfotos DESC
                 LIMIT 1";
 
         FotoVerInfo? foto = await trafConn.QueryFirstOrDefaultAsync<FotoVerInfo>(sql, new { cref, linea });
@@ -265,9 +271,8 @@ public class EntradaShareService : IEntradaShareService
     }
 
     /// <summary>
-    /// Misma construcción de ruta que FotoController.VerFotoEntradaCore --
-    /// no se toca esa lógica, solo se replica para no acoplar el
-    /// controlador público al autenticado.
+    /// Misma carpeta que FotoController.VerFotoEntradaCore (se replica para no acoplar el controlador público al
+    /// autenticado); el archivo lo da el almacén: lo local si la foto es reciente, si no el 23.
     /// </summary>
     private async Task<(string FilePath, string Extension)?> ResolverArchivoAsync(IDbConnection conn, FotoVerInfo foto)
     {
@@ -276,13 +281,8 @@ public class EntradaShareService : IEntradaShareService
         string carpeta = ((await conn.ExecuteScalarAsync<string>(sqlCte, new { id = cidcte })) ?? cidcte).Trim();
 
         string ext = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
-        string? filePath = PhotoFileNameResolver.FindExistingPath(
-            _basePath,
-            carpeta,
-            foto.Creferencia,
-            foto.NTipoDocto,
-            foto.NLineNo,
-            ext);
+        string? filePath = _fotos.BuscarOriginal(
+            new FotoCliente(foto.IdFotos, carpeta, foto.Creferencia, foto.NTipoDocto, foto.NLineNo, ext));
 
         return filePath == null ? null : (filePath, ext);
     }

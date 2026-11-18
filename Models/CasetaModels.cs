@@ -278,7 +278,7 @@ public class CasetaEntradaFotoInfo
 
     /// <summary>
     /// Cambia cuando la foto se reemplaza. La app la pone en la dirección de la foto para guardarla sin volver a pedirla
-    /// (ver <c>CasetaFotoCache</c>). Vacía en fotos sin fila en la base.
+    /// (ver <c>FotoCache</c>). Vacía en fotos sin fila en la base.
     /// </summary>
     public string Version { get; set; } = string.Empty;
 }

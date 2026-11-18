@@ -49,13 +49,15 @@ public class RevisionShareService : IRevisionShareService
 
     private readonly BaseRepository _db;
     private readonly ILogger<RevisionShareService> _logger;
-    private readonly string _basePath;
 
-    public RevisionShareService(BaseRepository db, IConfiguration config, ILogger<RevisionShareService> logger)
+    // Las fotos se leen por el almacén: una recién subida aún no está en el 23 y el enlace, el ZIP y la TV deben verla igual.
+    private readonly ClientePhotoStorage _fotos;
+
+    public RevisionShareService(BaseRepository db, ILogger<RevisionShareService> logger, ClientePhotoStorage fotos)
     {
         _db = db;
         _logger = logger;
-        _basePath = config["PhotoSettings:BasePath"] ?? "F:\\Trafico\\fotos";
+        _fotos = fotos;
     }
 
     public async Task<(string Token, DateTime Expira)?> GenerarLinkAsync(string crefAgrupada, string usuario)
@@ -241,13 +243,8 @@ public class RevisionShareService : IRevisionShareService
         string folder = ((await conn.ExecuteScalarAsync<string>(sqlCte, new { id = cidcte })) ?? cidcte).Trim();
 
         string ext = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
-        string? filePath = PhotoFileNameResolver.FindExistingPath(
-            _basePath,
-            folder,
-            foto.Creferencia,
-            foto.NTipoDocto,
-            foto.NLineNo,
-            ext);
+        string? filePath = _fotos.BuscarOriginal(
+            new FotoCliente(idFotos, folder, foto.Creferencia, foto.NTipoDocto, foto.NLineNo, ext));
 
         return filePath == null ? null : (filePath, ext);
     }
@@ -284,7 +281,8 @@ public class RevisionShareService : IRevisionShareService
 
         using IDbConnection conn = _db.CreateConnection();
         const string photoSql = @"
-            SELECT TRIM(f.creferencia) AS Creferencia,
+            SELECT f.idfotos AS IdFotos,
+                   TRIM(f.creferencia) AS Creferencia,
                    f.cextension AS CExtension,
                    f.nlineno AS NLineNo,
                    f.ntipodocto AS NTipoDocto,
@@ -316,13 +314,8 @@ public class RevisionShareService : IRevisionShareService
             "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1",
             new { id = clientId })) ?? clientId).Trim();
         string extension = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
-        string? filePath = PhotoFileNameResolver.FindExistingPath(
-            _basePath,
-            folder,
-            foto.Creferencia,
-            foto.NTipoDocto,
-            foto.NLineNo,
-            extension);
+        string? filePath = _fotos.BuscarOriginal(
+            new FotoCliente(foto.IdFotos, folder, foto.Creferencia, foto.NTipoDocto, foto.NLineNo, extension));
         return filePath == null ? null : (filePath, extension);
     }
 
@@ -358,13 +351,8 @@ public class RevisionShareService : IRevisionShareService
         foreach (FotoConTipo foto in filas)
         {
             string ext = PhotoFileNameResolver.NormalizeExtension(foto.CExtension);
-            string? filePath = PhotoFileNameResolver.FindExistingPath(
-                _basePath,
-                folder,
-                cref,
-                foto.NTipoDocto,
-                foto.NLineNo,
-                ext);
+            string? filePath = _fotos.BuscarOriginal(
+                new FotoCliente(foto.IdFotos, folder, cref, foto.NTipoDocto, foto.NLineNo, ext));
             if (filePath == null)
             {
                 continue;

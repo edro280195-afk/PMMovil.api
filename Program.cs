@@ -184,6 +184,9 @@ try
     builder.Services.AddScoped<BiometriaLabService>();
     builder.Services.AddScoped<FaceService>();
     builder.Services.AddSingleton<CasetaPhotoStorage>();
+    // Fotos de Entrada Bodega y Revisión (carpeta del cliente en el 23): mismo almacén que Caseta, con su propia cola y
+    // su trabajador (abajo). Sin trabajador (DisableBackgroundWorkers) se escriben directo al 23, como antes.
+    builder.Services.AddSingleton<ClientePhotoStorage>();
 
     // Mejora clásica de fotos de evidencia (luz, contraste, nitidez), en segundo plano y sin IA. Quien guarda una foto solo
     // la avisa a la cola; el trabajador (abajo, con los demás) la reemplaza si hacía falta. Sin sección "FotoMejora" rigen
@@ -306,6 +309,7 @@ try
         builder.Services.AddHostedService<AutoFinalizerService>();
         builder.Services.AddHostedService<RevisionHygieneService>();
         builder.Services.AddHostedService<CasetaPhotoSyncWorker>();
+        builder.Services.AddHostedService<ClientePhotoSyncWorker>();
         builder.Services.AddHostedService<FotoMejoraWorker>();
         builder.Services.AddHostedService<PreregistroPurgeWorker>();
         builder.Services.AddHostedService<PreregistroClosureWorker>();

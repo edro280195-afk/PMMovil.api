@@ -70,17 +70,17 @@ async Task PruebasAsync()
     Check(File.Exists(Path.Combine(dirs.Pendientes, n1)), "La foto nueva queda en pendientes.");
     Check(almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg") == Path.Combine(dirs.Pendientes, n1), "Mientras no llega al 23 se lee de pendientes.");
 
-    CasetaFotoArchivo? mini1 = await almacen.ResolverAsync("E-000001/26", 1, "jpg", CasetaFotoTamano.Mini);
+    FotoArchivo? mini1 = await almacen.ResolverAsync("E-000001/26", 1, "jpg", FotoTamano.Mini);
     Check(mini1 is { EsVariante: true }, "La miniatura se genera desde la pendiente.");
-    Check(mini1!.Ruta == almacen.RutaCaliente(n1, CasetaFotoTamano.Mini), "La miniatura vive en lo caliente.");
+    Check(mini1!.Ruta == almacen.RutaCaliente(n1, FotoTamano.Mini), "La miniatura vive en lo caliente.");
     (int ancho, int alto) = Medidas(mini1.Ruta);
     Check(Math.Max(ancho, alto) == FotoVariantes.MiniLado, $"La miniatura mide {FotoVariantes.MiniLado} px de lado mayor (midió {ancho}x{alto}).");
     Check(new FileInfo(mini1.Ruta).Length < foto1.Length / 10, "La miniatura pesa menos de la décima parte del original.");
-    CasetaFotoArchivo? vista1 = await almacen.ResolverAsync("E-000001/26", 1, "jpg", CasetaFotoTamano.Vista);
+    FotoArchivo? vista1 = await almacen.ResolverAsync("E-000001/26", 1, "jpg", FotoTamano.Vista);
     (ancho, alto) = Medidas(vista1!.Ruta);
     Check(vista1.EsVariante && Math.Max(ancho, alto) == FotoVariantes.VistaLado, $"La vista mide {FotoVariantes.VistaLado} px de lado mayor (midió {ancho}x{alto}).");
     Check(new FileInfo(vista1.Ruta).Length < foto1.Length / 2, "La vista pesa menos de la mitad del original.");
-    (ancho, alto) = Medidas((await almacen.ResolverAsync("E-000001/26", 3, "jpg", CasetaFotoTamano.Vista))!.Ruta);
+    (ancho, alto) = Medidas((await almacen.ResolverAsync("E-000001/26", 3, "jpg", FotoTamano.Vista))!.Ruta);
     Check(Math.Max(ancho, alto) == 1280, "Una foto de 1600 px también baja a 1280.");
 
     // 2) Se publica: el 23 la tiene completa y con la misma fecha (la versión), y lo local pasa a caliente.
@@ -90,67 +90,67 @@ async Task PruebasAsync()
     {
         string en23 = Path.Combine(dirs.El23, nombre);
         Check(File.Exists(en23) && new FileInfo(en23).Length == bytes.Length, $"{nombre} quedó completa en el 23.");
-        Check(File.Exists(almacen.RutaCaliente(nombre, CasetaFotoTamano.Original)), $"{nombre} quedó caliente.");
+        Check(File.Exists(almacen.RutaCaliente(nombre, FotoTamano.Original)), $"{nombre} quedó caliente.");
         Check(!File.Exists(Path.Combine(dirs.Pendientes, nombre)), $"{nombre} salió de pendientes.");
     }
 
     Check(File.GetLastWriteTimeUtc(Path.Combine(dirs.El23, n1)) == firma1, "El 23 conserva la fecha de la versión (no la de la copia).");
-    Check(File.GetLastWriteTimeUtc(almacen.RutaCaliente(n1, CasetaFotoTamano.Original)) == firma1, "Lo caliente conserva la fecha de la versión.");
-    Check(almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg") == almacen.RutaCaliente(n1, CasetaFotoTamano.Original), "Ya publicada se lee de lo caliente, no del 23.");
+    Check(File.GetLastWriteTimeUtc(almacen.RutaCaliente(n1, FotoTamano.Original)) == firma1, "Lo caliente conserva la fecha de la versión.");
+    Check(almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg") == almacen.RutaCaliente(n1, FotoTamano.Original), "Ya publicada se lee de lo caliente, no del 23.");
     Check(File.Exists(Path.Combine(dirs.Caliente, "actividad", "E-000001-26")), "El registro tiene su marca de último movimiento.");
     Check(Restos(dirs).Count == 0, "No quedan temporales: " + string.Join(", ", Restos(dirs)));
 
     DateTime miniAntes = File.GetLastWriteTimeUtc(mini1.Ruta);
-    CasetaFotoArchivo? miniOtraVez = await almacen.ResolverAsync("E-000001/26", 1, "jpg", CasetaFotoTamano.Mini);
+    FotoArchivo? miniOtraVez = await almacen.ResolverAsync("E-000001/26", 1, "jpg", FotoTamano.Mini);
     Check(miniOtraVez!.Ruta == mini1.Ruta && File.GetLastWriteTimeUtc(miniOtraVez.Ruta) == miniAntes, "La miniatura sigue valiendo tras publicar (misma versión).");
     Check(almacen.EnumerateCasetaPhotos("E-000001/26").Count() == 3, "El listado del folio ve las tres (calientes).");
 
     // 3) Reemplazo del índice 2: invalida su vista y miniatura; se ve la nueva desde ya y el 23 la recibe.
     byte[] foto2b = FotoJpeg(1920, 2560, 22);
     await SubirAsync(almacen, "E-000001/26", (2, foto2b));
-    Check(!File.Exists(almacen.RutaCaliente(n2, CasetaFotoTamano.Mini)) && !File.Exists(almacen.RutaCaliente(n2, CasetaFotoTamano.Vista)), "El reemplazo invalida vista y miniatura.");
+    Check(!File.Exists(almacen.RutaCaliente(n2, FotoTamano.Mini)) && !File.Exists(almacen.RutaCaliente(n2, FotoTamano.Vista)), "El reemplazo invalida vista y miniatura.");
     Check(almacen.FindReadablePhotoPath("E-000001/26", 2, "jpg") == Path.Combine(dirs.Pendientes, n2), "La versión nueva (pendiente) tapa a la caliente anterior.");
-    CasetaFotoArchivo? mini2b = await almacen.ResolverAsync("E-000001/26", 2, "jpg", CasetaFotoTamano.Mini);
+    FotoArchivo? mini2b = await almacen.ResolverAsync("E-000001/26", 2, "jpg", FotoTamano.Mini);
     Check(mini2b!.ModificadaUtc == File.GetLastWriteTimeUtc(Path.Combine(dirs.Pendientes, n2)), "La miniatura nueva es de la versión nueva.");
     await almacen.PublishPendingPhotosAsync(CancellationToken.None);
     Check(new FileInfo(Path.Combine(dirs.El23, n2)).Length == foto2b.Length, "El 23 tiene la versión nueva.");
-    Check(new FileInfo(almacen.RutaCaliente(n2, CasetaFotoTamano.Original)).Length == foto2b.Length, "Lo caliente tiene la versión nueva.");
+    Check(new FileInfo(almacen.RutaCaliente(n2, FotoTamano.Original)).Length == foto2b.Length, "Lo caliente tiene la versión nueva.");
 
     // 4) Baja del índice 3: lo caliente se va en el acto y nadie la vuelve a servir aunque el 23 aún la tenga.
     almacen.QueueDelete(n3);
-    Check(!File.Exists(almacen.RutaCaliente(n3, CasetaFotoTamano.Original)), "La baja quita el original caliente en el acto.");
-    Check(!File.Exists(almacen.RutaCaliente(n3, CasetaFotoTamano.Mini)) && !File.Exists(almacen.RutaCaliente(n3, CasetaFotoTamano.Vista)), "La baja quita vista y miniatura.");
+    Check(!File.Exists(almacen.RutaCaliente(n3, FotoTamano.Original)), "La baja quita el original caliente en el acto.");
+    Check(!File.Exists(almacen.RutaCaliente(n3, FotoTamano.Mini)) && !File.Exists(almacen.RutaCaliente(n3, FotoTamano.Vista)), "La baja quita vista y miniatura.");
     Check(File.Exists(Path.Combine(dirs.El23, n3)), "(El 23 todavía la tiene hasta el siguiente ciclo.)");
     Check(almacen.FindReadablePhotoPath("E-000001/26", 3, "jpg") == null, "Una foto dada de baja no se sirve aunque siga en el 23.");
-    Check(await almacen.ResolverAsync("E-000001/26", 3, "jpg", CasetaFotoTamano.Mini) == null, "Ni su miniatura.");
+    Check(await almacen.ResolverAsync("E-000001/26", 3, "jpg", FotoTamano.Mini) == null, "Ni su miniatura.");
     await almacen.PublishPendingPhotosAsync(CancellationToken.None);
     Check(!File.Exists(Path.Combine(dirs.El23, n3)), "El ciclo borra la baja del 23.");
     Check(!Directory.EnumerateFiles(Path.Combine(dirs.Cola, "delete")).Any(), "Y retira la marca de baja.");
     Check(almacen.EnumerateCasetaPhotos("E-000001/26").Count() == 2, "El listado del folio ya no la ve.");
 
     // 5) A las 48 h sin movimiento: se quitan originales y vistas (el 23 los tiene); la miniatura se queda.
-    CasetaLimpiezaResultado temprano = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(47));
+    LimpiezaFotosResultado temprano = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(47));
     Check(temprano.Desalojadas == 0, "A las 47 h no se quita nada.");
-    CasetaLimpiezaResultado limpieza = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(49));
+    LimpiezaFotosResultado limpieza = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(49));
     Check(limpieza.Desalojadas == 2, $"A las 49 h se quitan los dos originales confirmados (quitó {limpieza.Desalojadas}).");
-    Check(!File.Exists(almacen.RutaCaliente(n1, CasetaFotoTamano.Original)) && !File.Exists(almacen.RutaCaliente(n1, CasetaFotoTamano.Vista)), "Original y vista salen de lo caliente.");
-    Check(File.Exists(almacen.RutaCaliente(n1, CasetaFotoTamano.Mini)), "La miniatura se queda aunque pasen las 48 h.");
+    Check(!File.Exists(almacen.RutaCaliente(n1, FotoTamano.Original)) && !File.Exists(almacen.RutaCaliente(n1, FotoTamano.Vista)), "Original y vista salen de lo caliente.");
+    Check(File.Exists(almacen.RutaCaliente(n1, FotoTamano.Mini)), "La miniatura se queda aunque pasen las 48 h.");
     Check(File.Exists(Path.Combine(dirs.El23, n1)) && File.Exists(Path.Combine(dirs.El23, n2)), "El 23 conserva todo.");
 
     // 6) Consulta vieja: la cuadrícula sale de la miniatura sin ir al 23; abrir la foto la trae una vez y la recalienta.
-    CasetaFotoArchivo? miniVieja = await almacen.ResolverAsync("E-000001/26", 2, "jpg", CasetaFotoTamano.Mini);
-    Check(miniVieja is { EsVariante: true } && miniVieja.Ruta == almacen.RutaCaliente(n2, CasetaFotoTamano.Mini), "Un registro viejo pinta su miniatura desde lo caliente.");
-    Check(!File.Exists(almacen.RutaCaliente(n2, CasetaFotoTamano.Original)), "Pintar la miniatura no trae el original del 23.");
-    CasetaFotoArchivo? vistaVieja = await almacen.ResolverAsync("E-000001/26", 2, "jpg", CasetaFotoTamano.Vista);
+    FotoArchivo? miniVieja = await almacen.ResolverAsync("E-000001/26", 2, "jpg", FotoTamano.Mini);
+    Check(miniVieja is { EsVariante: true } && miniVieja.Ruta == almacen.RutaCaliente(n2, FotoTamano.Mini), "Un registro viejo pinta su miniatura desde lo caliente.");
+    Check(!File.Exists(almacen.RutaCaliente(n2, FotoTamano.Original)), "Pintar la miniatura no trae el original del 23.");
+    FotoArchivo? vistaVieja = await almacen.ResolverAsync("E-000001/26", 2, "jpg", FotoTamano.Vista);
     Check(vistaVieja is { EsVariante: true }, "La vista de un registro viejo se genera leyendo el 23.");
-    Check(File.Exists(almacen.RutaCaliente(n2, CasetaFotoTamano.Original)), "Y el original queda caliente otra vez.");
-    Check(File.GetLastWriteTimeUtc(almacen.RutaCaliente(n2, CasetaFotoTamano.Original)) == File.GetLastWriteTimeUtc(Path.Combine(dirs.El23, n2)), "La copia recalentada conserva la versión del 23.");
+    Check(File.Exists(almacen.RutaCaliente(n2, FotoTamano.Original)), "Y el original queda caliente otra vez.");
+    Check(File.GetLastWriteTimeUtc(almacen.RutaCaliente(n2, FotoTamano.Original)) == File.GetLastWriteTimeUtc(Path.Combine(dirs.El23, n2)), "La copia recalentada conserva la versión del 23.");
     Check(DateTime.UtcNow - File.GetLastWriteTimeUtc(Path.Combine(dirs.Caliente, "actividad", "E-000001-26")) < TimeSpan.FromMinutes(1), "Recalentar renueva el reloj del registro.");
 
     string? leida = almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg");
     Check(leida == Path.Combine(dirs.El23, n1), "El original viejo se sirve del 23 la primera vez.");
-    Check(await EsperarAsync(() => File.Exists(almacen.RutaCaliente(n1, CasetaFotoTamano.Original))), "Y en segundo plano se recalienta para la siguiente.");
-    Check(almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg") == almacen.RutaCaliente(n1, CasetaFotoTamano.Original), "La segunda lectura ya es local.");
+    Check(await EsperarAsync(() => File.Exists(almacen.RutaCaliente(n1, FotoTamano.Original))), "Y en segundo plano se recalienta para la siguiente.");
+    Check(almacen.FindReadablePhotoPath("E-000001/26", 1, "jpg") == almacen.RutaCaliente(n1, FotoTamano.Original), "La segunda lectura ya es local.");
 
     // 7) Nunca se quita de lo caliente algo que no esté confirmado en el 23.
     byte[] fotoSola = FotoJpeg(1200, 1600, 5);
@@ -158,29 +158,29 @@ async Task PruebasAsync()
     await almacen.PublishPendingPhotosAsync(CancellationToken.None);
     string nSola = almacen.GetFileName("E-000002/26", 1);
     File.Delete(Path.Combine(dirs.El23, nSola)); // alguien la quitó del 23
-    CasetaLimpiezaResultado sinCopia = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(72));
+    LimpiezaFotosResultado sinCopia = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(72));
     Check(sinCopia.SinCopiaEn23 >= 1, "La limpieza reporta la foto que el 23 no tiene.");
-    Check(File.Exists(almacen.RutaCaliente(nSola, CasetaFotoTamano.Original)), "Y la conserva en lo caliente.");
+    Check(File.Exists(almacen.RutaCaliente(nSola, FotoTamano.Original)), "Y la conserva en lo caliente.");
     byte[] fotoDistinta = FotoJpeg(1200, 1600, 6);
     File.WriteAllBytes(Path.Combine(dirs.El23, nSola), fotoDistinta.Take(fotoDistinta.Length / 2).ToArray());
-    File.SetLastWriteTimeUtc(Path.Combine(dirs.El23, nSola), File.GetLastWriteTimeUtc(almacen.RutaCaliente(nSola, CasetaFotoTamano.Original)));
+    File.SetLastWriteTimeUtc(Path.Combine(dirs.El23, nSola), File.GetLastWriteTimeUtc(almacen.RutaCaliente(nSola, FotoTamano.Original)));
     await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(72));
-    Check(File.Exists(almacen.RutaCaliente(nSola, CasetaFotoTamano.Original)), "Una copia del 23 de otro tamaño (y no más nueva) no cuenta como confirmada.");
+    Check(File.Exists(almacen.RutaCaliente(nSola, FotoTamano.Original)), "Una copia del 23 de otro tamaño (y no más nueva) no cuenta como confirmada.");
 
     // 8) Las 48 h cuentan desde el último movimiento: una consulta a las 47 h le da otras 48.
     await SubirAsync(almacen, "E-000003/26", (1, FotoJpeg(1200, 1600, 7)));
     await almacen.PublishPendingPhotosAsync(CancellationToken.None);
     string nReloj = almacen.GetFileName("E-000003/26", 1);
     string marca = Path.Combine(dirs.Caliente, "actividad", "E-000003-26");
-    File.SetLastWriteTimeUtc(almacen.RutaCaliente(nReloj, CasetaFotoTamano.Original), DateTime.UtcNow.AddHours(-47));
+    File.SetLastWriteTimeUtc(almacen.RutaCaliente(nReloj, FotoTamano.Original), DateTime.UtcNow.AddHours(-47));
     File.SetLastWriteTimeUtc(Path.Combine(dirs.El23, nReloj), DateTime.UtcNow.AddHours(-47));
     File.SetLastWriteTimeUtc(marca, DateTime.UtcNow.AddHours(-47));
     almacen.FindReadablePhotoPath("E-000003/26", 1, "jpg");
     await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(2));
-    Check(File.Exists(almacen.RutaCaliente(nReloj, CasetaFotoTamano.Original)), "Consultada a las 47 h, sigue caliente 2 h después.");
+    Check(File.Exists(almacen.RutaCaliente(nReloj, FotoTamano.Original)), "Consultada a las 47 h, sigue caliente 2 h después.");
     File.SetLastWriteTimeUtc(marca, DateTime.UtcNow.AddHours(-47));
     await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(2));
-    Check(!File.Exists(almacen.RutaCaliente(nReloj, CasetaFotoTamano.Original)), "Sin esa consulta, a las 49 h se habría quitado.");
+    Check(!File.Exists(almacen.RutaCaliente(nReloj, FotoTamano.Original)), "Sin esa consulta, a las 49 h se habría quitado.");
 
     // 9) Diez fotos se publican a la vez y todas llegan.
     var diez = Enumerable.Range(1, 10).Select(i => (i, FotoJpeg(800, 1000, 100 + i))).ToArray();
@@ -200,7 +200,7 @@ async Task PruebasAsync()
     // 11) Una foto que no se puede leer se sirve tal cual: la app siempre ve algo.
     byte[] rota = [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5, 6, 0xFF, 0xD9];
     await SubirAsync(almacen, "E-000006/26", (1, rota));
-    CasetaFotoArchivo? deRota = await almacen.ResolverAsync("E-000006/26", 1, "jpg", CasetaFotoTamano.Mini);
+    FotoArchivo? deRota = await almacen.ResolverAsync("E-000006/26", 1, "jpg", FotoTamano.Mini);
     Check(deRota is { EsVariante: false } && deRota.Ruta == Path.Combine(dirs.Pendientes, almacen.GetFileName("E-000006/26", 1)), "Sin miniatura posible se sirve el original.");
     Check(FotoVariantes.Generar(rota) == null, "FotoVariantes no revienta con una imagen rota.");
 
@@ -226,7 +226,7 @@ async Task PruebasAsync()
     string nApagado = apagado.GetFileName("E-000007/26", 1);
     Check(File.Exists(Path.Combine(dirsB.El23, nApagado)) && !File.Exists(Path.Combine(dirsB.Pendientes, nApagado)), "Apagado: llega al 23 y sale de pendientes.");
     Check(!Directory.Exists(dirsB.Caliente) || !Directory.EnumerateFiles(dirsB.Caliente, "*", SearchOption.AllDirectories).Any(), "Apagado: no escribe nada caliente.");
-    CasetaFotoArchivo? originalApagado = await apagado.ResolverAsync("E-000007/26", 1, "jpg", CasetaFotoTamano.Mini);
+    FotoArchivo? originalApagado = await apagado.ResolverAsync("E-000007/26", 1, "jpg", FotoTamano.Mini);
     Check(originalApagado is { EsVariante: false } && originalApagado.Ruta == Path.Combine(dirsB.El23, nApagado), "Apagado: pedir miniatura sirve el original, como antes.");
 
     // 14) Si la carpeta caliente no se puede escribir, se apaga solo (y lo dice el log) en vez de fallar.
@@ -236,16 +236,16 @@ async Task PruebasAsync()
     Check(!sinPermiso.HotCacheActivo, "Una carpeta caliente imposible deja el almacén apagado.");
 
     // 15) Versión y caché HTTP.
-    Check(CasetaFotoCache.Version(0, 123) == string.Empty, "Sin idfotos no hay versión.");
-    Check(CasetaFotoCache.Version(255, 4096) == "ff-1000", "La versión es idfotos-fcrea en hexadecimal.");
-    Check(CasetaFotoCache.Version(255, -5) == "ff-0", "Una fecha cero o negativa no rompe la versión.");
-    Check(CasetaFotoCache.CacheControl("ff-1000", "ff-1000") == CasetaFotoCache.ParaSiempre, "Con la versión vigente se guarda para siempre.");
-    Check(CasetaFotoCache.CacheControl("FF-1000 ", "ff-1000") == CasetaFotoCache.ParaSiempre, "La versión se compara sin importar mayúsculas ni espacios.");
-    Check(CasetaFotoCache.CacheControl(null, "ff-1000") == CasetaFotoCache.Preguntar, "Sin versión (apps anteriores) se pregunta cada vez.");
-    Check(CasetaFotoCache.CacheControl("fe-1000", "ff-1000") == CasetaFotoCache.Preguntar, "Con una versión vieja se pregunta.");
-    Check(CasetaFotoCache.CacheControl("", "") == CasetaFotoCache.Preguntar, "Sin fila en la base se pregunta.");
-    Check(CasetaFotoCache.Tamano("mini") == CasetaFotoTamano.Mini && CasetaFotoCache.Tamano(" VISTA ") == CasetaFotoTamano.Vista, "mini y vista se reconocen.");
-    Check(CasetaFotoCache.Tamano(null) == CasetaFotoTamano.Original && CasetaFotoCache.Tamano("otra") == CasetaFotoTamano.Original, "Cualquier otra cosa es el original.");
+    Check(FotoCache.Version(0, 123) == string.Empty, "Sin idfotos no hay versión.");
+    Check(FotoCache.Version(255, 4096) == "ff-1000", "La versión es idfotos-fcrea en hexadecimal.");
+    Check(FotoCache.Version(255, -5) == "ff-0", "Una fecha cero o negativa no rompe la versión.");
+    Check(FotoCache.CacheControl("ff-1000", "ff-1000") == FotoCache.ParaSiempre, "Con la versión vigente se guarda para siempre.");
+    Check(FotoCache.CacheControl("FF-1000 ", "ff-1000") == FotoCache.ParaSiempre, "La versión se compara sin importar mayúsculas ni espacios.");
+    Check(FotoCache.CacheControl(null, "ff-1000") == FotoCache.Preguntar, "Sin versión (apps anteriores) se pregunta cada vez.");
+    Check(FotoCache.CacheControl("fe-1000", "ff-1000") == FotoCache.Preguntar, "Con una versión vieja se pregunta.");
+    Check(FotoCache.CacheControl("", "") == FotoCache.Preguntar, "Sin fila en la base se pregunta.");
+    Check(FotoCache.Tamano("mini") == FotoTamano.Mini && FotoCache.Tamano(" VISTA ") == FotoTamano.Vista, "mini y vista se reconocen.");
+    Check(FotoCache.Tamano(null) == FotoTamano.Original && FotoCache.Tamano("otra") == FotoTamano.Original, "Cualquier otra cosa es el original.");
 
     // 16) Fotos que llegan como archivo (multipart): mismas reglas que las de base64.
     byte[] f1 = FotoJpeg(400, 300, 401), f2 = FotoJpeg(400, 300, 402);
@@ -299,7 +299,7 @@ async Task MedirContra23Async(string carpeta23, string temporal)
     foreach (int indice in indices)
     {
         var reloj = Stopwatch.StartNew();
-        CasetaFotoArchivo? mini = await almacen.ResolverAsync(folio, indice, "jpg", CasetaFotoTamano.Mini);
+        FotoArchivo? mini = await almacen.ResolverAsync(folio, indice, "jpg", FotoTamano.Mini);
         double primera = reloj.Elapsed.TotalMilliseconds;
         if (mini == null)
         {
@@ -308,9 +308,9 @@ async Task MedirContra23Async(string carpeta23, string temporal)
         }
 
         reloj.Restart();
-        await almacen.ResolverAsync(folio, indice, "jpg", CasetaFotoTamano.Mini);
+        await almacen.ResolverAsync(folio, indice, "jpg", FotoTamano.Mini);
         double segunda = reloj.Elapsed.TotalMilliseconds;
-        CasetaFotoArchivo vista = (await almacen.ResolverAsync(folio, indice, "jpg", CasetaFotoTamano.Vista))!;
+        FotoArchivo vista = (await almacen.ResolverAsync(folio, indice, "jpg", FotoTamano.Vista))!;
         string nombre = almacen.GetFileName(folio, indice);
         long original = new FileInfo(Path.Combine(carpeta23, nombre)).Length;
         long pesoMini = new FileInfo(mini.Ruta).Length;
@@ -356,7 +356,7 @@ CasetaPhotoStorage Nuevo(Carpetas dirs, params (string Clave, string Valor)[] ex
 
 static async Task SubirAsync(CasetaPhotoStorage almacen, string casetaId, params (int Indice, byte[] Bytes)[] fotos)
 {
-    var etapas = new List<CasetaPhotoStage>();
+    var etapas = new List<FotoPreparada>();
     foreach ((int indice, byte[] bytes) in fotos)
     {
         etapas.Add(await almacen.StageAsync(bytes, almacen.GetFileName(casetaId, indice), CancellationToken.None));

@@ -26,15 +26,16 @@ public class EntradaService
     private readonly IConfiguration _config;
     private readonly IHostEnvironment _env;
     private readonly ILogger<EntradaService> _logger;
-    private readonly IFotoMejoraCola _mejora;
+    // Fotos de la entrada (100) y de su daño (103): pasan por el almacén (cola local y copia al 23 en segundo plano).
+    private readonly ClientePhotoStorage _fotos;
 
-    public EntradaService(BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger, IFotoMejoraCola mejora)
+    public EntradaService(BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger, ClientePhotoStorage fotos)
     {
         _db = db;
         _config = config;
         _env = env;
         _logger = logger;
-        _mejora = mejora;
+        _fotos = fotos;
     }
 
     public async Task<ConsecutivoResult> ObtenerConsecutivoAsync()
@@ -630,6 +631,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
         conn.Open();
         using var tran = conn.BeginTransaction();
 
+        // Fotos que vienen dentro de la petición (versiones anteriores de la app): se preparan dentro de la transacción y se
+        // activan con su idfotos solo si la entrada se confirma; si no, se descartan.
+        var fotosPreparadas = new List<FotoClientePreparada>();
+        var fotosPorActivar = new List<(FotoClientePreparada Foto, long IdFotos)>();
+
         try
         {
             int existeReferencia = await conn.ExecuteScalarAsync<int>(
@@ -798,25 +804,27 @@ LIMIT @take", new { fromDate, take })).ToList(),
                transaction: tran);
 
                 clienteCarpeta = string.IsNullOrWhiteSpace(clienteCarpeta) ? "SIN_CARPETA" : clienteCarpeta.Trim();
-                string basePath = _config["PhotoSettings:BasePath"] ?? @"F:\Trafico\fotos";
-                string carpetaDoc = Path.Combine(basePath, clienteCarpeta);
-                Directory.CreateDirectory(carpetaDoc);
 
                 for (int i = 0; i < datos.Fotos.Count; i++)
                 {
-                    string? extension = await SaveEntradaPhotoAsync(datos.Fotos[i], carpetaDoc, referencia, i + 1, mejora: _mejora);
-                    if (string.IsNullOrWhiteSpace(extension)) continue;
+                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(datos.Fotos[i]);
+                    if (foto == null) continue;
 
-                    await conn.ExecuteAsync(@"
+                    FotoClientePreparada preparada = await _fotos.PrepararAsync(
+                        foto.Value.Bytes, clienteCarpeta, referencia, 100, i + 1, foto.Value.Extension);
+                    fotosPreparadas.Add(preparada);
+                    long idFotos = await conn.ExecuteScalarAsync<long>(@"
  INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea)
- VALUES (@nlineno, @referencia, 100, @ext, @usuario, NOW())",
+ VALUES (@nlineno, @referencia, 100, @ext, @usuario, NOW());
+ SELECT LAST_INSERT_ID();",
                     new
                     {
                         nlineno = i + 1,
                         referencia,
-                        ext = extension,
+                        ext = foto.Value.Extension,
                         usuario = usuarioActual
                     }, transaction: tran);
+                    fotosPorActivar.Add((preparada, idFotos));
                 }
             }
 
@@ -829,29 +837,34 @@ LIMIT @take", new { fromDate, take })).ToList(),
                transaction: tran);
 
                 clienteCarpetaDanio = string.IsNullOrWhiteSpace(clienteCarpetaDanio) ? "SIN_CARPETA" : clienteCarpetaDanio.Trim();
-                string basePathDanio = _config["PhotoSettings:BasePath"] ?? @"F:\Trafico\fotos";
-                string carpetaDocDanio = Path.Combine(basePathDanio, clienteCarpetaDanio);
-                Directory.CreateDirectory(carpetaDocDanio);
 
                 for (int i = 0; i < datos.FotosDanio.Count; i++)
                 {
-                    string? extension = await SaveEntradaPhotoAsync(datos.FotosDanio[i], carpetaDocDanio, referencia, i + 1, ntipodocto: 103, mejora: _mejora);
-                    if (string.IsNullOrWhiteSpace(extension)) continue;
+                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(datos.FotosDanio[i]);
+                    if (foto == null) continue;
 
-                    await conn.ExecuteAsync(@"
+                    FotoClientePreparada preparada = await _fotos.PrepararAsync(
+                        foto.Value.Bytes, clienteCarpetaDanio, referencia, 103, i + 1, foto.Value.Extension);
+                    fotosPreparadas.Add(preparada);
+                    long idFotos = await conn.ExecuteScalarAsync<long>(@"
  INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea)
- VALUES (@nlineno, @referencia, 103, @ext, @usuario, NOW())",
+ VALUES (@nlineno, @referencia, 103, @ext, @usuario, NOW());
+ SELECT LAST_INSERT_ID();",
                     new
                     {
                         nlineno = i + 1,
                         referencia,
-                        ext = extension,
+                        ext = foto.Value.Extension,
                         usuario = usuarioActual
                     }, transaction: tran);
+                    fotosPorActivar.Add((preparada, idFotos));
                 }
             }
 
             tran.Commit();
+
+            // Confirmada la entrada, sus fotos se activan: ya se pueden ver y se copian al 23 en segundo plano.
+            ActivarFotos(fotosPorActivar, referencia);
 
             // Ya confirmado el guardado: cuántas fotos de daño se esperan es informativo y tolerante (si falta el script
             // SQL no debe tumbar nada), por eso va fuera de la transacción.
@@ -878,6 +891,12 @@ LIMIT @take", new { fromDate, take })).ToList(),
         catch (Exception ex)
         {
             DebugLog.Write("GUARDAR_ENTRADA_ERROR", new { referencia, msg = ex.Message });
+            // Las que no se activaron sobran (descartar una ya activada no hace nada).
+            foreach (FotoClientePreparada preparada in fotosPreparadas)
+            {
+                _fotos.Descartar(preparada);
+            }
+
             tran.Rollback();
             throw;
         }
@@ -1136,17 +1155,9 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
             clienteCarpeta = string.IsNullOrWhiteSpace(clienteCarpeta) ? "SIN_CARPETA" : clienteCarpeta.Trim();
 
+            // Solo para los mensajes: la foto llega a la cola local y el almacén la copia a esta carpeta del 23 (la crea si falta).
             string basePath = _config["PhotoSettings:BasePath"] ?? @"F:\Trafico\fotos";
             string carpetaDoc = Path.Combine(basePath, clienteCarpeta);
-
-            try
-            {
-                Directory.CreateDirectory(carpetaDoc);
-            }
-            catch (Exception exDir)
-            {
-                return new { success = false, message = $"No se pudo crear la carpeta: {carpetaDoc} — {exDir.Message}" };
-            }
 
             int nextLine = await conn.ExecuteScalarAsync<int>(
         "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = 100",
@@ -1159,17 +1170,14 @@ LIMIT @take", new { fromDate, take })).ToList(),
             {
                 try
                 {
-                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine, mejora: _mejora);
-                    if (string.IsNullOrWhiteSpace(ext))
+                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(fotos[i]);
+                    if (foto == null)
                     {
                         errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
                         continue;
                     }
 
-                    await conn.ExecuteAsync(@"
- INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea)
- VALUES (@nlineno, @referencia, 100, @ext, @usuario, NOW())",
-                    new { nlineno = nextLine, referencia, ext, usuario = usuarioActual });
+                    await GuardarFotoAsync(conn, foto.Value, clienteCarpeta, referencia, 100, nextLine, usuarioActual);
 
                     nextLine++;
                     guardadas++;
@@ -1217,17 +1225,9 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
             clienteCarpeta = string.IsNullOrWhiteSpace(clienteCarpeta) ? "SIN_CARPETA" : clienteCarpeta.Trim();
 
+            // Solo para los mensajes: la foto llega a la cola local y el almacén la copia a esta carpeta del 23 (la crea si falta).
             string basePath = _config["PhotoSettings:BasePath"] ?? @"F:\Trafico\fotos";
             string carpetaDoc = Path.Combine(basePath, clienteCarpeta);
-
-            try
-            {
-                Directory.CreateDirectory(carpetaDoc);
-            }
-            catch (Exception exDir)
-            {
-                return new { success = false, message = $"No se pudo crear la carpeta: {carpetaDoc} — {exDir.Message}" };
-            }
 
             int nextLine = await conn.ExecuteScalarAsync<int>(
         "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = 103",
@@ -1240,17 +1240,14 @@ LIMIT @take", new { fromDate, take })).ToList(),
             {
                 try
                 {
-                    string? ext = await SaveEntradaPhotoAsync(fotos[i], carpetaDoc, referencia, nextLine, ntipodocto: 103, mejora: _mejora);
-                    if (string.IsNullOrWhiteSpace(ext))
+                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(fotos[i]);
+                    if (foto == null)
                     {
                         errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
                         continue;
                     }
 
-                    await conn.ExecuteAsync(@"
- INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea)
- VALUES (@nlineno, @referencia, 103, @ext, @usuario, NOW())",
-                    new { nlineno = nextLine, referencia, ext, usuario = usuarioActual });
+                    await GuardarFotoAsync(conn, foto.Value, clienteCarpeta, referencia, 103, nextLine, usuarioActual);
 
                     nextLine++;
                     guardadas++;
@@ -1330,7 +1327,56 @@ LIMIT @take", new { fromDate, take })).ToList(),
         return digits.Length > 8 ? digits[4..^4] : "";
     }
 
-    private static async Task<string?> SaveEntradaPhotoAsync(string image, string targetDirectory, string creferencia, int lineNo, int ntipodocto = 100, IFotoMejoraCola? mejora = null)
+    /// <summary>
+    /// Una foto suelta de la entrada: se prepara en la cola local (milisegundos; antes cada foto esperaba la copia lenta al 23
+    /// dentro de la petición), se inserta su fila y se activa con su idfotos. Si la fila no entra, la foto se descarta.
+    /// </summary>
+    private async Task GuardarFotoAsync(
+        IDbConnection conn,
+        (byte[] Bytes, string Extension) foto,
+        string carpeta,
+        string referencia,
+        int ntipodocto,
+        int linea,
+        string usuario)
+    {
+        FotoClientePreparada preparada = await _fotos.PrepararAsync(foto.Bytes, carpeta, referencia, ntipodocto, linea, foto.Extension);
+        long idFotos;
+        try
+        {
+            idFotos = await conn.ExecuteScalarAsync<long>(@"
+ INSERT INTO fotos (nlineno, creferencia, ntipodocto, cextension, usucrea, fcrea)
+ VALUES (@nlineno, @referencia, @ntipodocto, @ext, @usuario, NOW());
+ SELECT LAST_INSERT_ID();",
+            new { nlineno = linea, referencia, ntipodocto, ext = foto.Extension, usuario });
+        }
+        catch
+        {
+            _fotos.Descartar(preparada);
+            throw;
+        }
+
+        _fotos.Activar(preparada, idFotos);
+    }
+
+    /// <summary>Activa las fotos de una entrada ya confirmada. Nunca lanza: la entrada ya está guardada.</summary>
+    private void ActivarFotos(IEnumerable<(FotoClientePreparada Foto, long IdFotos)> fotos, string referencia)
+    {
+        foreach ((FotoClientePreparada foto, long idFotos) in fotos)
+        {
+            try
+            {
+                _fotos.Activar(foto, idFotos);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "No se pudo activar la foto {Archivo} de la entrada {Referencia}.", foto.Archivo, referencia);
+            }
+        }
+    }
+
+    /// <summary>La foto como la manda la app: base64 o data URI ("data:image/jpeg;base64,..."). Null si viene vacía o no es base64.</summary>
+    private static (byte[] Bytes, string Extension)? DecodificarFoto(string image)
     {
         if (string.IsNullOrWhiteSpace(image))
             return null;
@@ -1352,28 +1398,14 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
         payload = payload.Trim().Replace(" ", "").Replace("\n", "").Replace("\r", "");
 
-        byte[] bytes;
         try
         {
-            bytes = Convert.FromBase64String(payload);
+            return (Convert.FromBase64String(payload), extension);
         }
         catch (FormatException)
         {
             return null;
         }
-
-        string fileName = PhotoFileNameResolver.Build(
-            creferencia ?? string.Empty,
-            ntipodocto,
-            lineNo,
-            extension);
-        string rutaFoto = Path.Combine(targetDirectory, fileName);
-        await File.WriteAllBytesAsync(rutaFoto, bytes);
-
-        // Se responde con la original y la mejora corre después en segundo plano (la cola ignora lo que no sea JPG).
-        mejora?.Encolar(rutaFoto, ntipodocto == 103 ? "entrada-danio" : "entrada");
-
-        return extension;
     }
 
     private static string NormalizeImageExtension(string raw)

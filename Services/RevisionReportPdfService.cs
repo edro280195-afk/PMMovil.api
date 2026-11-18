@@ -46,20 +46,20 @@ public class RevisionReportPdfService
     private readonly BaseRepository _db;
     private readonly IWebHostEnvironment _env;
     private readonly ILogger<RevisionReportPdfService> _logger;
-    private readonly string _fotosBasePath;
+
+    // Las fotos de discrepancia viven en la carpeta del cliente: se leen por el almacén (ver ClientePhotoStorage).
+    private readonly ClientePhotoStorage _fotos;
 
     public RevisionReportPdfService(
         BaseRepository db,
-        IConfiguration config,
         IWebHostEnvironment env,
-        ILogger<RevisionReportPdfService> logger)
+        ILogger<RevisionReportPdfService> logger,
+        ClientePhotoStorage fotos)
     {
         _db = db;
         _env = env;
         _logger = logger;
-        // Misma clave que ya usa FotoController -- las fotos de discrepancia
-        // viven en el mismo disco/carpeta por cliente.
-        _fotosBasePath = config["PhotoSettings:BasePath"] ?? "F:\\Trafico\\fotos";
+        _fotos = fotos;
     }
 
     public async Task<(byte[]? Pdf, string? Error)> GenerarPdfAsync(string creferencia)
@@ -155,6 +155,24 @@ public class RevisionReportPdfService
             "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1",
             new { id = (string)(general.cidcte ?? "") }) ?? (string)(general.cidcte ?? "");
 
+        // Las fotos del reporte se pintan de 90 puntos de alto: la vista de pantalla (1280 px, ~130 KB) sobra en nitidez y el
+        // PDF no carga con los originales (~800 KB cada una). Se buscan antes de armar el documento, que no es asíncrono.
+        var rutasFotos = new Dictionary<int, string?>();
+        foreach (dynamic foto in fotos.Take(8))
+        {
+            int linea = (int)foto.nlineno;
+            FotoArchivo? archivo = await _fotos.ResolverAsync(
+                new FotoCliente(
+                    Convert.ToInt64(foto.idfotos),
+                    carpetaCliente.Trim(),
+                    creferencia,
+                    103,
+                    linea,
+                    PhotoFileNameResolver.NormalizeExtension((string?)foto.cextension)),
+                FotoTamano.Vista);
+            rutasFotos[linea] = archivo?.Ruta;
+        }
+
         byte[]? logo = LoadLogo();
 
         int totalDoc = facturas.Sum(f => (int)(f.totbultosdoc ?? 0));
@@ -188,7 +206,7 @@ public class RevisionReportPdfService
 
                     List<dynamic> conDisc = facturas.Where(f => (int)(f.status_rev ?? 0) == 2).ToList();
                     if (conDisc.Count > 0) col.Item().Element(c => ComposeDiscrepancias(c, conDisc));
-                    if (fotos.Count > 0) col.Item().Element(c => ComposeFotos(c, fotos, carpetaCliente, creferencia));
+                    if (fotos.Count > 0) col.Item().Element(c => ComposeFotos(c, fotos, rutasFotos));
 
                     col.Item().Element(c => ComposeBitacora(c, bitacora));
                     col.Item().Element(c => ComposeFirmas(c, (string)(general.usuarioRevisor ?? ""), (string)(general.supervisorCierre ?? "")));
@@ -393,7 +411,7 @@ public class RevisionReportPdfService
         });
     }
 
-    private void ComposeFotos(IContainer container, List<dynamic> fotos, string carpetaCliente, string creferencia)
+    private void ComposeFotos(IContainer container, List<dynamic> fotos, IReadOnlyDictionary<int, string?> rutasFotos)
     {
         container.Column(col =>
         {
@@ -402,15 +420,8 @@ public class RevisionReportPdfService
             {
                 foreach (dynamic foto in fotos.Take(8))
                 {
-                    string ext = PhotoFileNameResolver.NormalizeExtension((string?)foto.cextension);
                     int linea = (int)foto.nlineno;
-                    string? path = PhotoFileNameResolver.FindExistingPath(
-                        _fotosBasePath,
-                        carpetaCliente,
-                        creferencia,
-                        ntipodocto: 103,
-                        nlineno: linea,
-                        extension: ext);
+                    string? path = rutasFotos.TryGetValue(linea, out string? ruta) ? ruta : null;
 
                     row.RelativeItem().Padding(2).Column(c =>
                     {
