@@ -497,21 +497,34 @@ public class FotoController : ControllerBase
             });
     }
 
+    /// <summary>
+    /// Foto de entrada a caseta. <paramref name="tam"/>: "mini" (cuadrículas, ~14 KB), "vista" (pantalla, ~130 KB) o
+    /// nada para el original. <paramref name="v"/>: la versión que dio el detalle; con la vigente, la tableta la guarda
+    /// para siempre (ver <see cref="CasetaFotoCache"/>).
+    /// </summary>
     [HttpGet("caseta/ver")]
     [RequiereModulo(MobileModuleIds.WarehouseOperations)]
-    public async Task<IActionResult> VerFotoCasetaPorQuery([FromQuery] string casetaId, [FromQuery] int indice)
+    public async Task<IActionResult> VerFotoCasetaPorQuery(
+        [FromQuery] string casetaId,
+        [FromQuery] int indice,
+        [FromQuery] string? tam = null,
+        [FromQuery] string? v = null)
     {
-        return await VerFotoCasetaCore(casetaId, indice);
+        return await VerFotoCasetaCore(casetaId, indice, tam, v);
     }
 
     [HttpGet("caseta/{casetaId}/{indice}")]
     [RequiereModulo(MobileModuleIds.WarehouseOperations)]
-    public async Task<IActionResult> VerFotoCaseta(string casetaId, int indice)
+    public async Task<IActionResult> VerFotoCaseta(
+        string casetaId,
+        int indice,
+        [FromQuery] string? tam = null,
+        [FromQuery] string? v = null)
     {
-        return await VerFotoCasetaCore(casetaId, indice);
+        return await VerFotoCasetaCore(casetaId, indice, tam, v);
     }
 
-    private async Task<IActionResult> VerFotoCasetaCore(string casetaId, int indice)
+    private async Task<IActionResult> VerFotoCasetaCore(string casetaId, int indice, string? tam, string? v)
     {
         try
         {
@@ -519,23 +532,52 @@ public class FotoController : ControllerBase
                 return BadRequest(new { message = "CasetaId e indice son obligatorios" });
 
             using IDbConnection conn = _db.CreateConnection();
-            string? extension = await conn.ExecuteScalarAsync<string?>(@"
-				SELECT COALESCE(NULLIF(cextension, ''), 'jpg')
+            CasetaFotoFila? fila = await conn.QueryFirstOrDefaultAsync<CasetaFotoFila>(@"
+				SELECT COALESCE(NULLIF(cextension, ''), 'jpg') AS Extension,
+				       idfotos AS IdFotos,
+				       CAST(IFNULL(UNIX_TIMESTAMP(fcrea), 0) AS SIGNED) AS FcreaUnix
 				FROM fotos
 				WHERE creferencia = @casetaId AND nlineno = @indice AND ntipodocto = 106
+				ORDER BY idfotos DESC
 				LIMIT 1", new { casetaId, indice });
 
-            string? filePath = _casetaPhotoStorage.FindReadablePhotoPath(casetaId, indice, extension);
-            if (filePath == null)
+            CasetaFotoTamano tamano = CasetaFotoCache.Tamano(tam);
+            CancellationToken ct = HttpContext.RequestAborted;
+            CasetaFotoArchivo? archivo = await _casetaPhotoStorage.ResolverAsync(casetaId, indice, fila?.Extension, tamano, ct);
+            // Si la limpieza o una publicación lo movió entre la búsqueda y ahora, se vuelve a buscar una vez.
+            if (archivo != null && !System.IO.File.Exists(archivo.Ruta))
+                archivo = await _casetaPhotoStorage.ResolverAsync(casetaId, indice, fila?.Extension, tamano, ct);
+            if (archivo == null)
                 return NotFound(new { message = "Foto no encontrada" });
 
-            return PhysicalFile(filePath, GetImageContentType(filePath, extension));
+            string version = fila == null ? string.Empty : CasetaFotoCache.Version(fila.IdFotos, fila.FcreaUnix);
+            Response.Headers.CacheControl = CasetaFotoCache.CacheControl(v, version);
+            var etiqueta = string.IsNullOrEmpty(version)
+                ? null
+                : new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{version}-{tamano.ToString().ToLowerInvariant()}\"");
+
+            return PhysicalFile(
+                archivo.Ruta,
+                archivo.EsVariante ? "image/jpeg" : GetImageContentType(archivo.Ruta, fila?.Extension),
+                new DateTimeOffset(DateTime.SpecifyKind(archivo.ModificadaUtc, DateTimeKind.Utc)),
+                etiqueta);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            return new EmptyResult();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error al servir foto de caseta {CasetaId}/{Indice}", casetaId, indice);
             return StatusCode(500, new { message = "Error al leer la imagen" });
         }
+    }
+
+    private sealed class CasetaFotoFila
+    {
+        public string Extension { get; set; } = "jpg";
+        public long IdFotos { get; set; }
+        public long FcreaUnix { get; set; }
     }
 
     private static string GetImageContentType(string path, string? extension)

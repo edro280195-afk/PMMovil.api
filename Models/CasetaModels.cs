@@ -275,6 +275,12 @@ public class CasetaEntradaFotoInfo
 {
     public int Indice { get; set; }
     public string NombreArchivo { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Cambia cuando la foto se reemplaza. La app la pone en la dirección de la foto para guardarla sin volver a pedirla
+    /// (ver <c>CasetaFotoCache</c>). Vacía en fotos sin fila en la base.
+    /// </summary>
+    public string Version { get; set; } = string.Empty;
 }
 
 /// <summary>Resultado de buscar una entrada de caseta por número de caja (nequipo),

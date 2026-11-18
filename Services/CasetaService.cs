@@ -2748,10 +2748,12 @@ VALUES (@nlineno, @creferencia, 106, 'jpg', @usucrea, @fcrea)",
         foreach (dynamic row in await conn.QueryAsync(@"
 SELECT
     nlineno AS Indice,
-    COALESCE(NULLIF(cextension, ''), 'jpg') AS Extension
+    COALESCE(NULLIF(cextension, ''), 'jpg') AS Extension,
+    idfotos AS IdFotos,
+    CAST(IFNULL(UNIX_TIMESTAMP(fcrea), 0) AS SIGNED) AS FcreaUnix
 FROM fotos
 WHERE creferencia = @casetaId AND ntipodocto = 106
-ORDER BY nlineno", new { casetaId }))
+ORDER BY nlineno, idfotos", new { casetaId }))
         {
             int indice = Convert.ToInt32(row.Indice ?? 0);
             if (indice <= 0)
@@ -2760,7 +2762,9 @@ ORDER BY nlineno", new { casetaId }))
             string extension = Convert.ToString(row.Extension ?? "jpg")?.Trim().TrimStart('.') ?? "jpg";
             string nombre = _photoStorage.GetCandidateFileNames(casetaId, indice, extension).FirstOrDefault()
            ?? _photoStorage.GetFileName(casetaId, indice);
-            byIndex[indice] = (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre }, extension);
+            // La misma versión que usa Foto/caseta/ver: con ella la tableta guarda la foto y no la vuelve a pedir.
+            string version = CasetaFotoCache.Version(Convert.ToInt64(row.IdFotos ?? 0), Convert.ToInt64(row.FcreaUnix ?? 0));
+            byIndex[indice] = (new CasetaEntradaFotoInfo { Indice = indice, NombreArchivo = nombre, Version = version }, extension);
         }
 
         // El detalle movil pide solo metadatos. No recorrer la unidad de red en ese caso:
