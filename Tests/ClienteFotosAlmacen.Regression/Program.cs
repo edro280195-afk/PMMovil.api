@@ -35,6 +35,7 @@ try
     await NombreAnteriorAsync();
     await ModoDirectoAsync();
     await LimpiezaAsync();
+    await RecibidasAsync();
     Console.WriteLine($"ClienteFotosAlmacen.Regression: {checks} comprobaciones correctas.");
     return 0;
 }
@@ -275,6 +276,25 @@ async Task LimpiezaAsync()
     File.Delete(Path.Combine(dirs.El23, "LIMPIA", "01I26100005-1072.jpg"));
     LimpiezaFotosResultado sinCopia = await almacen.LimpiarCalienteAsync(DateTime.UtcNow.AddHours(49));
     Check(sinCopia.SinCopiaEn23 == 1 && File.Exists(almacen.RutaCaliente("LIMPIA~01I26100005-1072~971.jpg", FotoTamano.Original)), "Sin confirmar en el 23 se conserva.");
+}
+
+async Task RecibidasAsync()
+{
+    // Las fotos que llegan como archivos (Revisión y Entrada): el tipo sale de sus primeros bytes, no del nombre.
+    byte[] jpeg = FotoJpeg(64, 48, 71);
+    Check(FotosRecibidas.ExtensionDe(jpeg) == "jpg", "Un JPEG se guarda como jpg.");
+    byte[] png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    Check(FotosRecibidas.ExtensionDe(png) == "png", "Un PNG se reconoce.");
+    byte[] webp = [(byte)'R', (byte)'I', (byte)'F', (byte)'F', 0, 0, 0, 0, (byte)'W', (byte)'E', (byte)'B', (byte)'P'];
+    Check(FotosRecibidas.ExtensionDe(webp) == "webp", "Un WEBP se reconoce.");
+    Check(FotosRecibidas.ExtensionDe([1, 2, 3]) == "jpg", "Lo que no se reconoce se toma por JPEG, como manda la app.");
+
+    var archivo = new Microsoft.AspNetCore.Http.FormFile(new MemoryStream(jpeg), 0, jpeg.Length, "foto", "1.jpg");
+    (List<byte[]> leidas, string? error) = await FotosRecibidas.LeerAsync([archivo], CancellationToken.None);
+    Check(error == null && leidas.Count == 1 && leidas[0].SequenceEqual(jpeg), "El archivo se lee completo.");
+    (_, string? vacio) = await FotosRecibidas.LeerAsync(
+        [new Microsoft.AspNetCore.Http.FormFile(new MemoryStream(), 0, 0, "foto", "x.jpg")], CancellationToken.None);
+    Check(vacio == "Una foto llegó vacía.", "Un archivo vacío se rechaza con el mismo mensaje que Caseta.");
 }
 
 // ── Ayudantes ───────────────────────────────────────────────────────────────────────────────────────────────────────

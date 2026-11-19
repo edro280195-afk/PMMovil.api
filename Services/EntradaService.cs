@@ -1140,69 +1140,15 @@ LIMIT @take", new { fromDate, take })).ToList(),
         return resultado;
     }
 
-    public async Task<object> GuardarFotosEntradaAsync(string referencia, List<string> fotos, string usuarioActual)
+    public Task<object> GuardarFotosEntradaAsync(string referencia, List<string> fotos, string usuarioActual)
     {
-        try
-        {
-            using IDbConnection conn = _db.CreateConnection();
+        return GuardarFotosSueltasAsync(referencia, fotos.Select(DecodificarFoto).ToList(), usuarioActual, ntipodocto: 100);
+    }
 
-            string? clienteCarpeta = await conn.QueryFirstOrDefaultAsync<string>(@"
-  SELECT COALESCE(NULLIF(cl.carpeta,''), cl.cidcte)
-  FROM traf t
-  JOIN clientes cl ON cl.cidcte = t.cclienteidtraf
-  WHERE t.creferencia = @cref
-  LIMIT 1", new { cref = referencia });
-
-            clienteCarpeta = string.IsNullOrWhiteSpace(clienteCarpeta) ? "SIN_CARPETA" : clienteCarpeta.Trim();
-
-            // Solo para los mensajes: la foto llega a la cola local y el almacén la copia a esta carpeta del 23 (la crea si falta).
-            string basePath = _config["PhotoSettings:BasePath"] ?? @"F:\Trafico\fotos";
-            string carpetaDoc = Path.Combine(basePath, clienteCarpeta);
-
-            int nextLine = await conn.ExecuteScalarAsync<int>(
-        "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = 100",
-        new { cref = referencia });
-
-            int guardadas = 0;
-            var errores = new List<string>();
-
-            for (int i = 0; i < fotos.Count; i++)
-            {
-                try
-                {
-                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(fotos[i]);
-                    if (foto == null)
-                    {
-                        errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
-                        continue;
-                    }
-
-                    await GuardarFotoAsync(conn, foto.Value, clienteCarpeta, referencia, 100, nextLine, usuarioActual);
-
-                    nextLine++;
-                    guardadas++;
-                }
-                catch (Exception exFoto)
-                {
-                    errores.Add($"Foto {i + 1}: {exFoto.Message}");
-                }
-            }
-
-            if (guardadas == 0)
-            {
-                string detalle = errores.Count > 0
-               ? string.Join(" | ", errores)
-               : "Ninguna imagen se pudo procesar.";
-                return new { success = false, message = $"Ruta destino: {carpetaDoc} — {detalle}" };
-            }
-
-            string aviso = errores.Count > 0 ? $" | Errores: {string.Join(", ", errores)}" : "";
-            return new { success = true, message = $"{guardadas} foto(s) guardada(s) en {carpetaDoc}{aviso}" };
-        }
-        catch (Exception ex)
-        {
-            return new { success = false, message = $"Error inesperado al guardar fotos: {ex.Message}" };
-        }
+    /// <summary>Igual que <see cref="GuardarFotosEntradaAsync"/>, con las fotos ya en bytes: llegaron como archivos (multipart).</summary>
+    public Task<object> GuardarFotosEntradaArchivosAsync(string referencia, IReadOnlyList<byte[]> fotos, string usuarioActual)
+    {
+        return GuardarFotosSueltasAsync(referencia, ComoFotos(fotos), usuarioActual, ntipodocto: 100);
     }
 
     /// <summary>
@@ -1210,8 +1156,35 @@ LIMIT @take", new { fromDate, take })).ToList(),
     /// GuardarFotosEntradaAsync (ntipodocto=100), usado cuando se agregan fotos de daño
     /// después del guardado inicial (edición) o si la cola offline las reintenta.
     /// </summary>
-    public async Task<object> GuardarFotosDanioEntradaAsync(string referencia, List<string> fotos, string usuarioActual)
+    public Task<object> GuardarFotosDanioEntradaAsync(string referencia, List<string> fotos, string usuarioActual)
     {
+        return GuardarFotosSueltasAsync(referencia, fotos.Select(DecodificarFoto).ToList(), usuarioActual, ntipodocto: 103);
+    }
+
+    /// <summary>Igual que <see cref="GuardarFotosDanioEntradaAsync"/>, con las fotos ya en bytes: llegaron como archivos (multipart).</summary>
+    public Task<object> GuardarFotosDanioEntradaArchivosAsync(string referencia, IReadOnlyList<byte[]> fotos, string usuarioActual)
+    {
+        return GuardarFotosSueltasAsync(referencia, ComoFotos(fotos), usuarioActual, ntipodocto: 103);
+    }
+
+    private static List<(byte[] Bytes, string Extension)?> ComoFotos(IReadOnlyList<byte[]> fotos)
+    {
+        return fotos
+            .Select(bytes => bytes is { Length: > 0 } ? ((byte[] Bytes, string Extension)?)(bytes, FotosRecibidas.ExtensionDe(bytes)) : null)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Fotos sueltas de una entrada ya registrada: evidencia (100) o daño (103), lleguen en base64 o como archivos. Cada
+    /// una toma el siguiente consecutivo de su tipo; una que no se pueda leer o guardar no detiene a las demás.
+    /// </summary>
+    private async Task<object> GuardarFotosSueltasAsync(
+        string referencia,
+        IReadOnlyList<(byte[] Bytes, string Extension)?> fotos,
+        string usuarioActual,
+        int ntipodocto)
+    {
+        string deQue = ntipodocto == 103 ? " de daño" : "";
         try
         {
             using IDbConnection conn = _db.CreateConnection();
@@ -1230,8 +1203,8 @@ LIMIT @take", new { fromDate, take })).ToList(),
             string carpetaDoc = Path.Combine(basePath, clienteCarpeta);
 
             int nextLine = await conn.ExecuteScalarAsync<int>(
-        "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = 103",
-        new { cref = referencia });
+        "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = @ntipodocto",
+        new { cref = referencia, ntipodocto });
 
             int guardadas = 0;
             var errores = new List<string>();
@@ -1240,14 +1213,14 @@ LIMIT @take", new { fromDate, take })).ToList(),
             {
                 try
                 {
-                    (byte[] Bytes, string Extension)? foto = DecodificarFoto(fotos[i]);
+                    (byte[] Bytes, string Extension)? foto = fotos[i];
                     if (foto == null)
                     {
                         errores.Add($"Foto {i + 1}: imagen vacía o formato inválido.");
                         continue;
                     }
 
-                    await GuardarFotoAsync(conn, foto.Value, clienteCarpeta, referencia, 103, nextLine, usuarioActual);
+                    await GuardarFotoAsync(conn, foto.Value, clienteCarpeta, referencia, ntipodocto, nextLine, usuarioActual);
 
                     nextLine++;
                     guardadas++;
@@ -1267,11 +1240,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
             }
 
             string aviso = errores.Count > 0 ? $" | Errores: {string.Join(", ", errores)}" : "";
-            return new { success = true, message = $"{guardadas} foto(s) de daño guardada(s) en {carpetaDoc}{aviso}" };
+            return new { success = true, message = $"{guardadas} foto(s){deQue} guardada(s) en {carpetaDoc}{aviso}" };
         }
         catch (Exception ex)
         {
-            return new { success = false, message = $"Error inesperado al guardar fotos de daño: {ex.Message}" };
+            return new { success = false, message = $"Error inesperado al guardar fotos{deQue}: {ex.Message}" };
         }
     }
 

@@ -299,13 +299,7 @@ public class FotoController : ControllerBase
     {
         try
         {
-            string creferencia = (payload.creferencia ?? "").Trim();
-            string cclienteid = payload.cclienteid;
-            string base64 = payload.image;
-            string usuario = base.User.Identity?.Name ?? "Desconocido";
-            string extRaw = (payload.extension ?? ".jpg").ToLowerInvariant().TrimStart('.');
-            HashSet<string> allowed = new HashSet<string> { "jpg", "jpeg", "png", "webp" };
-            if (!allowed.Contains(extRaw))
+            if (ExtensionDeRevision(payload.extension) is not { } extension)
             {
                 return BadRequest(new
                 {
@@ -313,7 +307,7 @@ public class FotoController : ControllerBase
                     message = "Tipo de archivo no permitido"
                 });
             }
-            string extension = PhotoFileNameResolver.NormalizeExtension(extRaw);
+            string base64 = payload.image;
             if (string.IsNullOrEmpty(base64))
             {
                 return BadRequest("No se recibió imagen");
@@ -323,67 +317,7 @@ public class FotoController : ControllerBase
                 base64 = base64.Split(',')[1];
             }
             byte[] imageBytes = Convert.FromBase64String(base64);
-            using IDbConnection conn = _db.CreateConnection();
-            conn.Open();
-            string lockName = $"lock_foto_{creferencia}";
-            var lockAcquired = await conn.ExecuteScalarAsync<int>("SELECT GET_LOCK(@lockName, 10)", new { lockName });
-            if (lockAcquired != 1)
-            {
-                return BadRequest(new { success = false, message = "No se pudo obtener el bloqueo para subir la fotografía. Intente de nuevo." });
-            }
-            try
-            {
-                // 103 = evidencia de discrepancia (mismo ntipodocto que daño de
-                // Entrada Bodega), 107 = evidencia normal de revisión.
-                int ntipodocto = payload.EsDiscrepancia ? 103 : 107;
-                string sqlCte = "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1";
-                string folder = ((await conn.ExecuteScalarAsync<string>(sqlCte, new
-                {
-                    id = cclienteid
-                })) ?? cclienteid).Trim();
-                string sqlMax = "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = @tipo";
-                int nextLine = await conn.ExecuteScalarAsync<int>(sqlMax, new
-                {
-                    cref = creferencia,
-                    tipo = ntipodocto
-                });
-
-                // Primero la foto (en la cola local: milisegundos, ya no la copia lenta al 23 dentro de la petición) y luego
-                // su fila; si la fila no entra, la foto se descarta. La copia al 23 y la mejora corren en segundo plano.
-                FotoClientePreparada preparada = await _clientePhotos.PrepararAsync(
-                    imageBytes, folder, creferencia, ntipodocto, nextLine, extension, HttpContext.RequestAborted);
-                int fotoId;
-                try
-                {
-                    string sqlIns = "INSERT INTO fotos (creferencia, nlineno, ntipodocto, cextension, fcrea, usucrea) VALUES (@cref, @line, @tipo, @ext, NOW(), @usu); SELECT LAST_INSERT_ID();";
-                    fotoId = await conn.ExecuteScalarAsync<int>(sqlIns, new
-                    {
-                        cref = creferencia,
-                        line = nextLine,
-                        tipo = ntipodocto,
-                        ext = extension,
-                        usu = usuario
-                    });
-                }
-                catch
-                {
-                    _clientePhotos.Descartar(preparada);
-                    throw;
-                }
-
-                _clientePhotos.Activar(preparada, fotoId);
-                await NotificarFotosActualizadasAsync(creferencia, usuario);
-                return Ok(new
-                {
-                    success = true,
-                    id = fotoId,
-                    fileName = preparada.Archivo
-                });
-            }
-            finally
-            {
-                await conn.ExecuteAsync("SELECT RELEASE_LOCK(@lockName)", new { lockName });
-            }
+            return await GuardarFotoRevisionAsync(payload.creferencia, payload.cclienteid, extension, payload.EsDiscrepancia, imageBytes);
         }
         catch (Exception exception)
         {
@@ -393,6 +327,145 @@ public class FotoController : ControllerBase
                 success = false,
                 message = "Error al guardar la fotografía"
             });
+        }
+    }
+
+    /// <summary>
+    /// Igual que <see cref="SubirFoto"/>, pero la foto llega como archivo (multipart, campo <c>foto</c>) y no como texto
+    /// base64, que la infla un 33 % por el internet de la oficina. Mismos campos y reglas: <c>creferencia</c>,
+    /// <c>cclienteid</c>, <c>extension</c> y <c>esDiscrepancia</c>.
+    /// </summary>
+    [HttpPost("subir/archivo")]
+    [RequiereModulo(MobileModuleIds.Review, "Agregar")]
+    public async Task<IActionResult> SubirFotoArchivo(
+        [FromForm] string? creferencia,
+        [FromForm] string? cclienteid,
+        [FromForm] string? extension,
+        [FromForm] bool esDiscrepancia,
+        IFormFile? foto)
+    {
+        try
+        {
+            if (ExtensionDeRevision(extension) is not { } ext)
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Tipo de archivo no permitido"
+                });
+            }
+
+            (List<byte[]> fotos, string? error) = await FotosRecibidas.LeerAsync(
+                foto == null ? null : new[] { foto }, HttpContext.RequestAborted);
+            if (error != null)
+            {
+                return BadRequest(new { success = false, message = error });
+            }
+
+            if (fotos.Count == 0)
+            {
+                return BadRequest("No se recibió imagen");
+            }
+
+            return await GuardarFotoRevisionAsync(creferencia, cclienteid, ext, esDiscrepancia, fotos[0]);
+        }
+        catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            return new EmptyResult();
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Error en SubirFotoArchivo");
+            return StatusCode(500, new
+            {
+                success = false,
+                message = "Error al guardar la fotografía"
+            });
+        }
+    }
+
+    /// <summary>La extensión ya normalizada (sin punto) si es una de las permitidas; null si no.</summary>
+    private static string? ExtensionDeRevision(string? extension)
+    {
+        string extRaw = (extension ?? ".jpg").ToLowerInvariant().TrimStart('.');
+        HashSet<string> allowed = new HashSet<string> { "jpg", "jpeg", "png", "webp" };
+        return allowed.Contains(extRaw) ? PhotoFileNameResolver.NormalizeExtension(extRaw) : null;
+    }
+
+    /// <summary>
+    /// Lo común de las dos rutas de subida de revisión: consecutivo bajo candado, la foto a la cola del almacén, su fila y
+    /// el aviso al monitor. Las excepciones las contesta quien llama.
+    /// </summary>
+    private async Task<IActionResult> GuardarFotoRevisionAsync(
+        string? creferenciaRecibida,
+        string? cclienteidRecibido,
+        string extension,
+        bool esDiscrepancia,
+        byte[] imageBytes)
+    {
+        string creferencia = (creferenciaRecibida ?? "").Trim();
+        string cclienteid = cclienteidRecibido ?? "";
+        string usuario = base.User.Identity?.Name ?? "Desconocido";
+        using IDbConnection conn = _db.CreateConnection();
+        conn.Open();
+        string lockName = $"lock_foto_{creferencia}";
+        var lockAcquired = await conn.ExecuteScalarAsync<int>("SELECT GET_LOCK(@lockName, 10)", new { lockName });
+        if (lockAcquired != 1)
+        {
+            return BadRequest(new { success = false, message = "No se pudo obtener el bloqueo para subir la fotografía. Intente de nuevo." });
+        }
+        try
+        {
+            // 103 = evidencia de discrepancia (mismo ntipodocto que daño de
+            // Entrada Bodega), 107 = evidencia normal de revisión.
+            int ntipodocto = esDiscrepancia ? 103 : 107;
+            string sqlCte = "SELECT COALESCE(NULLIF(carpeta,''), cidcte) FROM clientes WHERE cidcte = @id LIMIT 1";
+            string folder = ((await conn.ExecuteScalarAsync<string>(sqlCte, new
+            {
+                id = cclienteid
+            })) ?? cclienteid).Trim();
+            string sqlMax = "SELECT COALESCE(MAX(nlineno), 0) + 1 FROM fotos WHERE creferencia = @cref AND ntipodocto = @tipo";
+            int nextLine = await conn.ExecuteScalarAsync<int>(sqlMax, new
+            {
+                cref = creferencia,
+                tipo = ntipodocto
+            });
+
+            // Primero la foto (en la cola local: milisegundos, ya no la copia lenta al 23 dentro de la petición) y luego
+            // su fila; si la fila no entra, la foto se descarta. La copia al 23 y la mejora corren en segundo plano.
+            FotoClientePreparada preparada = await _clientePhotos.PrepararAsync(
+                imageBytes, folder, creferencia, ntipodocto, nextLine, extension, HttpContext.RequestAborted);
+            int fotoId;
+            try
+            {
+                string sqlIns = "INSERT INTO fotos (creferencia, nlineno, ntipodocto, cextension, fcrea, usucrea) VALUES (@cref, @line, @tipo, @ext, NOW(), @usu); SELECT LAST_INSERT_ID();";
+                fotoId = await conn.ExecuteScalarAsync<int>(sqlIns, new
+                {
+                    cref = creferencia,
+                    line = nextLine,
+                    tipo = ntipodocto,
+                    ext = extension,
+                    usu = usuario
+                });
+            }
+            catch
+            {
+                _clientePhotos.Descartar(preparada);
+                throw;
+            }
+
+            _clientePhotos.Activar(preparada, fotoId);
+            await NotificarFotosActualizadasAsync(creferencia, usuario);
+            return Ok(new
+            {
+                success = true,
+                id = fotoId,
+                fileName = preparada.Archivo
+            });
+        }
+        finally
+        {
+            await conn.ExecuteAsync("SELECT RELEASE_LOCK(@lockName)", new { lockName });
         }
     }
 
@@ -605,11 +678,14 @@ public class FotoController : ControllerBase
             ? null
             : new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{version}-{tamano.ToString().ToLowerInvariant()}\"");
 
-        return PhysicalFile(
+        // Sin versión no hay etiqueta: el resultado se arma a mano porque PhysicalFile(...) no acepta una etiqueta nula.
+        return new PhysicalFileResult(
             archivo.Ruta,
-            archivo.EsVariante ? "image/jpeg" : GetImageContentType(archivo.Ruta, extension),
-            new DateTimeOffset(DateTime.SpecifyKind(archivo.ModificadaUtc, DateTimeKind.Utc)),
-            etiqueta);
+            archivo.EsVariante ? "image/jpeg" : GetImageContentType(archivo.Ruta, extension))
+        {
+            LastModified = new DateTimeOffset(DateTime.SpecifyKind(archivo.ModificadaUtc, DateTimeKind.Utc)),
+            EntityTag = etiqueta
+        };
     }
 
     private sealed class CasetaFotoFila

@@ -1,45 +1,21 @@
 namespace PMMovil.Api.Services;
 
 /// <summary>
-/// Fotos de caseta que llegan como archivos (multipart) en vez de texto base64. El base64 infla cada foto un 33 %, y en
-/// caseta todo cruza el internet de la oficina (~13 Mbps de subida compartidos, medido el 18-nov-2026): como archivo, una
-/// salida de 8 fotos pasa de ~8.5 MB a ~6.4 MB. Las reglas son las mismas que las de las rutas con base64.
+/// Fotos de caseta que llegan como archivos (multipart) en vez de texto base64 (ver <see cref="FotosRecibidas"/>). Las
+/// reglas son las mismas que las de las rutas con base64.
 /// </summary>
 public static class CasetaFotosRecibidas
 {
-    /// <summary>Tope por foto: la app manda ~0.5-1.1 MB (2560 px, calidad 92); esto solo frena algo que no es una foto de la app.</summary>
-    public const long MaxBytesPorFoto = 15L * 1024 * 1024;
+    /// <summary>Tope por foto (el mismo de Entrada y Revisión).</summary>
+    public const long MaxBytesPorFoto = FotosRecibidas.MaxBytesPorFoto;
 
     public const int MaxFotosPorLoteEntrada = 4;
     public const int IndiceMaximoEntrada = 15;
 
     /// <summary>Lee los archivos de la petición. Devuelve el error a contestar si alguno está vacío o es demasiado grande.</summary>
-    public static async Task<(List<byte[]> Fotos, string? Error)> LeerAsync(IReadOnlyList<IFormFile>? archivos, CancellationToken ct)
+    public static Task<(List<byte[]> Fotos, string? Error)> LeerAsync(IReadOnlyList<IFormFile>? archivos, CancellationToken ct)
     {
-        var fotos = new List<byte[]>();
-        if (archivos == null)
-        {
-            return (fotos, null);
-        }
-
-        foreach (IFormFile archivo in archivos)
-        {
-            if (archivo.Length <= 0)
-            {
-                return (fotos, "Una foto llegó vacía.");
-            }
-
-            if (archivo.Length > MaxBytesPorFoto)
-            {
-                return (fotos, "Una foto es demasiado grande.");
-            }
-
-            using var memoria = new MemoryStream((int)archivo.Length);
-            await archivo.CopyToAsync(memoria, ct);
-            fotos.Add(memoria.ToArray());
-        }
-
-        return (fotos, null);
+        return FotosRecibidas.LeerAsync(archivos, ct);
     }
 
     /// <summary>Las mismas reglas que <c>CasetaService.SubirFotosSalidaAsync</c> (posiciones desde 1, lotes chicos).</summary>

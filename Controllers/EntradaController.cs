@@ -318,6 +318,52 @@ public class EntradaController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Igual que <see cref="GuardarFotosEntrada"/>, pero las fotos llegan como archivos (multipart: <c>referencia</c> y los
+    /// archivos <c>fotos</c>) y no como texto base64, que las infla un 33 % por el internet de la oficina.
+    /// </summary>
+    [HttpPost("fotos/archivos")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    public async Task<IActionResult> GuardarFotosEntradaArchivos([FromForm] string? referencia, [FromForm] List<IFormFile>? fotos)
+    {
+        return await GuardarFotosArchivosAsync(referencia, fotos, danio: false);
+    }
+
+    /// <summary>Igual que <see cref="GuardarFotosDanioEntrada"/>, con las fotos como archivos (multipart).</summary>
+    [HttpPost("fotos-danio/archivos")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    public async Task<IActionResult> GuardarFotosDanioEntradaArchivos([FromForm] string? referencia, [FromForm] List<IFormFile>? fotos)
+    {
+        return await GuardarFotosArchivosAsync(referencia, fotos, danio: true);
+    }
+
+    private async Task<IActionResult> GuardarFotosArchivosAsync(string? referencia, List<IFormFile>? fotos, bool danio)
+    {
+        if (string.IsNullOrWhiteSpace(referencia))
+            return BadRequest(new { success = false, message = "La referencia es obligatoria." });
+
+        (List<byte[]> recibidas, string? error) = await FotosRecibidas.LeerAsync(fotos, HttpContext.RequestAborted);
+        if (error != null)
+            return BadRequest(new { success = false, message = error });
+
+        if (recibidas.Count == 0)
+            return Ok(new { success = true, message = "Sin fotos que guardar." });
+
+        try
+        {
+            string usuarioActual = User.Identity?.Name ?? "sistema";
+            object result = danio
+                ? await _entradaService.GuardarFotosDanioEntradaArchivosAsync(referencia, recibidas, usuarioActual)
+                : await _entradaService.GuardarFotosEntradaArchivosAsync(referencia, recibidas, usuarioActual);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al guardar fotos{Tipo} de entrada para {Ref}", danio ? " de daño" : "", referencia);
+            return StatusCode(500, new { success = false, message = (danio ? "Error al guardar fotos de daño: " : "Error al guardar fotos: ") + ex.Message });
+        }
+    }
+
     [HttpGet("frecuentes")]
     public async Task<IActionResult> ObtenerFrecuentes([FromQuery] string tipo, [FromQuery] int limite = 8, [FromQuery] int dias = 90)
     {
