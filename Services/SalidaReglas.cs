@@ -275,6 +275,62 @@ public static class SalidaReglas
     public static string EscaparLike(string? texto)
         => (texto ?? "").Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
+    /// <summary>Tipo de dato del push cuando una relación se bloquea; la app lo usa para escoger canal y destino.</summary>
+    public const string PushTipoBloqueo = "salida_bloqueo";
+
+    /// <summary>Tipo de dato del push cuando un supervisor desbloquea una relación.</summary>
+    public const string PushTipoDesbloqueo = "salida_desbloqueo";
+
+    /// <summary>Texto del push a los supervisores cuando una relación se bloquea (escaneo rápido o etiqueta reimpresa).</summary>
+    public static (string Titulo, string Cuerpo) TextoPushBloqueo(string? relno, string? usuario, string? motivo, string? caja)
+    {
+        string cajaTexto = string.IsNullOrWhiteSpace(caja) ? "N/D" : caja.Trim();
+        string quien = string.IsNullOrWhiteSpace(usuario) ? "Un cargador" : usuario.Trim();
+        string porque = string.IsNullOrWhiteSpace(motivo) ? "La relación requiere revisión de supervisor." : motivo.Trim();
+        return (($"Relación bloqueada {relno?.Trim()}").TrimEnd(), $"{quien}: {porque} Caja {cajaTexto}.");
+    }
+
+    /// <summary>Texto del push al cargador cuando un supervisor le desbloquea la relación.</summary>
+    public static (string Titulo, string Cuerpo) TextoPushDesbloqueo(string? relno, string? supervisor)
+    {
+        string quien = string.IsNullOrWhiteSpace(supervisor) ? "Un supervisor" : supervisor.Trim();
+        return (($"Relación desbloqueada {relno?.Trim()}").TrimEnd(), $"{quien} desbloqueó la relación. Escanéala de nuevo para continuar.");
+    }
+
+    /// <summary>Datos que viajan con el push para que la app abra la pantalla correcta.</summary>
+    public static IDictionary<string, string> DatosPush(string tipo, string? relno)
+        => new Dictionary<string, string> { ["type"] = tipo, ["relno"] = (relno ?? "").Trim() };
+
+    /// <summary>
+    /// A quiénes de los usuarios con sesión se les manda el push: sin repetidos (sin importar mayúsculas), sin quien
+    /// provocó el aviso y solo los que <paramref name="debeRecibir"/> acepta (permiso sobre la relación).
+    /// </summary>
+    public static async Task<IReadOnlyList<string>> SeleccionarDestinatariosPushAsync(
+        IEnumerable<string> usuariosConSesion,
+        string? usuarioQueProvocoElAviso,
+        Func<string, Task<bool>> debeRecibir)
+    {
+        string operador = (usuarioQueProvocoElAviso ?? "").Trim();
+        var vistos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var elegidos = new List<string>();
+        foreach (string crudo in usuariosConSesion)
+        {
+            string usuario = (crudo ?? "").Trim();
+            if (usuario.Length == 0 || !vistos.Add(usuario)) continue;
+            if (operador.Length > 0 && string.Equals(usuario, operador, StringComparison.OrdinalIgnoreCase)) continue;
+            if (await debeRecibir(usuario)) elegidos.Add(usuario);
+        }
+        return elegidos;
+    }
+
+    /// <summary>True si el desbloqueo debe avisarle al cargador: hay un cargador real y no es quien desbloqueó.</summary>
+    public static bool DebeAvisarDesbloqueoAlCargador(string? usuarioCarga, string? supervisor)
+    {
+        string cargador = (usuarioCarga ?? "").Trim();
+        if (cargador.Length == 0 || string.Equals(cargador, "NO REQUERIDO", StringComparison.OrdinalIgnoreCase)) return false;
+        return !string.Equals(cargador, (supervisor ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Recorta un texto al largo de su columna (el legacy recortaba a 50 antes de insertar).</summary>
     public static string Recortar(string? texto, int max)
     {

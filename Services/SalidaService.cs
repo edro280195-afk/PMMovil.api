@@ -4,6 +4,7 @@ using Dapper;
 
 using Microsoft.AspNetCore.SignalR;
 
+using PMMovil.Api.Attributes;
 using PMMovil.Api.Data;
 using PMMovil.Api.Hubs;
 using PMMovil.Api.Models;
@@ -21,6 +22,7 @@ public class SalidaService
     private readonly ILogger<SalidaService> _logger;
     private readonly IHubContext<WarehouseHub> _hub;
     private readonly IRealtimeNotificationService _notifications;
+    private readonly IServiceScopeFactory _scopeFactory;
     // Temporalmente apagado por omisión. Se puede reactivar después con la configuración
     // Salida:RequireCasetaQrForEachPackage=true.
     private bool RequireCasetaQrForEachPackage =>
@@ -47,7 +49,8 @@ public class SalidaService
    IConfiguration config,
    ILogger<SalidaService> logger,
    IHubContext<WarehouseHub> hub,
-   IRealtimeNotificationService notifications)
+   IRealtimeNotificationService notifications,
+   IServiceScopeFactory scopeFactory)
     {
         _db = db;
         _smtp = smtp;
@@ -55,6 +58,7 @@ public class SalidaService
         _logger = logger;
         _hub = hub;
         _notifications = notifications;
+        _scopeFactory = scopeFactory;
     }
 
     private sealed record ScanSpeedReview(bool Bloqueado, int EtiquetasBloqueadas, string Motivo);
@@ -1268,6 +1272,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
             await _hub.Clients.Group(WarehouseHub.SupervisoresBloqueoGroup)
            .SendAsync("onSalidaBloqueada", notification);
             await _notifications.SendSalidaBloqueoAsync(notification, usuario);
+            EnviarPushBloqueoEnSegundoPlano(notification, usuario);
         }
         catch (Exception ex)
         {
@@ -2157,6 +2162,7 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
             if (!string.IsNullOrWhiteSpace(usuarioCarga))
             {
+                EnviarPushDesbloqueoEnSegundoPlano(relno, usuario, usuarioCarga);
                 await _hub.Clients.Group("USER_" + usuarioCarga)
                .SendAsync("onSalidaDesbloqueada", notification);
             }
@@ -2165,6 +2171,88 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
         result.Success = true;
         result.Message = accion == "BLOQUEO" ? "BLOQUEADO" : "DESBLOQUEADO";
         return result;
+    }
+
+    /// <summary>
+    /// Avisa por push (y a la bandeja de la app) a los supervisores con sesión activa que una relación se bloqueó.
+    /// Va en segundo plano y en su propio ámbito: el escaneo del cargador no espera a Firebase y un fallo aquí nunca lo
+    /// afecta. Apagador: <c>Salida:PushBloqueoEnabled=false</c>. Con <c>Salida:PushBloqueoExcluirSistemas=true</c> se deja
+    /// fuera a los usuarios de Sistemas (acceso total), que de otro modo cuentan como supervisores.
+    /// </summary>
+    private void EnviarPushBloqueoEnSegundoPlano(SalidaBloqueoNotification notification, string operador)
+    {
+        if (!_config.GetValue("Salida:PushBloqueoEnabled", true)) return;
+        bool excluirSistemas = _config.GetValue("Salida:PushBloqueoExcluirSistemas", false);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var notificaciones = scope.ServiceProvider.GetRequiredService<IRealtimeNotificationService>();
+                var permisos = scope.ServiceProvider.GetRequiredService<IModulePermissionService>();
+
+                var conSesion = await notificaciones.GetUsersWithActiveFcmSessionAsync();
+                var destinatarios = await SalidaReglas.SeleccionarDestinatariosPushAsync(
+                    conSesion,
+                    operador,
+                    async usuario =>
+                    {
+                        if (!await permisos.HasPermissionAsync(usuario, MobileModuleIds.WarehouseRelation, "Lectura")) return false;
+                        return !excluirSistemas || !await permisos.HasFullAccessAsync(usuario);
+                    });
+
+                if (destinatarios.Count == 0)
+                {
+                    _logger.LogInformation("Push de bloqueo {Relno}: no hay supervisores con sesión activa.", notification.Relno);
+                    return;
+                }
+
+                var (titulo, cuerpo) = SalidaReglas.TextoPushBloqueo(
+                    notification.Relno, notification.Usuario, notification.Motivo, notification.Caja);
+                foreach (string usuario in destinatarios)
+                {
+                    await notificaciones.SendToUserAsync(
+                        usuario,
+                        titulo,
+                        cuerpo,
+                        SalidaReglas.DatosPush(SalidaReglas.PushTipoBloqueo, notification.Relno));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "No se pudo enviar el push de bloqueo {Relno}.", notification.Relno);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Avisa por push (y a la bandeja de la app) al cargador que un supervisor le desbloqueó la relación. Mismas reglas
+    /// que el aviso de bloqueo: segundo plano, ámbito propio y el apagador <c>Salida:PushBloqueoEnabled</c>.
+    /// </summary>
+    private void EnviarPushDesbloqueoEnSegundoPlano(string relno, string supervisor, string usuarioCarga)
+    {
+        if (!_config.GetValue("Salida:PushBloqueoEnabled", true)) return;
+        if (!SalidaReglas.DebeAvisarDesbloqueoAlCargador(usuarioCarga, supervisor)) return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var notificaciones = scope.ServiceProvider.GetRequiredService<IRealtimeNotificationService>();
+                var (titulo, cuerpo) = SalidaReglas.TextoPushDesbloqueo(relno, supervisor);
+                await notificaciones.SendToUserAsync(
+                    usuarioCarga.Trim(),
+                    titulo,
+                    cuerpo,
+                    SalidaReglas.DatosPush(SalidaReglas.PushTipoDesbloqueo, relno));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "No se pudo enviar el push de desbloqueo {Relno}.", relno);
+            }
+        });
     }
 
     private static bool EsHistorialBloqueado(string? historial)

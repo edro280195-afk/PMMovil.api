@@ -16,6 +16,12 @@ public interface IRealtimeNotificationService
     Task<PushSubscriptionResult> RemoveFcmTokenAsync(string usuario, string token);
 
     /// <summary>
+    /// Usuarios con al menos un dispositivo con sesión activa y token FCM vigente. Sirve para escoger a quién avisar
+    /// por push sin recorrer a todos los usuarios del sistema.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetUsersWithActiveFcmSessionAsync();
+
+    /// <summary>
     /// Manda una notificación a TODOS los dispositivos/navegadores activos de
     /// un usuario (no a todos los usuarios). "data" son pares clave/valor que
     /// la app puede leer para navegar directo a la pantalla correspondiente.

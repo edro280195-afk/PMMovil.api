@@ -220,6 +220,16 @@ ON DUPLICATE KEY UPDATE
         return new PushSubscriptionResult { Success = true, Message = "Token FCM desactivado." };
     }
 
+    public async Task<IReadOnlyList<string>> GetUsersWithActiveFcmSessionAsync()
+    {
+        await EnsureSchemaAsync();
+
+        using IDbConnection conn = _db.CreatePmmutileriaConnection();
+        var usuarios = await conn.QueryAsync<string>(
+            "SELECT DISTINCT usuario FROM fcm_tokens WHERE active = 1 AND session_active = 1");
+        return usuarios.Where(usuario => !string.IsNullOrWhiteSpace(usuario)).ToList();
+    }
+
     public async Task SendToUserAsync(string usuario, string title, string body, IDictionary<string, string>? data = null)
     {
         await SendToUserOrInboxAsync(usuario, title, body, data);

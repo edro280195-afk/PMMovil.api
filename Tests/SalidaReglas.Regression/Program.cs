@@ -191,4 +191,48 @@ var rafagaSinRelacion = SalidaReglas.DetectarRafaga(new[] { Pendiente("P1"), R("
 Check(rafagaSinRelacion is not null && rafagaSinRelacion.Count >= 2,
     "Bultos directos cargados «sin relación» en ráfaga bloquean al cargar la relación, como en el legacy");
 
+// ── Push de bloqueo y desbloqueo (Firebase): textos, datos y destinatarios ───────────────────────────────
+
+Equal("salida_bloqueo", SalidaReglas.PushTipoBloqueo, "El tipo del push de bloqueo es el contrato con la app (no se renombra)");
+Equal("salida_desbloqueo", SalidaReglas.PushTipoDesbloqueo, "El tipo del push de desbloqueo es el contrato con la app (no se renombra)");
+
+const string motivoRafaga = "Escaneo rapido detectado. La relacion requiere revision de supervisor.";
+var (tituloBloqueo, cuerpoBloqueo) = SalidaReglas.TextoPushBloqueo("01I26106418-1", "ana.lopez", motivoRafaga, "TX-4821");
+Equal("Relación bloqueada 01I26106418-1", tituloBloqueo, "El título del push de bloqueo lleva la relación");
+Equal("ana.lopez: Escaneo rapido detectado. La relacion requiere revision de supervisor. Caja TX-4821.", cuerpoBloqueo,
+    "El cuerpo dice quién, por qué y la caja (igual que el push del navegador)");
+Check(SalidaReglas.TextoPushBloqueo("R1", "u", "m", "  ").Cuerpo.EndsWith("Caja N/D."), "Sin caja el push dice N/D");
+Check(SalidaReglas.TextoPushBloqueo("R1", null, "m", "C").Cuerpo.StartsWith("Un cargador: "), "Sin usuario el push dice «Un cargador»");
+Check(SalidaReglas.TextoPushBloqueo("R1", "u", "", "C").Cuerpo.Contains("revisión de supervisor"), "Sin motivo se usa uno por omisión");
+Equal("Relación bloqueada 01I1", SalidaReglas.TextoPushBloqueo("  01I1  ", "u", "m", "C").Titulo, "La relación del título va recortada");
+
+var (tituloDesbloqueo, cuerpoDesbloqueo) = SalidaReglas.TextoPushDesbloqueo("01I26106418-1", "maria.perez");
+Equal("Relación desbloqueada 01I26106418-1", tituloDesbloqueo, "El título del push de desbloqueo lleva la relación");
+Equal("maria.perez desbloqueó la relación. Escanéala de nuevo para continuar.", cuerpoDesbloqueo, "El cuerpo dice quién desbloqueó y qué hacer");
+Check(SalidaReglas.TextoPushDesbloqueo("R1", null).Cuerpo.StartsWith("Un supervisor desbloqueó"), "Sin supervisor el push dice «Un supervisor»");
+
+var datosPush = SalidaReglas.DatosPush(SalidaReglas.PushTipoBloqueo, " 01I26106418-1 ");
+Equal("salida_bloqueo", datosPush["type"], "El dato type viaja con el tipo");
+Equal("01I26106418-1", datosPush["relno"], "El dato relno viaja recortado");
+Equal("", SalidaReglas.DatosPush(SalidaReglas.PushTipoDesbloqueo, null)["relno"], "Sin relación el dato va vacío, no nulo");
+
+var conSesion = new[] { "ana.lopez", "ANA.LOPEZ", " maria.perez ", "carlos", "", "  ", "juan.sup" };
+var conPermiso = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "maria.perez", "juan.sup", "ana.lopez" };
+var elegidos = await SalidaReglas.SeleccionarDestinatariosPushAsync(conSesion, "Ana.Lopez", u => Task.FromResult(conPermiso.Contains(u)));
+Equal("maria.perez,juan.sup", string.Join(",", elegidos),
+    "Sin repetidos, sin quien provocó el bloqueo (aunque cambie la mayúscula), solo con permiso y recortados");
+int consultasPermiso = 0;
+await SalidaReglas.SeleccionarDestinatariosPushAsync(conSesion, "Ana.Lopez", u => { consultasPermiso++; return Task.FromResult(true); });
+Equal(3, consultasPermiso, "Solo se consulta el permiso de quien puede recibir (sin repetidos, vacíos ni el operador)");
+var todos = await SalidaReglas.SeleccionarDestinatariosPushAsync(conSesion, null, _ => Task.FromResult(true));
+Equal(4, todos.Count, "Sin operador conocido entran todos los usuarios con sesión, una sola vez");
+Equal(0, (await SalidaReglas.SeleccionarDestinatariosPushAsync(Array.Empty<string>(), "x", _ => Task.FromResult(true))).Count, "Sin sesiones no hay destinatarios");
+
+Check(SalidaReglas.DebeAvisarDesbloqueoAlCargador("ana.lopez", "maria.perez"), "El desbloqueo le avisa al cargador");
+Check(SalidaReglas.DebeAvisarDesbloqueoAlCargador("  ana.lopez  ", " maria.perez "), "Los espacios no cambian la decisión");
+Check(!SalidaReglas.DebeAvisarDesbloqueoAlCargador("Ana.Lopez", "ana.lopez"), "Si el cargador es quien desbloquea no se avisa a sí mismo");
+Check(!SalidaReglas.DebeAvisarDesbloqueoAlCargador("", "maria.perez"), "Sin cargador no hay a quién avisar");
+Check(!SalidaReglas.DebeAvisarDesbloqueoAlCargador(null, "maria.perez"), "Cargador nulo no recibe aviso");
+Check(!SalidaReglas.DebeAvisarDesbloqueoAlCargador("NO REQUERIDO", "maria.perez"), "«NO REQUERIDO» no es una persona");
+
 Console.WriteLine($"SalidaReglas.Regression: {checks} comprobaciones correctas.");
