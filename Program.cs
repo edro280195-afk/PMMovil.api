@@ -168,9 +168,9 @@ try
     builder.Services.AddScoped<LabelCaptureService>();
     builder.Services.AddScoped<EtiquetaGrupoClienteService>();
     builder.Services.AddScoped<RevisionNormalCompletionService>();
+    builder.Services.AddScoped<CarpetaTomaService>();
     builder.Services.AddScoped<TrazabilidadService>();
     builder.Services.AddScoped<HomeSummaryService>();
-    builder.Services.AddScoped<CarpetaTomaService>();
     builder.Services.AddScoped<RevisionReportPdfService>();
     builder.Services.AddScoped<WarehouseLayoutService>();
     builder.Services.AddScoped<ClaseModelService>();

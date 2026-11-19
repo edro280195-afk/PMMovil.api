@@ -205,13 +205,9 @@ public static class EntradaAvisoCaptura
 </table>
 {botonFotos}";
 
+        _ = destino;
         string html = $@"<html><body style='font-family:Arial,sans-serif;color:#333;'>
 <div style='max-width:660px;margin:0 auto;'>
-<div style='background:#fff4e5;border:1px solid #f6d3a2;border-radius:8px;padding:12px 14px;margin-bottom:18px;color:#7a4a12;font-size:13px;line-height:1.5'>
-<b>CORREO DE PRUEBA{(esEdicion ? " (entrada actualizada)" : "")}.</b> Llega únicamente a {E(destino)}.<br>
-Sirve para ver (1) cómo quedó la captura hecha en el teléfono y (2) cómo se vería la notificación de entrada. PMMovil no manda esta
-notificación al cliente: la envía Gladys desde el sistema PMM (Visual FoxPro), que es quien complementa la información de la entrada.
-</div>
 <div style='font-size:11px;letter-spacing:.08em;color:#667089;margin:0 0 4px'>1 · ASÍ SE VERÍA LA NOTIFICACIÓN</div>
 <div style='border:1px solid #e1e6f0;border-radius:8px;padding:16px;margin-bottom:22px'>{notificacion}
 <p style='margin:18px 0 0;font-size:0.85em;color:#666;'>Este correo se genera automáticamente al registrar la recepción en bodega.</p></div>

@@ -520,8 +520,13 @@ public class FotoController : ControllerBase
             else if (ntipodocto == 103)
             {
                 canDelete = puedeBorrarFotoRevision
-                    || await _permissionService.HasPermissionAsync(
-                    username, MobileModuleIds.WarehouseOperations, "Borrar", HttpContext.RequestAborted);
+                    || await EntradaFotoPermisos.PuedeEliminarAsync(
+                        _permissionService, username, HttpContext.RequestAborted);
+            }
+            else if (ntipodocto == 100)
+            {
+                canDelete = await EntradaFotoPermisos.PuedeEliminarAsync(
+                    _permissionService, username, HttpContext.RequestAborted);
             }
             else
             {

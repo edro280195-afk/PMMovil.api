@@ -6,6 +6,8 @@ using Dapper;
 
 using Microsoft.Extensions.Configuration;
 
+using MySqlConnector;
+
 using PMMovil.Api.Data;
 using PMMovil.Api.Models;
 
@@ -14,6 +16,13 @@ namespace PMMovil.Api.Services;
 public interface IEntradaShareService
 {
     Task<(string Token, DateTime Expira)?> GenerarLinkAsync(string cref, string usuario);
+
+    /// <summary>
+    /// Al registrar una entrada de bodega: crea UNA vez el enlace público con vigencia de 3 meses y lo deja armado en
+    /// <c>pmmutileria.entrada_enlaces_envio</c> para que otro sistema (PMM/VFP) lo mande. Si la entrada ya lo tiene, regresa el
+    /// mismo. NUNCA lanza: el enlace es un extra y no puede tumbar el guardado; si algo falla lo registra y regresa null.
+    /// </summary>
+    Task<EntradaEnlaceEnvio?> AsegurarEnlaceEnvioAsync(string cref, string usuario);
     Task<EntradaShareResumen?> ObtenerResumenAsync(string token);
 
     /// <summary>Foto de EVIDENCIA de la entrada (ntipodocto 100).</summary>
@@ -56,6 +65,7 @@ public class EntradaShareService : IEntradaShareService
     private const int TipoDanio = 103;
 
     private readonly BaseRepository _db;
+    private readonly IConfiguration _config;
     private readonly ILogger<EntradaShareService> _logger;
 
     // Las fotos se leen por el almacén: una recién subida aún no está en el 23 y el enlace debe mostrarla igual.
@@ -64,6 +74,7 @@ public class EntradaShareService : IEntradaShareService
     public EntradaShareService(BaseRepository db, IConfiguration config, ILogger<EntradaShareService> logger, ClientePhotoStorage fotos)
     {
         _db = db;
+        _config = config;
         _logger = logger;
         _fotos = fotos;
     }
@@ -81,6 +92,22 @@ public class EntradaShareService : IEntradaShareService
             return null;
         }
 
+        DateTime expira = DateTime.Now.Add(Vigencia);
+
+        using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
+        (string token, _) = await InsertarLinkAsync(utilConn, null, cref, usuario, expira);
+
+        _logger.LogInformation("Link de seguimiento generado para {Cref} por {Usuario}, expira {Expira}", cref, usuario, expira);
+        return (token, expira);
+    }
+
+    /// <summary>
+    /// Crea el token y lo registra en <c>entrada_links_compartidos</c>: lo que valida la página pública. Regresa el token en
+    /// claro (solo existe aquí, en memoria) y el <c>id_link</c> de la fila.
+    /// </summary>
+    private static async Task<(string Token, long IdLink)> InsertarLinkAsync(
+        IDbConnection utilConn, IDbTransaction? tran, string cref, string usuario, DateTime expira)
+    {
         string token = Guid.NewGuid().ToString("N");
         // El token real ya NO se guarda en texto plano -- solo su hash
         // (para validar) y un "hint" de 8 caracteres en la columna legacy
@@ -88,18 +115,134 @@ public class EntradaShareService : IEntradaShareService
         // algún día hace falta ubicar un enlace a simple vista en soporte.
         // Si pmmutileria alguna vez se filtra, un enlace vigente ya no queda
         // usable de inmediato solo con leer la tabla.
+        // (El enlace de ENVÍO a otro sistema sí lleva el token en claro, por diseño: ver AsegurarEnlaceEnvioAsync.)
         string tokenHash = ShareTokenHasher.Hash(token);
         string tokenHint = token[..8];
-        DateTime expira = DateTime.Now.Add(Vigencia);
 
-        using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
-        await utilConn.ExecuteAsync(
+        long idLink = await utilConn.ExecuteScalarAsync<long>(
             @"INSERT INTO entrada_links_compartidos (token, token_hash, cref_agrupada, usucrea, fexpira)
-              VALUES (@tokenHint, @tokenHash, @cref, @usuario, @expira)",
-            new { tokenHint, tokenHash, cref, usuario, expira });
+              VALUES (@tokenHint, @tokenHash, @cref, @usuario, @expira);
+              SELECT LAST_INSERT_ID();",
+            new { tokenHint, tokenHash, cref, usuario, expira },
+            transaction: tran);
 
-        _logger.LogInformation("Link de seguimiento generado para {Cref} por {Usuario}, expira {Expira}", cref, usuario, expira);
-        return (token, expira);
+        return (token, idLink);
+    }
+
+    /// <summary>
+    /// Enlace de ENVÍO de una entrada recién registrada, para que el otro sistema (PMM / Visual FoxPro) lo mande al cliente:
+    /// una fila por entrada en <c>pmmutileria.entrada_enlaces_envio</c> con la URL completa y el token, vencimiento a 3 meses.
+    ///
+    /// Por qué existe además de <c>entrada_links_compartidos</c>: esa solo guarda el hash del token (de ahí no se puede armar
+    /// la URL). Aquí el token SÍ va en claro porque ese es justamente el dato que el otro sistema necesita; la página pública
+    /// sigue validando contra <c>entrada_links_compartidos</c> (por eso se crea la fila allá con los mismos 3 meses y esta la
+    /// referencia por <c>id_link</c>). Quien pueda leer esta tabla puede abrir esos enlaces mientras no venzan: darle al
+    /// usuario de base de datos del otro sistema solo SELECT y UPDATE de las columnas de envío.
+    ///
+    /// Idempotente (llave única por referencia): un reintento o un doble guardado regresa el mismo enlace. Las dos filas se
+    /// crean en una transacción, así no queda un token sin su fila de envío ni al revés.
+    /// </summary>
+    public async Task<EntradaEnlaceEnvio?> AsegurarEnlaceEnvioAsync(string cref, string usuario)
+    {
+        cref = (cref ?? string.Empty).Trim();
+        try
+        {
+            if (cref.Length == 0)
+            {
+                return null;
+            }
+
+            // Sin una base pública válida no se crea nada: una URL que no abre es peor que no tener enlace.
+            string? baseUrl = _config["PublicLinks:ApiBaseUrl"];
+            if (EntradaEnlaceEnvioReglas.ConstruirUrl(baseUrl, "0") == null)
+            {
+                _logger.LogWarning(
+                    "Enlace de envío de la entrada {Cref}: falta PublicLinks:ApiBaseUrl o no es una URL http(s) válida ('{Base}'); no se creó.",
+                    cref, baseUrl);
+                return null;
+            }
+
+            // Mismo candado que GenerarLinkAsync: no hay enlaces de referencias que no existen.
+            using IDbConnection trafConn = _db.CreateConnection();
+            int? existe = await trafConn.QueryFirstOrDefaultAsync<int?>(
+                "SELECT 1 FROM traf WHERE creferencia = @cref LIMIT 1", new { cref });
+            if (existe == null)
+            {
+                _logger.LogWarning("Enlace de envío: la entrada {Cref} no existe en traf; no se creó.", cref);
+                return null;
+            }
+
+            using IDbConnection utilConn = _db.CreatePmmutileriaConnection();
+            utilConn.Open();
+
+            EntradaEnlaceEnvio? previo = await LeerEnlaceEnvioAsync(utilConn, cref);
+            if (previo != null)
+            {
+                return previo;
+            }
+
+            DateTime expira = EntradaEnlaceEnvioReglas.Expira(DateTime.Now);
+            try
+            {
+                using IDbTransaction tran = utilConn.BeginTransaction();
+                (string token, long idLink) = await InsertarLinkAsync(utilConn, tran, cref, usuario, expira);
+                string url = EntradaEnlaceEnvioReglas.ConstruirUrl(baseUrl, token)!;
+
+                await utilConn.ExecuteAsync(
+                    @"INSERT INTO entrada_enlaces_envio (creferencia, id_link, token, url, usucrea, fexpira)
+                      VALUES (@cref, @idLink, @token, @url, @usuario, @expira)",
+                    new { cref, idLink, token, url, usuario, expira },
+                    transaction: tran);
+
+                tran.Commit();
+
+                _logger.LogInformation(
+                    "Enlace de envío creado para la entrada {Cref} por {Usuario}, expira {Expira}", cref, usuario, expira);
+                return new EntradaEnlaceEnvio { Creferencia = cref, Token = token, Url = url, Expira = expira, Creado = true };
+            }
+            catch (MySqlException ex) when (ex.Number == 1062)
+            {
+                // Otro guardado de la misma entrada se nos adelantó (la transacción se deshizo sola al salir del using):
+                // se regresa el enlace que ya quedó.
+                return await LeerEnlaceEnvioAsync(utilConn, cref);
+            }
+        }
+        catch (MySqlException ex) when (ex.Number == 1146)
+        {
+            _logger.LogWarning(
+                "Enlace de envío de la entrada {Cref}: no existe la tabla pmmutileria.entrada_enlaces_envio (o entrada_links_compartidos). " +
+                "Falta correr Database/Migrations/20261110_entrada_enlaces_envio.sql; la entrada se registró sin enlace.", cref);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Enlace de envío de la entrada {Cref}: no se pudo crear; la entrada se registró sin enlace.", cref);
+            return null;
+        }
+    }
+
+    private static async Task<EntradaEnlaceEnvio?> LeerEnlaceEnvioAsync(IDbConnection utilConn, string cref)
+    {
+        // Clase tipada con alias explícitos (no dynamic, no snake_case): ver la memoria «Dapper snake_case mapping».
+        EnlaceEnvioRow? fila = await utilConn.QueryFirstOrDefaultAsync<EnlaceEnvioRow>(
+            @"SELECT creferencia AS Creferencia, token AS Token, url AS Url, fexpira AS Fexpira
+              FROM entrada_enlaces_envio
+              WHERE creferencia = @cref
+              LIMIT 1",
+            new { cref });
+
+        return fila == null
+            ? null
+            : new EntradaEnlaceEnvio { Creferencia = fila.Creferencia, Token = fila.Token, Url = fila.Url, Expira = fila.Fexpira, Creado = false };
+    }
+
+    /// <summary>Fila cruda de entrada_enlaces_envio para LeerEnlaceEnvioAsync -- solo uso interno.</summary>
+    private class EnlaceEnvioRow
+    {
+        public string Creferencia { get; set; } = string.Empty;
+        public string Token { get; set; } = string.Empty;
+        public string Url { get; set; } = string.Empty;
+        public DateTime Fexpira { get; set; }
     }
 
     public async Task<EntradaShareResumen?> ObtenerResumenAsync(string token)

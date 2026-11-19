@@ -28,14 +28,18 @@ public class EntradaService
     private readonly ILogger<EntradaService> _logger;
     // Fotos de la entrada (100) y de su daño (103): pasan por el almacén (cola local y copia al 23 en segundo plano).
     private readonly ClientePhotoStorage _fotos;
+    private readonly IEntradaShareService _share;
 
-    public EntradaService(BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger, ClientePhotoStorage fotos)
+    public EntradaService(
+        BaseRepository db, IConfiguration config, IHostEnvironment env, ILogger<EntradaService> logger, ClientePhotoStorage fotos,
+        IEntradaShareService share)
     {
         _db = db;
         _config = config;
         _env = env;
         _logger = logger;
         _fotos = fotos;
+        _share = share;
     }
 
     public async Task<ConsecutivoResult> ObtenerConsecutivoAsync()
@@ -871,6 +875,12 @@ LIMIT @take", new { fromDate, take })).ToList(),
             await EntradaDanioSeguimiento.RegistrarEsperadasAsync(
                 _db, _logger, referencia,
                 EntradaDanioSeguimiento.EsperadasAlGuardar(datos.Danada, fotosDanioInline, datos.FotosDanioPendientes));
+
+            // Enlace web de la entrada (vigente 3 meses) para el otro sistema (PMM/VFP): queda armado en
+            // pmmutileria.entrada_enlaces_envio y ellos lo toman de ahí para mandarlo. Solo al REGISTRAR (no al editar:
+            // reabrir una entrada vieja no debe fabricar un enlace "pendiente de enviar"). Nunca lanza: si falla, la
+            // entrada ya está guardada y el motivo queda en el registro del API.
+            await _share.AsegurarEnlaceEnvioAsync(referencia, usuarioActual);
 
             DebugLog.Write("GUARDAR_ENTRADA_OK", new { idtraf, referencia });
 

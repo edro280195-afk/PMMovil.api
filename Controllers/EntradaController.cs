@@ -17,17 +17,20 @@ public class EntradaController : ControllerBase
     private readonly EntradaService _entradaService;
     private readonly IEntradaShareService _shareService;
     private readonly EntradaAvisoCapturaService _avisoCapturaService;
+    private readonly IModulePermissionService _permissionService;
     private readonly ILogger<EntradaController> _logger;
 
     public EntradaController(
         EntradaService entradaService,
         IEntradaShareService shareService,
         EntradaAvisoCapturaService avisoCapturaService,
+        IModulePermissionService permissionService,
         ILogger<EntradaController> logger)
     {
         _entradaService = entradaService;
         _shareService = shareService;
         _avisoCapturaService = avisoCapturaService;
+        _permissionService = permissionService;
         _logger = logger;
     }
 
@@ -273,9 +276,16 @@ public class EntradaController : ControllerBase
     }
 
     [HttpPost("fotos")]
-    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Lectura")]
     public async Task<IActionResult> GuardarFotosEntrada([FromBody] GuardarFotosEntradaRequest req)
     {
+        string? username = User.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(username)
+            || !await EntradaFotoPermisos.PuedeSubirAsync(_permissionService, username, HttpContext.RequestAborted))
+        {
+            return Forbid();
+        }
+
         if (string.IsNullOrWhiteSpace(req.Referencia))
             return BadRequest(new { success = false, message = "La referencia es obligatoria." });
 
@@ -284,8 +294,7 @@ public class EntradaController : ControllerBase
 
         try
         {
-            string usuarioActual = User.Identity?.Name ?? "sistema";
-            var result = await _entradaService.GuardarFotosEntradaAsync(req.Referencia, req.Fotos, usuarioActual);
+            var result = await _entradaService.GuardarFotosEntradaAsync(req.Referencia, req.Fotos, username);
             return Ok(result);
         }
         catch (Exception ex)
@@ -296,9 +305,16 @@ public class EntradaController : ControllerBase
     }
 
     [HttpPost("fotos-danio")]
-    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Lectura")]
     public async Task<IActionResult> GuardarFotosDanioEntrada([FromBody] GuardarFotosEntradaRequest req)
     {
+        string? username = User.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(username)
+            || !await EntradaFotoPermisos.PuedeSubirAsync(_permissionService, username, HttpContext.RequestAborted))
+        {
+            return Forbid();
+        }
+
         if (string.IsNullOrWhiteSpace(req.Referencia))
             return BadRequest(new { success = false, message = "La referencia es obligatoria." });
 
@@ -307,8 +323,7 @@ public class EntradaController : ControllerBase
 
         try
         {
-            string usuarioActual = User.Identity?.Name ?? "sistema";
-            var result = await _entradaService.GuardarFotosDanioEntradaAsync(req.Referencia, req.Fotos, usuarioActual);
+            var result = await _entradaService.GuardarFotosDanioEntradaAsync(req.Referencia, req.Fotos, username);
             return Ok(result);
         }
         catch (Exception ex)
@@ -323,7 +338,7 @@ public class EntradaController : ControllerBase
     /// archivos <c>fotos</c>) y no como texto base64, que las infla un 33 % por el internet de la oficina.
     /// </summary>
     [HttpPost("fotos/archivos")]
-    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Lectura")]
     public async Task<IActionResult> GuardarFotosEntradaArchivos([FromForm] string? referencia, [FromForm] List<IFormFile>? fotos)
     {
         return await GuardarFotosArchivosAsync(referencia, fotos, danio: false);
@@ -331,7 +346,7 @@ public class EntradaController : ControllerBase
 
     /// <summary>Igual que <see cref="GuardarFotosDanioEntrada"/>, con las fotos como archivos (multipart).</summary>
     [HttpPost("fotos-danio/archivos")]
-    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Agregar")]
+    [RequiereModulo(MobileModuleIds.WarehouseOperations, "Lectura")]
     public async Task<IActionResult> GuardarFotosDanioEntradaArchivos([FromForm] string? referencia, [FromForm] List<IFormFile>? fotos)
     {
         return await GuardarFotosArchivosAsync(referencia, fotos, danio: true);
@@ -339,6 +354,13 @@ public class EntradaController : ControllerBase
 
     private async Task<IActionResult> GuardarFotosArchivosAsync(string? referencia, List<IFormFile>? fotos, bool danio)
     {
+        string? username = User.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(username)
+            || !await EntradaFotoPermisos.PuedeSubirAsync(_permissionService, username, HttpContext.RequestAborted))
+        {
+            return Forbid();
+        }
+
         if (string.IsNullOrWhiteSpace(referencia))
             return BadRequest(new { success = false, message = "La referencia es obligatoria." });
 
@@ -351,10 +373,9 @@ public class EntradaController : ControllerBase
 
         try
         {
-            string usuarioActual = User.Identity?.Name ?? "sistema";
             object result = danio
-                ? await _entradaService.GuardarFotosDanioEntradaArchivosAsync(referencia, recibidas, usuarioActual)
-                : await _entradaService.GuardarFotosEntradaArchivosAsync(referencia, recibidas, usuarioActual);
+                ? await _entradaService.GuardarFotosDanioEntradaArchivosAsync(referencia, recibidas, username)
+                : await _entradaService.GuardarFotosEntradaArchivosAsync(referencia, recibidas, username);
             return Ok(result);
         }
         catch (Exception ex)

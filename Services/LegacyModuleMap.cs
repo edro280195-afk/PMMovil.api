@@ -56,6 +56,11 @@ public static class LegacyModuleMap
     ///   <see cref="IsGrantedToUser"/>).</item>
     ///   <item>Monitor, Analítica y Reportes de Sistemas, que ya cubre el
     ///   acceso integral del departamento de Sistemas.</item>
+    ///   <item>Monitoreo de Coordinación de Tráfico (168). Antes heredaba del
+    ///   módulo histórico 28 "Tráfico", que tiene decenas de personas del
+    ///   equipo; el tablero es solo para los coordinadores, así que se concede
+    ///   únicamente con una fila propia en <c>accesos</c> (ver
+    ///   scripts/12-asignar-permisos-coordinacion-trafico-168.sql).</item>
     /// </list>
     /// </summary>
     private static readonly Dictionary<int, int[]> Equivalences = new()

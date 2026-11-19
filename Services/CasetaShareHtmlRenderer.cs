@@ -152,7 +152,7 @@ public static class CasetaShareHtmlRenderer
             ["TILES"] = total == 0
                 ? $@"<div class=""empty"">{Icono("camera", 34, 1.6)}Todavía no hay fotos de esta {(salida ? "salida" : "entrada")}.</div>"
                 : tiles.ToString(),
-            ["PASOS"] = pasosHtml,
+            // ["PASOS"] = pasosHtml,
             ["DOCK"] = dock,
             ["DATOS"] = datos.ToString(),
             ["JS"] = Js

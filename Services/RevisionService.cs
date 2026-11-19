@@ -1517,24 +1517,23 @@ new { creferencia });
         int rows = await conn.ExecuteAsync(sql, new { valor, usuario, id });
 
 
+        // Cada vez que cambia el peso de la partida (Peso lb o Peso kg: la pantalla manda siempre libras), la cantidad
+        // tarifa se actualiza con el peso que corresponde a la UMT elegida (KG -> kilos, LB -> libras). Antes solo se
+        // llenaba cuando ncanttarifa estaba en 0 y copiaba las libras tal cual aunque la UMT fuera KG. Con una UMT que
+        // no es de peso (litros, piezas...) no se toca. Ver RevisionPesoTarifa.
         if (rows > 0 && campo.Equals("npeso", StringComparison.OrdinalIgnoreCase) &&
-            decimal.TryParse(valor, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal pesoKg))
+            decimal.TryParse(valor, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal pesoLibras))
         {
-            dynamic? datos = await conn.QueryFirstOrDefaultAsync<object>(
-                "SELECT cunidadtarifa, ncanttarifa FROM revdet WHERE idrevdet = @id",
+            string? umt = await conn.ExecuteScalarAsync<string?>(
+                "SELECT cunidadtarifa FROM revdet WHERE idrevdet = @id",
                 new { id });
 
-            if (datos != null)
+            decimal? cantidadTarifa = RevisionPesoTarifa.CantidadTarifaPorPeso(umt, pesoLibras);
+            if (cantidadTarifa.HasValue)
             {
-                string umt = ((string?)datos.cunidadtarifa ?? "").Trim();
-                decimal ncanttarifaActual = (decimal)datos.ncanttarifa;
-
-                if (umt.Equals("KG", StringComparison.OrdinalIgnoreCase) && ncanttarifaActual == 0)
-                {
-                    await conn.ExecuteAsync(
-                        "UPDATE revdet SET ncanttarifa = @valor, usumodi = @usuario, fmodi = NOW() WHERE idrevdet = @id",
-                        new { valor = pesoKg, usuario, id });
-                }
+                await conn.ExecuteAsync(
+                    "UPDATE revdet SET ncanttarifa = @valor, usumodi = @usuario, fmodi = NOW() WHERE idrevdet = @id",
+                    new { valor = cantidadTarifa.Value, usuario, id });
             }
         }
 

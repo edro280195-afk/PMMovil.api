@@ -69,4 +69,16 @@ public static class MobileModuleIds
     /// ejecutar -- requiere revisión del responsable de BD, igual que 163).
     /// </summary>
     public const int ReportValidation = 164;
+
+    /// <summary>
+    /// Monitoreo operativo para coordinadores de tráfico (Nuevo Laredo).
+    /// Permite dar seguimiento al avance de los revisadores y a las entradas
+    /// ya revisadas sin otorgar permisos de supervisión (sin kill switch, autorizaciones ni edición de metas).
+    ///
+    /// Alta en pmmtraf.modulos: scripts/11-registrar-modulo-coordinacion-trafico-168.sql.
+    /// Permisos: solo con fila propia en accesos (no hereda del módulo 28 "Tráfico");
+    /// hoy los coordinadores tatis y amedina, ver
+    /// scripts/12-asignar-permisos-coordinacion-trafico-168.sql.
+    /// </summary>
+    public const int TrafficCoordinationMonitor = 168;
 }

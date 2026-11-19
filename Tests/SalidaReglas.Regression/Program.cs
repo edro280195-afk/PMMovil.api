@@ -130,4 +130,65 @@ Equal("[inicio]", SalidaReglas.AplicarPlantilla("[inicio]", valoresCorreo, html:
 Equal(@"100\%\_x\\", SalidaReglas.EscaparLike(@"100%_x\"), "Se escapan %, _ y la diagonal");
 Equal("01I2610", SalidaReglas.EscaparLike("01I2610"), "Un número normal no cambia");
 
+// ── Bultos cargados «sin relación» y luego agrupados en una relación (01I26106890, 17-nov-2026) ──────────
+// El legacy cuenta como cargado todo bulto con hora de escaneo, esté o no asignado a la relación; el API exigía además que
+// estuviera asignado a ella, y por eso el legacy mostraba 29 DE 37 y la app 0 DE 37.
+// Espejo del legacy (GetEtiqEntradas): solo se marca error cuando el bulto YA escaneado está asignado a OTRA relación.
+
+const string rel = "01I26106890";
+Check(SalidaReglas.BultoCuentaComoCargado(tieneHoraDeEscaneo: true), "Con hora de escaneo cuenta como cargado (sin importar la relación)");
+Check(!SalidaReglas.BultoCuentaComoCargado(tieneHoraDeEscaneo: false), "Sin hora de escaneo no está cargado");
+
+Check(!SalidaReglas.BultoEsDeOtraRelacion("", rel, tieneHoraDeEscaneo: true), "Escaneado sin relación (transbordo/directa) no es error");
+Check(!SalidaReglas.BultoEsDeOtraRelacion(null, rel, tieneHoraDeEscaneo: true), "Relación nula no es error");
+Check(!SalidaReglas.BultoEsDeOtraRelacion("  ", rel, tieneHoraDeEscaneo: true), "Relación en blanco no es error");
+Check(!SalidaReglas.BultoEsDeOtraRelacion(rel, rel, tieneHoraDeEscaneo: true), "Escaneado y asignado a esta relación no es error");
+Check(!SalidaReglas.BultoEsDeOtraRelacion(rel + " ", rel, tieneHoraDeEscaneo: true), "Un espacio al final no cambia la relación (el legacy recorta)");
+Check(SalidaReglas.BultoEsDeOtraRelacion("01I26106888", rel, tieneHoraDeEscaneo: true), "Escaneado y asignado a OTRA relación sí es error (ENTRADA DE OTRA RELACION AGRUPADA)");
+Check(!SalidaReglas.BultoEsDeOtraRelacion("01I26106888", rel, tieneHoraDeEscaneo: false),
+    "Asignado a otra relación pero SIN escanear no es error: el legacy lo muestra pendiente y al escanearlo se reasigna");
+Check(!SalidaReglas.BultoEsDeOtraRelacion(rel, rel, tieneHoraDeEscaneo: false), "Asignado a esta relación y sin escanear (FALTA) no es error");
+
+// Reproducción del caso real: 6 entradas, 37 bultos; 27 cargados sin relación + 3 ya asignados + 7 sin escanear.
+var bultos = new (string Relacion, bool Escaneado)[37];
+for (int i = 0; i < 27; i++) bultos[i] = ("", true);
+for (int i = 27; i < 30; i++) bultos[i] = (rel, true);
+for (int i = 30; i < 37; i++) bultos[i] = ("", false);
+Equal(30, bultos.Count(b => SalidaReglas.BultoCuentaComoCargado(b.Escaneado)), "El legacy veía 30 DE 37 (antes de la corrección el API contaba 3)");
+Equal(3, bultos.Count(b => b.Escaneado && b.Relacion == rel), "La regla anterior (asignado a esta relación) solo contaba 3");
+Equal(0, bultos.Count(b => SalidaReglas.BultoEsDeOtraRelacion(b.Relacion, rel, b.Escaneado)), "Ninguno de los 37 es de otra relación");
+
+// Un bulto escaneado en otra relación cuenta como cargado (como el legacy) y además marca el error.
+var mezcla = new (string Relacion, bool Escaneado)[] { ("", true), ("01I26106888", true), ("01I26106888", false), (rel, false) };
+Equal(2, mezcla.Count(b => SalidaReglas.BultoCuentaComoCargado(b.Escaneado)), "Cargados = los que tienen hora, estén donde estén");
+Equal(1, mezcla.Count(b => SalidaReglas.BultoEsDeOtraRelacion(b.Relacion, rel, b.Escaneado)), "Solo el escaneado en otra relación marca el error");
+
+// ── «Eliminar cargado» y «Retornar a espera»: la vista del supervisor incluye los bultos sin asignar ────────
+// (legacy GetEtiqenRelacion: asignadas a la relación + las de la relación con relacion = '').
+
+var vista = SalidaReglas.TextosVistaSupervisor(
+    new string?[] { "A", "B" },
+    new[]
+    {
+        new EtiquetaDeRelacion("B", rel),   // ya está entre las asignadas: no se repite
+        new EtiquetaDeRelacion("C", ""),    // cargado «sin relación»: entra
+        new EtiquetaDeRelacion("D", null),  // relación nula: entra
+        new EtiquetaDeRelacion("E", "  "),  // relación en blanco: entra
+        new EtiquetaDeRelacion("F", "01I26106888"), // asignado a OTRA relación: no se toca
+        new EtiquetaDeRelacion("", ""),     // sin texto: se ignora
+    });
+Equal("A,B,C,D,E", string.Join(",", vista), "La vista del supervisor = asignadas + las de la relación sin asignar, sin repetidos ni ajenas");
+Equal(0, SalidaReglas.TextosVistaSupervisor(Array.Empty<string?>(), Array.Empty<EtiquetaDeRelacion>()).Count, "Sin etiquetas, vista vacía");
+Equal("X", string.Join(",", SalidaReglas.TextosVistaSupervisor(new string?[] { " X ", null, "" }, Array.Empty<EtiquetaDeRelacion>())), "Se recortan espacios y se ignoran vacíos (el legacy recorta con Trim)");
+
+// ── Ráfaga sobre toda la lista de la relación (legacy RevisaTiempoReal sobre ListEtiquetas) ───────────────
+// Ahora la lista incluye los bultos pendientes (sin hora de escaneo) y los cargados «sin relación».
+
+EtiquetaRafaga Pendiente(string texto) => new(texto, "I", null, "");
+Check(SalidaReglas.DetectarRafaga(new[] { Pendiente("P1"), Pendiente("P2"), R("A", 0), R("B", 60) }, "9999") is null,
+    "Los bultos pendientes (sin hora de escaneo) no cuentan para la ráfaga");
+var rafagaSinRelacion = SalidaReglas.DetectarRafaga(new[] { Pendiente("P1"), R("D1", 0, "D"), R("D2", 4, "D"), R("D3", 8, "D") }, "9999");
+Check(rafagaSinRelacion is not null && rafagaSinRelacion.Count >= 2,
+    "Bultos directos cargados «sin relación» en ráfaga bloquean al cargar la relación, como en el legacy");
+
 Console.WriteLine($"SalidaReglas.Regression: {checks} comprobaciones correctas.");

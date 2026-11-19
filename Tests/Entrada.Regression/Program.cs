@@ -204,8 +204,7 @@ DateTime ahora = new(2026, 11, 6, 11, 5, 0);
 var (asunto, html) = EntradaAvisoCaptura.Construir(Captura(), "desarrollo3@grupopmm.com", "https://x.test/api/publico/entrada/abc", ahora.AddHours(72), esEdicion: false, ahora);
 string texto = System.Net.WebUtility.HtmlDecode(html);
 Equal("[PRUEBA] [01C263551100000] Recepción en Bodega - CLIENTE DE EJEMPLO, S.A.", asunto, "Asunto: marcado como prueba");
-Check(texto.Contains("CORREO DE PRUEBA") && texto.Contains("Llega únicamente a desarrollo3@grupopmm.com"), "Avisa que es de prueba y a quién llega");
-Check(texto.Contains("la envía Gladys desde el sistema PMM"), "Explica quién manda la notificación de verdad");
+Check(!texto.Contains("CORREO DE PRUEBA") && !texto.Contains("la envía Gladys desde el sistema PMM"), "Sin el badge superior de CORREO DE PRUEBA");
 Check(texto.Contains("1 · ASÍ SE VERÍA LA NOTIFICACIÓN") && texto.Contains("2 · CÓMO QUEDÓ LA CAPTURA"), "Trae las dos partes");
 Check(texto.Contains("Total Piezas") && texto.Contains("7.5"), "Total de piezas = suma de las cantidades (5 + 2.5)");
 Check(texto.Contains("TARIMAS DE PRUEBA") && texto.Contains("CAJAS DE PRUEBA"), "Trae el detalle de la mercancía");
@@ -237,6 +236,41 @@ Check(EntradaAvisoCaptura.YaEnviadoReciente("01C263551100000", false, ahora.AddM
 Check(!EntradaAvisoCaptura.YaEnviadoReciente("01C263551100000", true, ahora.AddMinutes(3)), "Una edición es otro aviso");
 Check(!EntradaAvisoCaptura.YaEnviadoReciente("01C263551100001", false, ahora.AddMinutes(3)), "Otra entrada es otro aviso");
 Check(!EntradaAvisoCaptura.YaEnviadoReciente("01C263551100000", false, ahora.AddMinutes(11)), "Pasada la ventana vuelve a poder salir");
+
+// ── Permisos de fotos de Entrada Bodega ───────────────────────────────────────────────────────────────
+Check(EntradaFotoPermisos.PuedeSubir(puedeAgregar: true, puedeModificar: false), "Quien captura puede subir fotos");
+Check(EntradaFotoPermisos.PuedeSubir(puedeAgregar: false, puedeModificar: true), "Quien edita una entrada existente puede agregarle fotos");
+Check(!EntradaFotoPermisos.PuedeSubir(puedeAgregar: false, puedeModificar: false), "Solo lectura no puede subir fotos");
+Check(EntradaFotoPermisos.PuedeEliminar(puedeAgregar: true, puedeModificar: false, puedeBorrar: false), "Quien toma fotos puede borrar una foto recién tomada");
+Check(EntradaFotoPermisos.PuedeEliminar(puedeAgregar: false, puedeModificar: true, puedeBorrar: false), "Quien edita una entrada puede borrar sus fotos sin permiso global de Borrar entrada");
+Check(EntradaFotoPermisos.PuedeEliminar(puedeAgregar: false, puedeModificar: false, puedeBorrar: true), "Con permiso Borrar también puede borrar fotos");
+Check(!EntradaFotoPermisos.PuedeEliminar(puedeAgregar: false, puedeModificar: false, puedeBorrar: false), "Solo lectura no puede borrar fotos");
+
+// ── Enlace de envío al registrar la entrada: 3 meses y URL armada (10-nov-2026) ───────────────────────────────
+// El otro sistema (PMM/VFP) toma de pmmutileria.entrada_enlaces_envio el enlace ya armado.
+Equal(3, EntradaEnlaceEnvioReglas.VigenciaMeses, "El enlace de envío dura 3 meses");
+Equal(new DateTime(2027, 2, 10, 9, 30, 0), EntradaEnlaceEnvioReglas.Expira(new DateTime(2026, 11, 10, 9, 30, 0)),
+    "Creado el 10-nov vence el 10-feb a la misma hora");
+Equal(new DateTime(2027, 2, 28, 8, 0, 0), EntradaEnlaceEnvioReglas.Expira(new DateTime(2026, 11, 30, 8, 0, 0)),
+    "Creado el 30-nov vence el 28-feb: el mes corto se recorta, no se pasa a marzo");
+Equal(new DateTime(2027, 3, 31, 23, 59, 0), EntradaEnlaceEnvioReglas.Expira(new DateTime(2026, 12, 31, 23, 59, 0)),
+    "Cruza de año sin perder el día");
+Check((EntradaEnlaceEnvioReglas.Expira(ahora) - ahora).TotalDays >= 89, "Son meses, no las 72 horas del enlace de Compartir");
+
+const string TokenDePrueba = "0123456789abcdef0123456789abcdef";
+Equal<string?>("https://revisionapi.grupopmm.com/api/publico/entrada/" + TokenDePrueba,
+    EntradaEnlaceEnvioReglas.ConstruirUrl("https://revisionapi.grupopmm.com", TokenDePrueba), "Base de producción + ruta pública + token");
+Equal<string?>("https://revisionapi.grupopmm.com/api/publico/entrada/" + TokenDePrueba,
+    EntradaEnlaceEnvioReglas.ConstruirUrl("  https://revisionapi.grupopmm.com///  ", TokenDePrueba), "Espacios y diagonales sobrantes no duplican la ruta");
+Equal<string?>("http://192.168.10.29:84/api/publico/entrada/" + TokenDePrueba,
+    EntradaEnlaceEnvioReglas.ConstruirUrl("http://192.168.10.29:84", TokenDePrueba), "La base de respaldo por IP y puerto también arma");
+Equal<string?>(null, EntradaEnlaceEnvioReglas.ConstruirUrl(null, TokenDePrueba), "Sin base no hay URL");
+Equal<string?>(null, EntradaEnlaceEnvioReglas.ConstruirUrl("   ", TokenDePrueba), "Base en blanco no hay URL");
+Equal<string?>(null, EntradaEnlaceEnvioReglas.ConstruirUrl("/api", TokenDePrueba), "Una base relativa no abre: no se crea el enlace");
+Equal<string?>(null, EntradaEnlaceEnvioReglas.ConstruirUrl("ftp://servidor", TokenDePrueba), "Solo http/https");
+Equal<string?>(null, EntradaEnlaceEnvioReglas.ConstruirUrl("https://revisionapi.grupopmm.com", ""), "Sin token no hay URL");
+// El controlador y el aviso arman la misma ruta a mano: la constante tiene que coincidir con PublicoController.
+Equal("/api/publico/entrada/", EntradaEnlaceEnvioReglas.RutaPublica, "La ruta pública es la que ya usa «Compartir»");
 
 Console.WriteLine($"Entrada.Regression: {checks} comprobaciones correctas.");
 

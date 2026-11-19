@@ -9,6 +9,21 @@ public class EntradaShareLinkResponse
     public DateTime? Expira { get; set; }
 }
 
+/// <summary>
+/// El enlace que se crea al registrar una entrada de bodega y que queda en <c>pmmutileria.entrada_enlaces_envio</c> para que
+/// otro sistema (PMM/VFP) lo mande. Ver <see cref="Services.EntradaShareService.AsegurarEnlaceEnvioAsync"/>.
+/// </summary>
+public class EntradaEnlaceEnvio
+{
+    public string Creferencia { get; set; } = string.Empty;
+    public string Token { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+    public DateTime Expira { get; set; }
+
+    /// <summary>true si esta llamada lo creó; false si la entrada ya tenía su enlace y se regresó el mismo.</summary>
+    public bool Creado { get; set; }
+}
+
 /// <summary>Respuesta al generar un link temporal de reporte PDF (vivo o congelado).</summary>
 public class ReportShareLinkResponse
 {

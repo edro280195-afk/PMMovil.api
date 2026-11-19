@@ -6,6 +6,9 @@ public sealed record EtiquetaRafaga(string Texto, string? Manejo, DateTime? Time
 /// <summary>Una etiqueta cargada, con lo mínimo que necesita la revisión de tiempo final.</summary>
 public sealed record EtiquetaTiempo(string? Manejo, DateTime? TimeScan);
 
+/// <summary>Una etiqueta que le toca a la relación según tráfico/agrupa, con la relación a la que está asignada hoy (vacía si ninguna).</summary>
+public sealed record EtiquetaDeRelacion(string? Texto, string? Relacion);
+
 /// <summary>
 /// Reglas puras de la carga de mercancía (Salida de bodega). Replican el legacy
 /// (<c>Reportes.Business\Relacion.cs</c>: RevisaTiempo, RevisaTiempoReal, Autorizar…) sin tocar la base,
@@ -58,6 +61,61 @@ public static class SalidaReglas
     /// </summary>
     public static bool EstadoPermiteCaptura(string? estatusMercancia)
         => (estatusMercancia ?? "").Trim() is "COMPLETA" or "DIFERENCIA EN BULTOS-ETIQUETAS" or "NO DISP ETIQUETAS EN MCIA";
+
+    /// <summary>
+    /// ¿Un bulto de la relación cuenta como ya cargado? Igual que el legacy (<c>GetEtiqEntradas</c>, <c>Relacion.cs:1101-1142</c>
+    /// y <c>SalidaBodega.contar()</c>): basta con que tenga hora de escaneo, sin importar a qué relación esté asignado.
+    /// Un bulto cargado «sin relación» (entrada directa o transbordo, que el cargador escanea antes de que exista la relación)
+    /// queda con <c>etiqueta_mcia.relacion = ''</c>; cuando esa entrada se agrupa después en una relación, esos bultos ya están
+    /// cargados y no hay que volver a escanearlos (el legacy los cuenta y, al pausar o finalizar, les asigna la relación).
+    /// Medido en producción el 17-nov-2026 con la 01I26106890: 30 de 37 con hora de escaneo, de los cuales 27 tenían la
+    /// relación vacía; el API solo contaba los 3 asignados.
+    /// </summary>
+    /// <param name="tieneHoraDeEscaneo">La etiqueta tiene <c>time_scan</c> con fecha real (no 0000-00-00).</param>
+    public static bool BultoCuentaComoCargado(bool tieneHoraDeEscaneo) => tieneHoraDeEscaneo;
+
+    /// <summary>
+    /// ¿El bulto ya escaneado pertenece a OTRA relación? Es la única condición en que el legacy avisa
+    /// (<c>Relacion.cs:1125-1128</c>): bulto con hora de escaneo, con relación asignada y distinta de la que se carga. El estado
+    /// que resulta es «INFORMACION INCORRECTA EN RELACION, NOTIFICAR A ENCARGADO,ENTRADA DE OTRA RELACION AGRUPADA &lt;entrada&gt;».
+    /// Un bulto sin hora de escaneo asignado a otra relación NO es error para el legacy: sale como pendiente y al escanearlo
+    /// se reasigna.
+    /// </summary>
+    public static bool BultoEsDeOtraRelacion(string? relacionDelBulto, string? relno, bool tieneHoraDeEscaneo)
+    {
+        if (!tieneHoraDeEscaneo) return false;
+
+        string asignada = (relacionDelBulto ?? "").Trim();
+        return asignada.Length > 0 && !string.Equals(asignada, (relno ?? "").Trim(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Textos de las etiquetas sobre las que actúa el supervisor (legacy <c>GetEtiqenRelacion</c>, <c>Relacion.cs:1400-1454</c>):
+    /// las asignadas a la relación MÁS las que le tocan por tráfico y todavía no están asignadas a ninguna
+    /// (<c>relacion = ''</c>, p. ej. bultos de transbordo cargados «sin relación»). «Eliminar cargado» y «Retornar a espera»
+    /// del legacy recorren esa lista completa; el API solo tocaba las asignadas. Sin repetidos y en orden de aparición.
+    /// </summary>
+    public static IReadOnlyList<string> TextosVistaSupervisor(
+        IEnumerable<string?> asignadasALaRelacion,
+        IEnumerable<EtiquetaDeRelacion> deLaRelacionPorTrafico)
+    {
+        var resultado = new List<string>();
+        var vistos = new HashSet<string>(StringComparer.Ordinal);
+
+        void Agregar(string? texto)
+        {
+            string limpio = (texto ?? "").Trim();
+            if (limpio.Length > 0 && vistos.Add(limpio)) resultado.Add(limpio);
+        }
+
+        foreach (var texto in asignadasALaRelacion) Agregar(texto);
+        foreach (var etiqueta in deLaRelacionPorTrafico)
+        {
+            if (string.IsNullOrWhiteSpace(etiqueta.Relacion)) Agregar(etiqueta.Texto);
+        }
+
+        return resultado;
+    }
 
     /// <summary>
     /// Un historial de etiqueta pide bloqueo si nunca se desbloqueó o si, después del último desbloqueo, se volvió a escanear.

@@ -555,7 +555,13 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
             return result;
         }
 
-        var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
+        // Lista del supervisor igual que el legacy (GetEtiqenRelacion, Relacion.cs:1400-1454): las asignadas a esta relación
+        // y las de la relación aún sin asignar. Los bultos que le tocan por tráfico pero están asignados a OTRA relación no
+        // se listan (antes salían como pendientes o como ERROR).
+        var vista = (await GetTextosVistaSupervisorAsync(conn, relno, sufijo)).ToHashSet(StringComparer.Ordinal);
+        var etiquetas = (await GetEtiqEntradasAsync(conn, relno, sufijo))
+            .Where(e => vista.Contains((e.TextoEtiqueta ?? "").Trim()))
+            .ToList();
         // Bultos asignados a esta relación que ya no le pertenecen (posible descargo): el legacy los lista con ERROR
         // y pide retornar la relación para que el cargador los baje (GetEtiqenRelacion, Relacion.cs:1400).
         var ajenas = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
@@ -571,10 +577,10 @@ CREATE TABLE IF NOT EXISTS {TablaAutorizacionCasetaQr} (
         string estatus = dbRel.Estatus;
         if (!string.IsNullOrWhiteSpace(dbRel.Usuedit))
             estatus = "RELACION OCUPADA";
+        // El supervisor del legacy solo avisa de los bultos por descargo; el aviso «ENTRADA DE OTRA RELACION AGRUPADA» solo
+        // existe al cargar (GetEtiqEntradas), no en esta pantalla.
         if (ajenas.Count > 0)
             estatus = "ERROR, retorne relacion, posible descargo";
-        else if (etiquetas.Any(e => string.Equals(e.Estatus, "ERROR", StringComparison.OrdinalIgnoreCase)))
-            estatus = "INFORMACION INCORRECTA EN RELACION, NOTIFICAR A ENCARGADO, ENTRADA DE OTRA RELACION AGRUPADA";
         // Igual que el legacy, GetTotBultos corre al final y su aviso prevalece.
         if (totalesIncorrectos)
             estatus = SalidaReglas.EstatusInformacionIncorrecta;
@@ -754,8 +760,10 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
     }
 
     /// <summary>
-    /// Etiquetas de la relación. Igual que el legacy (<c>GetEtiqEntradas</c>): la lista son las que le tocan por tráfico;
-    /// está escaneada si ya tiene hora de escaneo y está asignada a esta relación; si está asignada a otra, es ERROR.
+    /// Etiquetas de la relación. Espejo del legacy (<c>GetEtiqEntradas</c>, <c>Relacion.cs:1079-1164</c>): la lista son las que
+    /// le tocan por tráfico; está escaneada si tiene hora de escaneo (ver <see cref="SalidaReglas.BultoCuentaComoCargado"/>), y
+    /// solo si además está asignada a OTRA relación queda marcada ERROR (<see cref="SalidaReglas.BultoEsDeOtraRelacion"/>), que
+    /// es lo que vuelve el estado de la relación en «INFORMACION INCORRECTA… ENTRADA DE OTRA RELACION AGRUPADA».
     /// Los bultos asignados a esta relación que ya no le pertenecen NO van aquí: ver <see cref="GetEtiquetasAjenasAsync"/>.
     /// </summary>
     private async Task<List<EtiquetaInfo>> GetEtiqEntradasAsync(IDbConnection conn, string relno, string sufijo)
@@ -769,12 +777,16 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
         {
             if (!seenTextos.Add(row.Textoetiqueta)) continue;
 
-            bool propia = row.Relacion == relno;
-            bool ajena = !propia && !string.IsNullOrEmpty(row.Relacion);
-            bool escaneada = propia && row.TimeScan.HasValue;
+            bool conHora = row.TimeScan.HasValue;
+            // Antes: escaneada solo si además estaba asignada a esta relación, y ERROR todo bulto asignado a otra aunque no se
+            // hubiera escaneado. Dejaba en «sin escanear» los bultos cargados sin relación (transbordo/directa) que luego se
+            // agruparon aquí: el legacy mostraba 29 DE 37 y la app 0 DE 37 (01I26106890).
+            bool escaneada = SalidaReglas.BultoCuentaComoCargado(conHora);
+            bool deOtraRelacion = SalidaReglas.BultoEsDeOtraRelacion(row.Relacion, relno, conHora);
 
             var info = MapEtiqueta(row, escaneada);
-            info.Estatus = ajena ? "ERROR" : (propia ? row.Estatus : "");
+            // El estatus de la etiqueta es el de la base (CARGADO en los bultos cargados sin relación), como en el legacy.
+            info.Estatus = deOtraRelacion ? "ERROR" : row.Estatus;
             result.Add(info);
         }
 
@@ -1052,24 +1064,10 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
                 return result;
             }
 
-            if (!string.IsNullOrEmpty(etiqueta.Relacion) && etiqueta.Relacion != request.Relno)
-            {
-                if (authorization != null)
-                {
-                    await ConsumeCasetaQrAuthorizationAsync(
-                        conn,
-                        transaction,
-                        authorization.Id,
-                        "RECHAZADO",
-                        "ETIQUETA_OTRA_RELACION",
-                        request.TextoEtiqueta);
-                }
-                result.Message = "ETIQUETA DE OTRA RELACION";
-                result.Tipo = "ETIQUETA_OTRA_RELACION";
-                transaction.Commit();
-                return result;
-            }
-
+            // Igual que el legacy (SalidaBodega.aspx.cs:223-236): si el bulto es de la lista de la relación se escanea y queda
+            // asignado a ESTA relación aunque estuviera asignado a otra (SaveScanParticular reescribe `relacion`). Antes aquí
+            // se rechazaba con «ETIQUETA DE OTRA RELACION»; el legacy nunca lo hizo (solo avisa, al cargar, con el estado
+            // «INFORMACION INCORRECTA… ENTRADA DE OTRA RELACION AGRUPADA» cuando el bulto ya tenía hora de escaneo).
             string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             string ipSuffix = string.IsNullOrWhiteSpace(request.IpAddress) ? "" : $" {request.IpAddress}";
             string historialScan = $"ESCANEO {timeStr}{ipSuffix} , ";
@@ -1190,16 +1188,13 @@ string estatusBase, string estatusCarga, List<EtiquetaInfo> etiquetas, int totBu
 
         string idsCliente = await ObtenerIdsClienteAsync(conn, relno, sufijo);
 
-        var etiquetas = (await conn.QueryAsync<EtiquetaDbRow>(
-@"SELECT e.textoetiqueta AS Textoetiqueta,
-  IF(YEAR(e.time_scan) > 0, e.time_scan, NULL) AS TimeScan,
-  e.historial AS Historial,
-  t.cidmanejo AS Cidmanejo
-  FROM etiqueta_mcia e
-  LEFT JOIN traf t ON e.creferencia = t.creferencia
-  WHERE e.relacion = @relno AND e.estatus = 'CARGADO'
-  ORDER BY e.time_scan ASC",
-new { relno })).ToList();
+        // Igual que el legacy (RevisaTiempoReal, Relacion.cs:518): se revisa TODA la lista de etiquetas de la relación
+        // (las que le tocan por tráfico, ListEtiquetas) ordenada por hora de escaneo; las que no tienen hora real las salta
+        // la regla. Antes solo se leían las ya asignadas a la relación con estatus CARGADO, así que una ráfaga de bultos
+        // cargados «sin relación» (entrada directa) no bloqueaba hasta que se pausaba o finalizaba la carga.
+        var etiquetas = (await QueryEtiquetasDeRelacionAsync(conn, relno, sufijo))
+            .OrderBy(e => e.TimeScan ?? DateTime.MinValue)
+            .ToList();
 
         var enBloque = SalidaReglas.DetectarRafaga(
             etiquetas.Select(e => new EtiquetaRafaga(e.Textoetiqueta, e.Cidmanejo, e.TimeScan, e.Historial)),
@@ -1566,8 +1561,10 @@ new { relno })).ToList();
         string estatusFinal = ComputeEstatusMercancia(dbRel?.Estatus ?? "", dbRel?.EstatusCarga ?? "", etiquetas, totBultos, manejo);
         if (estatusFinal == "COMPLETA") estatusFinal = "INCOMPLETA";
 
-        // Las etiquetas asignadas a otra relación (ERROR) no se tocan: no son de esta carga.
-        var propias = etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta) && e.Estatus != "ERROR").ToList();
+        // Igual que el legacy (PedirAutorizacion recorre ListEtiquetas completa, Relacion.cs:770-784): se actualizan TODAS las
+        // etiquetas de la lista de la relación, también las marcadas ERROR (bulto ya escaneado en otra relación), que quedan
+        // asignadas a esta. Antes las de ERROR se dejaban intactas.
+        var propias = etiquetas.Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta)).ToList();
         var escaneadas = propias.Where(e => e.Escaneado).Select(e => e.TextoEtiqueta).ToList();
         var faltantes = propias.Where(e => !e.Escaneado).Select(e => e.TextoEtiqueta).ToList();
 
@@ -1734,7 +1731,9 @@ new { relno })).ToList();
   GROUP BY e.id_etiqueta_mcia",
      new { entrada });
 
-        // Igual que el legacy (GetEtiqEntradas_SR): está cargada si ya tiene hora de escaneo.
+        // Igual que el legacy (GetEtiqEntradas_SR, Relacion.cs:2241 y 2263): está cargada si ya tiene hora de escaneo,
+        // sin mirar su estatus (antes además se exigía estatus CARGADO y un bulto con otro estatus, por ejemplo ELIMINAR,
+        // salía pendiente aunque el legacy lo contara).
         var etiquetaList = etiquetas.Select(r => new EtiquetaInfo
         {
             TextoEtiqueta = r.Textoetiqueta,
@@ -1742,7 +1741,7 @@ new { relno })).ToList();
             Creferencia = r.Creferencia,
             Nlineno = r.Nlineno,
             Total = r.Total,
-            Escaneado = r.TimeScan.HasValue && r.Estatus == "CARGADO",
+            Escaneado = r.TimeScan.HasValue,
             Estatus = r.Estatus,
             Usucarga = r.Usucarga,
             TimeScan = r.TimeScan,
@@ -1864,25 +1863,12 @@ new { relno })).ToList();
                 return result;
             }
 
-            // Un bulto de una entrada directa/transbordo no debe estar asignado a una relación.
-            if (!string.IsNullOrEmpty(etiqueta.Relacion) && etiqueta.Relacion != request.Entrada)
-            {
-                await ConsumeCasetaQrAuthorizationAsync(
-                    conn,
-                    transaction,
-                    authorization.Id,
-                    "RECHAZADO",
-                    "ETIQUETA_OTRA_RELACION",
-                    request.TextoEtiqueta);
-                result.Message = "ETIQUETA DE OTRA RELACION";
-                result.Tipo = "ETIQUETA_OTRA_RELACION";
-                transaction.Commit();
-                return result;
-            }
-
-            // Igual que el legacy (SaveScanParticular("", …)): el bulto queda CARGADO con relacion vacía y la huella
-            // completa en el historial (hora e IP). Antes se guardaba la entrada en `relacion`, que el legacy leería
-            // como "entrada de otra relación agrupada".
+            // Igual que el legacy (SalidaBodega.aspx.cs:659-670): se escanea cualquier bulto de la entrada, aunque ya estuviera
+            // asignado a una relación (SaveScanParticular("") le deja la relación vacía). Antes se rechazaba con «ETIQUETA DE
+            // OTRA RELACION» (y, sin QR de caseta, ese rechazo truena por un nulo); el legacy nunca lo hizo.
+            //
+            // El bulto queda CARGADO con relacion vacía y la huella completa en el historial (hora e IP). Antes se guardaba
+            // la entrada en `relacion`, que el legacy leería como "entrada de otra relación agrupada".
             string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             string ipSuffix = string.IsNullOrWhiteSpace(request.IpAddress) ? "" : $" {request.IpAddress}";
             string historialScan = $"ESCANEO {timeStr}{ipSuffix} , ";
@@ -1989,12 +1975,12 @@ new { relno })).ToList();
             return result;
         }
 
-        var etiquetas = await GetEtiqEntradasAsync(conn, relno, sufijo);
         var ajenas = await GetEtiquetasAjenasAsync(conn, relno, sufijo);
         var (_, _, totalesIncorrectos) = await GetTotBultosDetalleAsync(conn, relno, sufijo);
 
         // Mismas condiciones con las que el legacy deshabilita el botón AUTORIZAR (RelacionBodega.aspx.cs:189-247),
-        // ahora también del lado del servidor.
+        // ahora también del lado del servidor. El supervisor del legacy no tiene el aviso «otra relación agrupada» (ese
+        // solo sale al cargar), así que aquí no se le pasa.
         string? motivo = SalidaReglas.MotivoNoSePuedeAutorizar(
             dbRel.Estatus,
             dbRel.EstatusCarga,
@@ -2002,7 +1988,7 @@ new { relno })).ToList();
             usuario,
             !string.IsNullOrWhiteSpace(dbRel.Usuedit),
             ajenas.Count > 0,
-            etiquetas.Any(e => e.Estatus == "ERROR"),
+            hayEtiquetasConError: false,
             totalesIncorrectos);
         if (motivo != null)
         {
@@ -2010,10 +1996,10 @@ new { relno })).ToList();
             return result;
         }
 
-        var textos = etiquetas
-            .Where(e => !string.IsNullOrWhiteSpace(e.TextoEtiqueta))
-            .Select(e => e.TextoEtiqueta)
-            .ToList();
+        // Igual que el legacy (Autorizar recorre ListEtiquetas de GetEtiqenRelacion, Relacion.cs:904-909): solo las etiquetas
+        // de la vista del supervisor, es decir las asignadas a esta relación y las de la relación aún sin asignar. Los bultos
+        // que pertenecen a OTRA relación no se tocan (antes se tomaban todos los que le tocan por tráfico).
+        var textos = await GetTextosVistaSupervisorAsync(conn, relno, sufijo);
         if (textos.Count > 0)
         {
             await conn.ExecuteAsync(
@@ -2039,20 +2025,43 @@ new { relno })).ToList();
     }
 
 
+    /// <summary>
+    /// Etiquetas sobre las que actúa el supervisor, como el legacy (<c>GetEtiqenRelacion</c>): las asignadas a la relación y
+    /// las que le tocan por tráfico y aún no están asignadas (ver <see cref="SalidaReglas.TextosVistaSupervisor"/>).
+    /// </summary>
+    private async Task<List<string>> GetTextosVistaSupervisorAsync(IDbConnection conn, string relno, string sufijo)
+    {
+        var asignadas = await conn.QueryAsync<string>(
+            "SELECT textoetiqueta FROM etiqueta_mcia WHERE relacion=@relno AND textoetiqueta<>''",
+            new { relno });
+        var porTrafico = await QueryEtiquetasDeRelacionAsync(conn, relno, sufijo);
+
+        return SalidaReglas.TextosVistaSupervisor(
+            asignadas,
+            porTrafico.Select(r => new EtiquetaDeRelacion(r.Textoetiqueta, r.Relacion))).ToList();
+    }
+
     public async Task<ResultadoOperacion> EliminarCargadoAsync(string relno, string usuario)
     {
         var result = new ResultadoOperacion();
-        var (tabla, _) = ResolverTabla(relno);
+        var (tabla, sufijo) = ResolverTabla(relno);
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         using IDbConnection conn = _db.CreateConnection();
 
-        await conn.ExecuteAsync(
-     @"UPDATE etiqueta_mcia
+        // Igual que el legacy (EliminarCargado recorre ListEtiquetas de GetEtiqenRelacion): también se reinician los bultos
+        // de la relación que seguían sin asignar (cargados «sin relación»); antes solo se reiniciaban los asignados y esos
+        // conservaban su hora de escaneo.
+        var textos = await GetTextosVistaSupervisorAsync(conn, relno, sufijo);
+        if (textos.Count > 0)
+        {
+            await conn.ExecuteAsync(
+         @"UPDATE etiqueta_mcia
   SET relacion='', estatus='', fmodi=@time, usumodi=@usuario,
     usucarga='', time_scan='0000-00-00 00:00:00'
-  WHERE relacion=@relno",
-     new { relno, time = timeStr, usuario });
+  WHERE textoetiqueta IN @textos",
+         new { time = timeStr, usuario, textos });
+        }
 
         await conn.ExecuteAsync(
      $@"UPDATE {tabla}
@@ -2172,7 +2181,7 @@ new { relno })).ToList();
     public async Task<ResultadoOperacion> RetornarAEsperaAsync(string relno, string usuario)
     {
         var result = new ResultadoOperacion();
-        var (tabla, _) = ResolverTabla(relno);
+        var (tabla, sufijo) = ResolverTabla(relno);
         string timeStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         using IDbConnection conn = _db.CreateConnection();
@@ -2186,13 +2195,19 @@ new { relno })).ToList();
             return result;
         }
 
-        // Todo lo asignado a la relación que quedó SALIDA/ERROR vuelve a CARGADO (legacy RetornaraEspera,
-        // Relacion.cs:926-955). Las etiquetas de otra relación no se tocan.
-        await conn.ExecuteAsync(
-        @"UPDATE etiqueta_mcia
-    SET estatus='CARGADO', fmodi=@time, usumodi=@usuario
-    WHERE relacion=@relno AND estatus IN ('SALIDA','ERROR')",
-        new { relno, time = timeStr, usuario });
+        // Igual que el legacy (RetornaraEspera, Relacion.cs:926-955): en TODAS las etiquetas de la vista del supervisor se
+        // asigna la relación y lo que quedó SALIDA/ERROR vuelve a CARGADO. Antes solo se tocaban las que ya estaban
+        // asignadas, así que los bultos cargados «sin relación» no recibían la relación. Las de otra relación no se tocan.
+        var textos = await GetTextosVistaSupervisorAsync(conn, relno, sufijo);
+        if (textos.Count > 0)
+        {
+            await conn.ExecuteAsync(
+            @"UPDATE etiqueta_mcia
+    SET relacion=@relno, fmodi=@time, usumodi=@usuario,
+        estatus = CASE WHEN estatus IN ('SALIDA','ERROR') THEN 'CARGADO' ELSE estatus END
+    WHERE textoetiqueta IN @textos",
+            new { relno, time = timeStr, usuario, textos });
+        }
 
         await conn.ExecuteAsync(
         $"UPDATE {tabla} SET ESTATUS_CARGA='EN ESPERA' WHERE RELNO=@relno",
