@@ -39,6 +39,7 @@ mono_crash.*
 appsettings.Local.json
 appsettings.json
 appsettings.Production.json
+appsettings.Development.json
 
 # Salida de "dotnet publish" -- puede traer appsettings.Local.json/
 # .Development.json antes de que existiera el CopyToPublishDirectory=Never

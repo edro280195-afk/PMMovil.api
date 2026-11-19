@@ -1,0 +1,25 @@
+// Plantilla de appsettings.Development.json. Copiala con ese nombre, ajusta los valores y NO la subas con claves reales:
+// el archivo real esta en .gitignore porque aqui van las cadenas de conexion. Si apuntas a una base real usa un usuario
+// con los permisos minimos y nunca la clave de produccion en un archivo versionado.
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "ConnectionStrings": {
+    "ReportesDb": "SERVER=localhost;DATABASE=reportes;UID=root;PWD=CAMBIAR;",
+    "PmmtrafDb": "SERVER=localhost;DATABASE=pmmtraf;UID=root;PWD=CAMBIAR;AllowZeroDateTime=True;Convert Zero Datetime=True",
+    "PmmtoolsDb": "SERVER=localhost;DATABASE=pmmtools;UID=root;PWD=CAMBIAR;AllowZeroDateTime=True;Convert Zero Datetime=True"
+  },
+  // En desarrollo las fotos van a una carpeta local: apuntar al servidor 23 escribiria en produccion.
+  "PhotoSettings": {
+    "BasePath": "C:\\TempFotos\\Entrada"
+  },
+  "CasetaPhotoSettings": {
+    "BasePath": "C:\\TempFotos\\Caseta",
+    "FallbackPath": "C:\\TempFotos\\PMMCaseta",
+    "QueuePath": "C:\\TempFotos\\CasetaQueue"
+  }
+}
