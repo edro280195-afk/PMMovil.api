@@ -146,6 +146,8 @@ try
     builder.Services.AddScoped<EntradaService>();
     builder.Services.AddScoped<IEntradaShareService, EntradaShareService>();
     builder.Services.AddScoped<EntradaAvisoCapturaService>();
+    builder.Services.AddScoped<EntryPanelService>();
+    builder.Services.AddScoped<EntryRealtimePublisher>();
     builder.Services.AddScoped<IRevisionShareService, RevisionShareService>();
     builder.Services.AddScoped<ICasetaShareService, CasetaShareService>();
     builder.Services.AddScoped<IReportShareService, ReportShareService>();

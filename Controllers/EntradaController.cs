@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -18,6 +20,7 @@ public class EntradaController : ControllerBase
     private readonly IEntradaShareService _shareService;
     private readonly EntradaAvisoCapturaService _avisoCapturaService;
     private readonly IModulePermissionService _permissionService;
+    private readonly EntryRealtimePublisher _entryRealtime;
     private readonly ILogger<EntradaController> _logger;
 
     public EntradaController(
@@ -25,13 +28,23 @@ public class EntradaController : ControllerBase
         IEntradaShareService shareService,
         EntradaAvisoCapturaService avisoCapturaService,
         IModulePermissionService permissionService,
+        EntryRealtimePublisher entryRealtime,
         ILogger<EntradaController> logger)
     {
         _entradaService = entradaService;
         _shareService = shareService;
         _avisoCapturaService = avisoCapturaService;
         _permissionService = permissionService;
+        _entryRealtime = entryRealtime;
         _logger = logger;
+    }
+
+    private static bool Succeeded(object result)
+    {
+        JsonElement element = JsonSerializer.SerializeToElement(result);
+        return element.ValueKind == JsonValueKind.Object
+            && element.TryGetProperty("success", out JsonElement success)
+            && success.ValueKind == JsonValueKind.True;
     }
 
     // Aviso de PRUEBA al terminar la captura en el teléfono: un correo que llega SOLO a desarrollo3 (ver
@@ -43,7 +56,16 @@ public class EntradaController : ControllerBase
         try
         {
             string usuario = base.User.Identity?.Name ?? "Desconocido";
-            (bool ok, string mensaje) = await _avisoCapturaService.EnviarAsync(cref, usuario, edicion, $"{Request.Scheme}://{Request.Host}");
+            bool ok;
+            string mensaje;
+            try
+            {
+                (ok, mensaje) = await _avisoCapturaService.EnviarAsync(cref, usuario, edicion, $"{Request.Scheme}://{Request.Host}");
+            }
+            finally
+            {
+                await _entryRealtime.PublishCaptureFinishedAsync(cref, usuario, edicion);
+            }
             return Ok(new { success = ok, message = mensaje });
         }
         catch (Exception ex)
@@ -233,6 +255,7 @@ public class EntradaController : ControllerBase
             if (!resultado.Success)
                 return Ok(resultado);
 
+            await _entryRealtime.PublishSavedAsync(resultado.Referencia ?? string.Empty, usuarioActual, created: true);
             return Ok(resultado);
         }
         catch (Exception ex)
@@ -253,6 +276,7 @@ public class EntradaController : ControllerBase
             if (!resultado.Success)
                 return Ok(resultado);
 
+            await _entryRealtime.PublishSavedAsync(cref, usuarioActual, created: false);
             return Ok(resultado);
         }
         catch (Exception ex)
@@ -299,6 +323,7 @@ public class EntradaController : ControllerBase
         try
         {
             var result = await _entradaService.GuardarFotosEntradaAsync(req.Referencia, req.Fotos, username);
+            if (Succeeded(result)) await _entryRealtime.PublishPhotosAsync(req.Referencia, username, "added", req.Fotos.Count);
             return Ok(result);
         }
         catch (Exception ex)
@@ -328,6 +353,7 @@ public class EntradaController : ControllerBase
         try
         {
             var result = await _entradaService.GuardarFotosDanioEntradaAsync(req.Referencia, req.Fotos, username);
+            if (Succeeded(result)) await _entryRealtime.PublishPhotosAsync(req.Referencia, username, "added", req.Fotos.Count);
             return Ok(result);
         }
         catch (Exception ex)
@@ -380,6 +406,7 @@ public class EntradaController : ControllerBase
             object result = danio
                 ? await _entradaService.GuardarFotosDanioEntradaArchivosAsync(referencia, recibidas, username)
                 : await _entradaService.GuardarFotosEntradaArchivosAsync(referencia, recibidas, username);
+            if (Succeeded(result)) await _entryRealtime.PublishPhotosAsync(referencia, username, "added", recibidas.Count);
             return Ok(result);
         }
         catch (Exception ex)

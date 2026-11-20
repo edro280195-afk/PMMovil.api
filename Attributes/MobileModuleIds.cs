@@ -81,4 +81,13 @@ public static class MobileModuleIds
     /// scripts/12-asignar-permisos-coordinacion-trafico-168.sql.
     /// </summary>
     public const int TrafficCoordinationMonitor = 168;
+
+    /// <summary>
+    /// Panel web de entradas de bodega: lista con filtros, detalle, visor de fotos, alta y baja de fotos.
+    /// Lectura = ver y exportar, Agregar = subir fotos (y recibir el aviso de entrada capturada),
+    /// Borrar = eliminar fotos. Sin herencia: solo Sistemas y filas propias en accesos.
+    ///
+    /// Alta en pmmtraf.modulos: Database/Migrations/20261120_registrar_modulo_entradas_panel_172.sql.
+    /// </summary>
+    public const int EntriesPanel = 172;
 }

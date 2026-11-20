@@ -41,6 +41,8 @@ public class FotoController : ControllerBase
 
     // Fotos de Revisión y de Entrada Bodega (carpeta del cliente en el 23): se escriben, leen y borran por aquí.
     private readonly ClientePhotoStorage _clientePhotos;
+    private readonly EntryPanelService _entryPanel;
+    private readonly EntryRealtimePublisher _entryRealtime;
 
     public FotoController(
         BaseRepository db,
@@ -49,7 +51,9 @@ public class FotoController : ControllerBase
         CasetaPhotoStorage casetaPhotoStorage,
         ClientePhotoStorage clientePhotos,
         IModulePermissionService permissionService,
-        IHubContext<WarehouseHub> hub)
+        IHubContext<WarehouseHub> hub,
+        EntryPanelService entryPanel,
+        EntryRealtimePublisher entryRealtime)
     {
         _db = db;
         _config = config;
@@ -59,6 +63,8 @@ public class FotoController : ControllerBase
         _clientePhotos = clientePhotos;
         _permissionService = permissionService;
         _hub = hub;
+        _entryPanel = entryPanel;
+        _entryRealtime = entryRealtime;
     }
 
     /// <summary>
@@ -556,6 +562,12 @@ public class FotoController : ControllerBase
             // Lo local se quita en el acto y la copia del 23 también; si el 23 no contesta, el almacén lo reintenta solo.
             string ext = PhotoFileNameResolver.NormalizeExtension(data.CExtension);
             _clientePhotos.Borrar(new FotoCliente(id, folder, cref, ntipodocto, data.NLineNo, ext));
+            if (ntipodocto == 100 || ntipodocto == 103)
+            {
+                await _entryPanel.TryWriteLogAsync(cref, "ELIMINAR", id, ntipodocto, data.NLineNo, ext, username, "APP",
+                    ntipodocto == 103 ? "Foto de daño eliminada desde la app" : "Foto de arribo eliminada desde la app");
+                await _entryRealtime.PublishPhotosAsync(cref, username, "removed", 1);
+            }
             return Ok(new { success = true });
         }
         catch (Exception exception)

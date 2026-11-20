@@ -23,6 +23,7 @@ public class WarehouseHub : Hub
     public const string SupervisoresBloqueoGroup = "SUPERVISORES_BLOQUEO";
     public const string RevisionGroup = "REVISION_OPERADORES";
     public const string PreregistroOperationsGroup = "PREREGISTRO_OPERACIONES";
+    public const string EntriesGroup = "ENTRADAS_PANEL";
 
     public static class RevisionEstados
     {
@@ -316,6 +317,25 @@ public class WarehouseHub : Hub
             Context.ConnectionId,
             PreregistroOperationsGroup,
             Context.ConnectionAborted);
+    }
+
+    /// <summary>Suscribe la conexión a las entradas de bodega solo con permiso de lectura del panel de entradas.</summary>
+    public async Task UnirseAEntradas()
+    {
+        string? usuario = Context.User?.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(usuario))
+            throw new HubException("No se pudo identificar al usuario.");
+
+        bool permitido = await _permissionService.HasPermissionAsync(
+            usuario,
+            MobileModuleIds.EntriesPanel,
+            "Lectura",
+            Context.ConnectionAborted);
+
+        if (!permitido)
+            throw new HubException("No tienes permiso para recibir cambios de entradas.");
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, EntriesGroup, Context.ConnectionAborted);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
