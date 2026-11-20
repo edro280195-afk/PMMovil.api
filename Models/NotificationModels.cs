@@ -66,8 +66,11 @@ public sealed class NotificationInboxItem
     public string Title { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
     public string? CrefAgrupada { get; set; }
-    public DateTime CreatedAt { get; set; }
+    public DateTime? CreatedAt { get; set; }
     public DateTime? ReadAt { get; set; }
+    public string Url { get; set; } = string.Empty;
+    public string Severity { get; set; } = string.Empty;
+    public IReadOnlyDictionary<string, string> Data { get; set; } = new Dictionary<string, string>();
 }
 
 public sealed class NotificationInboxResponse

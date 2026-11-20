@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -246,10 +247,12 @@ ON DUPLICATE KEY UPDATE
 
         bool inboxStored = false;
         bool pushSent = false;
+        Dictionary<string, string> payload = NotificationRoutes.Standardize(title, body, data, DateTime.UtcNow);
         try
         {
-            await SaveInboxNotificationAsync(usuario, title, body, data);
+            long inboxId = await SaveInboxNotificationAsync(usuario, title, body, payload);
             inboxStored = true;
+            if (inboxId > 0) payload["inboxId"] = inboxId.ToString(CultureInfo.InvariantCulture);
         }
         catch (Exception ex)
         {
@@ -258,7 +261,7 @@ ON DUPLICATE KEY UPDATE
 
         try
         {
-            pushSent = await SendFcmToUserAsync(usuario, title, body, data);
+            pushSent = await SendFcmToUserAsync(usuario, title, body, payload);
         }
         catch (Exception ex)
         {
@@ -292,7 +295,7 @@ ON DUPLICATE KEY UPDATE
 
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
         var tokens = (await conn.QueryAsync<FcmTokenRow>(
-            "SELECT id, token FROM fcm_tokens WHERE usuario = @usuario AND active = 1 AND session_active = 1",
+            "SELECT id, token, platform FROM fcm_tokens WHERE usuario = @usuario AND active = 1 AND session_active = 1",
             new { usuario })).ToList();
 
         if (tokens.Count == 0)
@@ -321,6 +324,21 @@ ON DUPLICATE KEY UPDATE
                     Priority = Priority.High
                 }
             };
+
+            if (string.Equals(row.Platform, "web", StringComparison.OrdinalIgnoreCase))
+            {
+                string severity = payload.TryGetValue("severity", out string? severityValue)
+                    ? severityValue
+                    : NotificationRoutes.Info;
+                message.Webpush = new WebpushConfig
+                {
+                    Headers = new Dictionary<string, string>
+                    {
+                        ["Urgency"] = "high",
+                        ["TTL"] = NotificationRoutes.TimeToLiveSeconds(severity).ToString(CultureInfo.InvariantCulture)
+                    }
+                };
+            }
 
             try
             {
@@ -354,6 +372,52 @@ ON DUPLICATE KEY UPDATE
     {
         public long Id { get; set; }
         public string Token { get; set; } = string.Empty;
+        public string Platform { get; set; } = string.Empty;
+    }
+
+    private sealed class InboxRow
+    {
+        public long Id { get; set; }
+        public string Type { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public string Body { get; set; } = string.Empty;
+        public string? CrefAgrupada { get; set; }
+        public DateTime? CreatedAt { get; set; }
+        public DateTime? ReadAt { get; set; }
+        public string? DataJson { get; set; }
+    }
+
+    private static Dictionary<string, string> ParseInboxData(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new Dictionary<string, string>();
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+        }
+        catch (JsonException)
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    private static NotificationInboxItem ToInboxItem(InboxRow row)
+    {
+        Dictionary<string, string> data = ParseInboxData(row.DataJson);
+        return new NotificationInboxItem
+        {
+            Id = row.Id,
+            Type = row.Type,
+            Title = row.Title,
+            Body = row.Body,
+            CrefAgrupada = row.CrefAgrupada,
+            CreatedAt = row.CreatedAt,
+            ReadAt = row.ReadAt,
+            Url = NotificationRoutes.WebUrlFor(row.Type, data),
+            Severity = data.TryGetValue("severity", out string? severity) && !string.IsNullOrWhiteSpace(severity)
+                ? severity
+                : NotificationRoutes.SeverityFor(row.Type),
+            Data = data
+        };
     }
 
     public async Task SendSalidaBloqueoAsync(SalidaBloqueoNotification notification, string usuarioOperador)
@@ -497,13 +561,13 @@ WHERE TABLE_SCHEMA = DATABASE()
         }
     }
 
-    private async Task SaveInboxNotificationAsync(
+    private async Task<long> SaveInboxNotificationAsync(
         string usuario,
         string title,
         string body,
         IDictionary<string, string>? data)
     {
-        if (string.IsNullOrWhiteSpace(usuario)) return;
+        if (string.IsNullOrWhiteSpace(usuario)) return 0;
 
         await EnsureInboxSchemaAsync();
 
@@ -516,11 +580,12 @@ WHERE TABLE_SCHEMA = DATABASE()
         string? dataJson = data == null ? null : JsonSerializer.Serialize(data);
 
         using IDbConnection conn = _db.CreatePmmutileriaConnection();
-        await conn.ExecuteAsync(@"
+        long inboxId = await conn.ExecuteScalarAsync<long>(@"
 INSERT INTO notificaciones_usuario
-    (usuario, tipo, titulo, mensaje, cref_agrupada, datos_json)
+    (usuario, tipo, titulo, mensaje, cref_agrupada, datos_json, fecha_creada)
 VALUES
-    (@usuario, @type, @title, @body, @crefAgrupada, @dataJson)",
+    (@usuario, @type, @title, @body, @crefAgrupada, @dataJson, NOW());
+SELECT LAST_INSERT_ID();",
             new
             {
                 usuario,
@@ -532,6 +597,7 @@ VALUES
             });
 
         _logger.LogInformation("Notificación guardada en bandeja para {Usuario}: {Title}.", usuario, title);
+        return inboxId;
     }
 
     public async Task<NotificationInboxResponse> GetInboxAsync(
@@ -552,7 +618,7 @@ VALUES
         int unreadCount = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM notificaciones_usuario WHERE usuario = @usuario AND fecha_leida IS NULL",
             new { usuario });
-        IReadOnlyList<NotificationInboxItem> items = (await conn.QueryAsync<NotificationInboxItem>($@"
+        IReadOnlyList<InboxRow> rows = (await conn.QueryAsync<InboxRow>($@"
 SELECT
     id AS Id,
     tipo AS Type,
@@ -560,12 +626,14 @@ SELECT
     mensaje AS Body,
     cref_agrupada AS CrefAgrupada,
     fecha_creada AS CreatedAt,
-    fecha_leida AS ReadAt
+    fecha_leida AS ReadAt,
+    datos_json AS DataJson
 FROM notificaciones_usuario
 WHERE usuario = @usuario {unreadFilter}
-ORDER BY fecha_creada DESC
+ORDER BY id DESC
 LIMIT @limit",
             new { usuario, limit })).AsList();
+        IReadOnlyList<NotificationInboxItem> items = rows.Select(ToInboxItem).ToList();
 
         return new NotificationInboxResponse
         {
