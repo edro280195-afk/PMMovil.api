@@ -1,4 +1,5 @@
 using System.Data;
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 using Dapper;
@@ -42,9 +43,28 @@ public class EntradaService
         _share = share;
     }
 
-    public async Task<ConsecutivoResult> ObtenerConsecutivoAsync()
+    /// <summary>
+    /// El número de la siguiente entrada de bodega.
+    /// <para>
+    /// <paramref name="soloVista"/> = <c>false</c> (lo que piden las apps instaladas): el número se APARTA, es decir, el
+    /// contador avanza en este instante. Si la entrada no se guarda (captura abandonada, red que se cae con la respuesta ya
+    /// dada, un reintento, una prueba) ese número se pierde y queda un hueco en la numeración.
+    /// </para>
+    /// <para>
+    /// <paramref name="soloVista"/> = <c>true</c>: vista previa. Solo se LEE, el contador no se mueve ni se bloquea. El
+    /// definitivo lo asigna el guardado dentro de su propia transacción (<see cref="GuardarRecepcionAsync"/> con
+    /// <c>ConsecutivoAlGuardar</c>), igual que Caseta toma su folio al insertar el registro.
+    /// </para>
+    /// </summary>
+    public async Task<ConsecutivoResult> ObtenerConsecutivoAsync(bool soloVista = false)
     {
-        var result = new ConsecutivoResult { Success = false };
+        // Apagador: con Entrada:ConsecutivoVistaPrevia = false el servidor deja de ofrecer la vista previa y vuelve a apartar
+        // el número al pedirlo (lo de antes), sin tocar las tabletas. Un guardado que ya trae ConsecutivoAlGuardar sigue
+        // asignando el número al guardar: eso es correcto con o sin vista previa.
+        if (soloVista && !_config.GetValue("Entrada:ConsecutivoVistaPrevia", true))
+            soloVista = false;
+
+        var result = new ConsecutivoResult { Success = false, Tentativo = soloVista };
 
         using IDbConnection conn = _db.CreateConnection();
         conn.Open();
@@ -52,8 +72,15 @@ public class EntradaService
         using var tran = conn.BeginTransaction();
         try
         {
+            // Apartar bloquea el renglón del contador para que dos peticiones no reciban el mismo número; la vista previa
+            // no lo bloquea porque no escribe nada.
+            string sqlContador = soloVista
+                ? "SELECT numero FROM consecutivo WHERE formulario = @formulario"
+                : "SELECT numero FROM consecutivo WHERE formulario = @formulario FOR UPDATE";
+
             var numeroObj = await conn.ExecuteScalarAsync(
-                "SELECT numero FROM consecutivo WHERE formulario = '01C' FOR UPDATE",
+                sqlContador,
+                new { formulario = EntradaConsecutivo.Formulario },
                 transaction: tran);
 
             if (numeroObj == null || numeroObj is DBNull)
@@ -72,48 +99,38 @@ public class EntradaService
                 return result;
             }
 
-            string year = DateTime.Now.Year.ToString()[^2..];
-            int originalNumero = numero;
-            int skipCount = 0;
-            const int maxSkips = 1000;
-
-            while (skipCount < maxSkips)
-            {
-                int current = originalNumero + skipCount;
-                string referencia = $"01C{year}{current}0000";
-
-                int existe = await conn.ExecuteScalarAsync<int>(
+            AsignacionConsecutivo? libre = await EntradaConsecutivo.BuscarLibreAsync(
+                numero,
+                EntradaConsecutivo.PrefijoPorOmision(DateTime.Now),
+                EntradaConsecutivo.SufijoPorOmision,
+                async referencia => await conn.ExecuteScalarAsync<int>(
                     "SELECT COUNT(1) FROM traf WHERE creferencia = @ref",
                     new { @ref = referencia },
-                    transaction: tran);
+                    transaction: tran) > 0);
 
-                if (existe == 0)
-                {
-                    numero = current;
-                    break;
-                }
-
-                skipCount++;
-            }
-
-            if (skipCount >= maxSkips)
+            if (libre == null)
             {
-                result.Message = "No se pudo generar un consecutivo disponible después de 1000 intentos.";
+                result.Message = $"No se pudo generar un consecutivo disponible después de {EntradaConsecutivo.MaxSaltos} intentos.";
                 tran.Rollback();
                 return result;
             }
 
-            await conn.ExecuteAsync(
-                "UPDATE consecutivo SET numero = numero + @inc WHERE formulario = '01C'",
-                new { inc = 1 + skipCount },
-                transaction: tran);
+            if (!soloVista)
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE consecutivo SET numero = numero + @inc WHERE formulario = @formulario",
+                    new { inc = libre.Incremento, formulario = EntradaConsecutivo.Formulario },
+                    transaction: tran);
+            }
 
-            DebugLog.Write("OBTENER_CONSECUTIVO", new { numero, skipCount });
+            DebugLog.Write(
+                soloVista ? "VER_CONSECUTIVO" : "OBTENER_CONSECUTIVO",
+                new { numero = libre.Numero, skipCount = libre.Saltos });
 
             tran.Commit();
 
             result.Success = true;
-            result.Numero = numero.ToString();
+            result.Numero = libre.Numero.ToString(CultureInfo.InvariantCulture);
         }
         catch
         {
@@ -122,6 +139,50 @@ public class EntradaService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Toma el número de la entrada DENTRO de la transacción del guardado, como Caseta toma su folio: bloquea el renglón
+    /// del contador, busca el primer número libre y lo avanza. Si el guardado falla, la transacción se revierte y el
+    /// contador no se mueve, así que no queda ningún hueco. Dos guardados al mismo tiempo se ponen en fila en ese
+    /// candado, por eso cada uno recibe un número distinto. Los tramos de la referencia que no son el consecutivo se
+    /// toman de lo que mandó la app (con lo que falte completado como siempre).
+    /// </summary>
+    private static async Task<(AsignacionConsecutivo? Asignacion, PartesReferencia Partes, string? Error)> AsignarConsecutivoAlGuardarAsync(
+        IDbConnection conn, IDbTransaction tran, GuardarRecepcionRequest datos, DateTime ahora)
+    {
+        PartesReferencia partes = EntradaConsecutivo.Partes(datos.Ref1, datos.Ref2, datos.Ref3, datos.Ref5, datos.Ref6, ahora);
+
+        object? contador = await conn.ExecuteScalarAsync(
+            "SELECT numero FROM consecutivo WHERE formulario = @formulario FOR UPDATE",
+            new { formulario = EntradaConsecutivo.Formulario },
+            transaction: tran);
+
+        if (contador == null || contador is DBNull)
+            return (null, partes, "No se encontró el consecutivo para formulario '01C'.");
+
+        int numero = Convert.ToInt32(contador);
+        if (numero < 0)
+            return (null, partes, "El consecutivo tiene un valor inválido.");
+
+        AsignacionConsecutivo? libre = await EntradaConsecutivo.BuscarLibreAsync(
+            numero,
+            partes.Prefijo,
+            partes.Sufijo,
+            async referencia => await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(1) FROM traf WHERE creferencia = @ref",
+                new { @ref = referencia },
+                transaction: tran) > 0);
+
+        if (libre == null)
+            return (null, partes, $"No se pudo asignar un consecutivo disponible después de {EntradaConsecutivo.MaxSaltos} intentos.");
+
+        await conn.ExecuteAsync(
+            "UPDATE consecutivo SET numero = numero + @inc WHERE formulario = @formulario",
+            new { inc = libre.Incremento, formulario = EntradaConsecutivo.Formulario },
+            transaction: tran);
+
+        return (libre, partes, null);
     }
 
     public async Task<CatalogosEntradaResult> ObtenerCatalogosAsync()
@@ -569,7 +630,12 @@ LIMIT @take", new { fromDate, take })).ToList(),
     {
         var resultado = new ResultadoOperacion { Success = false };
 
-        if (string.IsNullOrWhiteSpace(datos.Ref4))
+        // Con ConsecutivoAlGuardar el número que trae la app es solo una vista previa (GET Entrada/consecutivo?vista=true):
+        // el servidor asigna el definitivo dentro de la transacción, más abajo. Sin esa bandera (las apps instaladas) la
+        // referencia ya viene apartada por GET Entrada/consecutivo y es obligatoria.
+        bool asignarAlGuardar = datos.ConsecutivoAlGuardar == true;
+
+        if (!asignarAlGuardar && string.IsNullOrWhiteSpace(datos.Ref4))
         {
             resultado.Message = "La referencia (consecutivo) es obligatoria.";
             return resultado;
@@ -587,6 +653,18 @@ LIMIT @take", new { fromDate, take })).ToList(),
         if (datos.Detalles == null || datos.Detalles.Count == 0)
         {
             resultado.Message = "Debes agregar al menos un artículo de mercancía.";
+            return resultado;
+        }
+
+        // Cada bulto de la entrada lleva una fila en etiqueta_mcia (ver EntradaEtiquetas). Un total absurdo —un cero de más al
+        // teclear— inundaría la tabla y la app imprimiría esa cantidad de etiquetas: se rechaza antes de abrir la transacción.
+        // PIPA y EXPO no llevan etiquetas en el legacy (0 de 126 y 1 de 38 desde el 15-sep): se guardan sin ellas, como él.
+        bool llevaEtiquetas = EntradaEtiquetas.LlevaEtiquetas(datos.Manejo);
+        int totalBultos = EntradaEtiquetas.TotalBultos(datos.Detalles.Select(d => d.Cantidad));
+        string? errorBultos = llevaEtiquetas ? EntradaEtiquetas.MensajeTotalInvalido(totalBultos) : null;
+        if (errorBultos != null)
+        {
+            resultado.Message = errorBultos;
             return resultado;
         }
 
@@ -628,7 +706,8 @@ LIMIT @take", new { fromDate, take })).ToList(),
             ref4 = datos.Ref4,
             ref5 = datos.Ref5,
             ref6 = datos.Ref6,
-            referencia
+            referencia,
+            asignarAlGuardar
         });
 
         using IDbConnection conn = _db.CreateConnection();
@@ -642,6 +721,39 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
         try
         {
+            // Lo primero dentro de la transacción: el número se toma aquí, junto con el INSERT de la entrada. Si algo
+            // falla más abajo, todo se revierte, contador incluido, y el número queda libre para la siguiente captura.
+            if (asignarAlGuardar)
+            {
+                string referenciaDeLaApp = referencia;
+                (AsignacionConsecutivo? asignacion, PartesReferencia partes, string? errorAsignacion) =
+                    await AsignarConsecutivoAlGuardarAsync(conn, tran, datos, DateTime.Now);
+
+                if (asignacion == null)
+                {
+                    tran.Rollback();
+                    resultado.Message = errorAsignacion ?? "No se pudo asignar el consecutivo de la entrada.";
+                    return resultado;
+                }
+
+                // Desde aquí la entrada es la de la referencia asignada: traf, traf3, trafdet, fotos, enlace y mensaje la
+                // toman de `datos` y de `referencia`.
+                datos.Ref1 = partes.Ref1;
+                datos.Ref2 = partes.Ref2;
+                datos.Ref3 = partes.Ref3;
+                datos.Ref4 = asignacion.Numero.ToString(CultureInfo.InvariantCulture);
+                datos.Ref5 = partes.Ref5;
+                datos.Ref6 = partes.Ref6;
+                referencia = asignacion.Referencia;
+
+                DebugLog.Write("GUARDAR_ENTRADA_CONSECUTIVO_ASIGNADO", new
+                {
+                    referenciaDeLaApp,
+                    referencia,
+                    saltos = asignacion.Saltos
+                });
+            }
+
             int existeReferencia = await conn.ExecuteScalarAsync<int>(
            "SELECT COUNT(1) FROM traf WHERE creferencia = @referencia",
            new { referencia },
@@ -800,6 +912,15 @@ LIMIT @take", new { fromDate, take })).ToList(),
                 }
             }
 
+            // Los bultos quedan registrados en etiqueta_mcia (una fila por bulto, con el mismo texto que lleva el QR de cada
+            // etiqueta que imprime la app) en ESTA transacción, como hace el legacy al generar la entrada: sin esas filas
+            // Cargar mercancía no encuentra los bultos y la relación no se puede cargar. Si el registro falla se revierte
+            // toda la entrada y la app lo avisa; así no queda una entrada que nadie puede cargar sin que se note.
+            int etiquetasRegistradas = llevaEtiquetas
+                ? await EntradaEtiquetas.RegistrarAsync(conn, tran, referencia, totalBultos, usuarioActual)
+                : 0;
+            DebugLog.Write("GUARDAR_ENTRADA_ETIQUETAS", new { referencia, manejo = datos.Manejo, llevaEtiquetas, totalBultos, etiquetasRegistradas });
+
             if (datos.Fotos.Count > 0)
             {
                 string? clienteCarpeta = await conn.QueryFirstOrDefaultAsync<string>(
@@ -886,6 +1007,11 @@ LIMIT @take", new { fromDate, take })).ToList(),
 
             resultado.Success = true;
             resultado.RecepcionId = int.TryParse(datos.Ref4, out int parsedId) ? parsedId : 0;
+
+            // La referencia con la que quedó: la que lleva la etiqueta y bajo la que se suben las fotos. Cuando el servidor
+            // la asignó al guardar puede no ser la que la app mostró de vista previa, por eso se devuelve siempre.
+            resultado.Referencia = referencia;
+            resultado.Ref4 = datos.Ref4;
 
             // Notificación por correo desactivada a pedido del usuario (2026-08-12):
             // al guardar, la app regresa directo al listado sin ese paso.

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace PMMovil.Api.Models;
 
 public class CatalogoEntradaItem
@@ -22,6 +24,13 @@ public class ConsecutivoResult
     public bool Success { get; set; }
     public string Numero { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
+
+    /// <summary>
+    /// <c>true</c> = el número es solo una vista previa: NO se consumió y el servidor asigna el definitivo al guardar (la
+    /// app debe mandar <see cref="GuardarRecepcionRequest.ConsecutivoAlGuardar"/> y adoptar el que regrese el guardado).
+    /// <c>false</c> (lo que ya conocen las apps instaladas) = el número quedó apartado para quien lo pidió.
+    /// </summary>
+    public bool Tentativo { get; set; }
 }
 
 public class DetalleRecepcion
@@ -82,6 +91,14 @@ public class GuardarRecepcionRequest
     /// por llegar» en el enlace público.
     /// </summary>
     public int? FotosDanioPendientes { get; set; }
+
+    /// <summary>
+    /// <c>true</c> = el número que trae <see cref="Ref4"/> era solo una vista previa (<c>GET Entrada/consecutivo?vista=true</c>)
+    /// y el servidor debe tomar el siguiente libre DENTRO de la transacción del guardado, como hace Caseta con su folio. El
+    /// número asignado regresa en <see cref="ResultadoOperacion.Ref4"/> y puede ser otro si alguien más guardó primero.
+    /// <c>null</c>/<c>false</c> (apps instaladas) = <see cref="Ref4"/> es el número ya apartado y se usa tal cual.
+    /// </summary>
+    public bool? ConsecutivoAlGuardar { get; set; }
 }
 
 public class EntradaFrequentItem
@@ -97,4 +114,15 @@ public class ResultadoOperacion
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public int? RecepcionId { get; set; }
+
+    /// <summary>
+    /// Solo al guardar una entrada: la referencia completa con la que quedó (<c>01C263618970000</c>). Es la definitiva:
+    /// la que debe llevar la etiqueta y bajo la que se suben las fotos. Se omite en el resto de las respuestas.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Referencia { get; set; }
+
+    /// <summary>Solo al guardar una entrada: el consecutivo (tramo 4) con el que quedó, ej. <c>361897</c>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Ref4 { get; set; }
 }

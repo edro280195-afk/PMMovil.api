@@ -53,12 +53,16 @@ public class EntradaController : ControllerBase
         }
     }
 
+    // Sin parámetros (las apps instaladas) el número se aparta: el contador avanza en este instante. Con vista=true solo se
+    // consulta cuál sería el siguiente, sin consumirlo (Tentativo = true en la respuesta); el definitivo lo asigna el
+    // guardado dentro de su transacción, como hace Caseta con su folio. Nunca debe quedar en caché de nadie.
     [HttpGet("consecutivo")]
-    public async Task<IActionResult> ObtenerConsecutivo()
+    public async Task<IActionResult> ObtenerConsecutivo([FromQuery] bool vista = false)
     {
         try
         {
-            var result = await _entradaService.ObtenerConsecutivoAsync();
+            var result = await _entradaService.ObtenerConsecutivoAsync(vista);
+            Response.Headers.CacheControl = "no-store";
             return Ok(result);
         }
         catch (Exception ex)
